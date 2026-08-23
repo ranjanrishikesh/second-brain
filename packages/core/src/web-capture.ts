@@ -11,6 +11,7 @@ import {
 } from "./query.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import { recoverBrain } from "./transaction.js";
 
 const webCaptureInputSchema = z.object({
   url: z.url(),
@@ -149,7 +150,13 @@ export async function captureWebEvidence(
     await writeQuerySession(root, session);
     return { source, session, created: true };
   } catch (error) {
-    if (!registered) await rm(absolutePath, { force: true });
+    if (!registered) {
+      await recoverBrain(root).catch(() => undefined);
+      const canonicalSource = (await readSources(root)).find(
+        (source) => source.path === relativePath,
+      );
+      if (!canonicalSource) await rm(absolutePath, { force: true });
+    }
     throw error;
   }
 }
