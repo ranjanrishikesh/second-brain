@@ -4,6 +4,7 @@ import path from "node:path";
 import JSZip from "jszip";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import { initBrain, scanSources, supersedeSource } from "../src/index.js";
 
 describe("scanSources", () => {
@@ -281,6 +282,52 @@ describe("scanSources", () => {
       extractor: "json-v1",
     });
     expect(result.added[0]?.error).toContain("JSON");
+  });
+
+  test("registers but does not extract a file above the configured size limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-large-source-"));
+    await initBrain(root, { name: "Test", description: "Size limit test" });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 16;
+    await writeFile(configPath, stringify(config));
+    await writeFile(
+      path.join(root, "sources", "too-large.txt"),
+      "This source is definitely larger than sixteen bytes.\n",
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "none",
+    });
+    expect(result.added[0]?.error).toMatch(/exceeds.*16 bytes/i);
+  });
+
+  test("rejects EPUB archives containing traversal entry names", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-epub-traversal-"));
+    await initBrain(root, { name: "Test", description: "EPUB safety test" });
+    const archive = new JSZip();
+    archive.file("mimetype", "application/epub+zip");
+    archive.file("../outside.xhtml", "<p>Unsafe</p>");
+    archive.file(
+      "META-INF/container.xml",
+      '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+    );
+    archive.file(
+      "OEBPS/content.opf",
+      '<?xml version="1.0"?><package><metadata><title>Unsafe</title></metadata><manifest></manifest><spine></spine></package>',
+    );
+    await writeFile(
+      path.join(root, "sources", "unsafe.epub"),
+      await archive.generateAsync({ type: "uint8array" }),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({ extractionStatus: "failed" });
+    expect(result.added[0]?.error).toMatch(/unsafe epub path/i);
   });
 
   test("supersedes an immutable source while retaining both versions", async () => {

@@ -31,6 +31,8 @@ export {
   wikiPageV1Schema,
 } from "./wiki/types.js";
 export {
+  auditIssueV1Schema,
+  auditReportV1Schema,
   calculateCatalogRevision,
   loadWikiPages,
   validateWikiGraph,
@@ -47,7 +49,11 @@ export type {
   RelationV1,
   WikiPageV1,
 } from "./wiki/types.js";
-export { applyChangeSetTransaction, recoverBrain } from "./transaction.js";
+export {
+  applyChangeSetTransaction,
+  operationRecordV1Schema,
+  recoverBrain,
+} from "./transaction.js";
 export type {
   OperationRecordV1,
   TransactionResult,
@@ -67,7 +73,11 @@ export type {
   BootstrapBatchV1,
   BootstrapSourceContextV1,
 } from "./query.js";
-export { scanAndRegisterSources } from "./source-transaction.js";
+export {
+  scanAndRegisterSources,
+  supersedeRegisteredSource,
+} from "./source-transaction.js";
+export type { SourceSupersessionResult } from "./source-transaction.js";
 export { captureWebEvidence } from "./web-capture.js";
 export type { WebCaptureInput, WebCaptureResult } from "./web-capture.js";
 export { attachQueryChange, finishQuery } from "./query-finish.js";
@@ -80,6 +90,8 @@ export {
   nextSemanticAuditBatch,
   recordSemanticAuditBatch,
 } from "./audit.js";
+export { readBrainItem, statusBrain } from "./status-read.js";
+export type { BrainReadResultV1, BrainStatusV1 } from "./status-read.js";
 export type {
   RecordSemanticAuditInput,
   RecordSemanticAuditResult,

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { z } from "zod";
 import { loadBrainConfig } from "../config.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "../sources/types.js";
 import {
@@ -11,24 +12,28 @@ import {
 } from "./page.js";
 import type { WikiPageV1 } from "./types.js";
 
-export interface AuditIssueV1 {
-  code: string;
-  severity: "error" | "warning";
-  message: string;
-  pageId?: string;
-  targetId?: string;
-  path?: string;
-}
+export const auditIssueV1Schema = z.object({
+  code: z.string().min(1),
+  severity: z.enum(["error", "warning"]),
+  message: z.string().min(1),
+  pageId: z.string().optional(),
+  targetId: z.string().optional(),
+  path: z.string().optional(),
+});
 
-export interface AuditReportV1 {
-  version: 1;
-  ok: boolean;
-  catalogRevision: string;
-  pageCount: number;
-  edgeCount: number;
-  orphanPageIds: string[];
-  issues: AuditIssueV1[];
-}
+export type AuditIssueV1 = z.infer<typeof auditIssueV1Schema>;
+
+export const auditReportV1Schema = z.object({
+  version: z.literal(1),
+  ok: z.boolean(),
+  catalogRevision: z.string().min(1),
+  pageCount: z.number().int().nonnegative(),
+  edgeCount: z.number().int().nonnegative(),
+  orphanPageIds: z.array(z.string()),
+  issues: z.array(auditIssueV1Schema),
+});
+
+export type AuditReportV1 = z.infer<typeof auditReportV1Schema>;
 
 async function pageFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

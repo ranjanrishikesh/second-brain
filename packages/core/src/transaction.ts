@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import {
   loadWikiPages,
@@ -23,24 +24,31 @@ import type { ChangeSetV1, WikiPageV1 } from "./wiki/types.js";
 
 const execFile = promisify(execFileCallback);
 
-export interface OperationRecordV1 {
-  version: 1;
-  id: string;
-  kind:
-    | "apply"
-    | "query"
-    | "source-scan"
-    | "bootstrap"
-    | "audit"
-    | "web-capture";
-  status: "completed" | "unanswered" | "partial";
-  startedAt: string;
-  completedAt: string;
-  summary: string;
-  pageIds: string[];
-  tiersUsed: Array<"wiki" | "sources" | "web">;
-  queryId?: string;
-}
+export const operationRecordV1Schema = z.object({
+  version: z.literal(1),
+  id: z.string().trim().min(1),
+  kind: z.enum([
+    "apply",
+    "query",
+    "source-scan",
+    "source-supersede",
+    "bootstrap",
+    "audit",
+    "web-capture",
+  ]),
+  status: z.enum(["completed", "unanswered", "partial"]),
+  startedAt: z.iso.datetime(),
+  completedAt: z.iso.datetime(),
+  summary: z.string().trim().min(1),
+  pageIds: z.array(z.string()),
+  tiersUsed: z.array(z.enum(["wiki", "sources", "web"])),
+  queryId: z
+    .string()
+    .regex(/^qry_[a-f0-9]{32}$/)
+    .optional(),
+});
+
+export type OperationRecordV1 = z.infer<typeof operationRecordV1Schema>;
 
 export interface TransactionResult {
   operationId: string;

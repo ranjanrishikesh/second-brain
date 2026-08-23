@@ -124,4 +124,124 @@ describe("brain CLI", () => {
     expect(exitCode).toBe(0);
     expect(JSON.parse(output.join(""))[0].path).toBe("sources/note.md");
   });
+
+  test("reports status and reads a source locator as JSON", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-status-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Status",
+        "--description",
+        "Status CLI test",
+      ],
+      { write: () => undefined },
+    );
+    await writeFile(
+      path.join(root, "sources", "stars.md"),
+      "# Stars\n\nStars emit light.\n",
+    );
+    const scanOutput: string[] = [];
+    await runCli(["source", "scan", "--root", root, "--json"], {
+      write: (value) => scanOutput.push(value),
+    });
+    const sourceId = JSON.parse(scanOutput.join("")).added[0].id as string;
+    const statusOutput: string[] = [];
+    const readOutput: string[] = [];
+
+    expect(
+      await runCli(["status", "--root", root, "--json"], {
+        write: (value) => statusOutput.push(value),
+      }),
+    ).toBe(0);
+    expect(
+      await runCli(
+        [
+          "read",
+          sourceId,
+          "--locator",
+          "heading=stars",
+          "--root",
+          root,
+          "--json",
+        ],
+        { write: (value) => readOutput.push(value) },
+      ),
+    ).toBe(0);
+
+    expect(JSON.parse(statusOutput.join(""))).toMatchObject({
+      sources: { total: 1, ready: 1 },
+      bootstrap: { required: true },
+    });
+    expect(JSON.parse(readOutput.join(""))).toMatchObject({
+      kind: "source",
+      chunks: [{ locator: "heading=stars" }],
+    });
+  });
+
+  test("exposes the query tier lifecycle as typed JSON commands", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-query-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Queries",
+        "--description",
+        "Query CLI test",
+      ],
+      { write: () => undefined },
+    );
+    const beginOutput: string[] = [];
+    await runCli(
+      ["query", "begin", "What is a pulsar?", "--root", root, "--json"],
+      { write: (value) => beginOutput.push(value) },
+    );
+    const session = JSON.parse(beginOutput.join("")) as { id: string };
+    const sourceOutput: string[] = [];
+    const webOutput: string[] = [];
+
+    await runCli(
+      [
+        "query",
+        "expand",
+        session.id,
+        "--tier",
+        "sources",
+        "--reason",
+        "The wiki has no answer.",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: (value) => sourceOutput.push(value) },
+    );
+    await runCli(
+      [
+        "query",
+        "expand",
+        session.id,
+        "--tier",
+        "web",
+        "--reason",
+        "The sources have no answer.",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: (value) => webOutput.push(value) },
+    );
+
+    expect(JSON.parse(sourceOutput.join(""))).toMatchObject({
+      currentTier: "sources",
+      tiersUsed: ["wiki", "sources"],
+    });
+    expect(JSON.parse(webOutput.join(""))).toMatchObject({
+      currentTier: "web",
+      tiersUsed: ["wiki", "sources", "web"],
+    });
+  });
 });

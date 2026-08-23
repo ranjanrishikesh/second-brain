@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
@@ -84,6 +85,16 @@ function sha256(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+async function sha256File(filePath: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
 async function readManifest(root: string): Promise<SourceManifestV1> {
   const raw = JSON.parse(
     await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
@@ -123,8 +134,12 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
         .split(path.sep)
         .join("/");
       seenPaths.add(relativePath);
-      const content = await readFile(absolutePath);
-      const digest = sha256(content);
+      const fileStats = await stat(absolutePath);
+      const exceedsSizeLimit = fileStats.size > config.sources.maxFileBytes;
+      const content = exceedsSizeLimit
+        ? undefined
+        : await readFile(absolutePath);
+      const digest = content ? sha256(content) : await sha256File(absolutePath);
       const registered = registeredByPath.get(relativePath);
       if (registered) {
         if (registered.sha256 === digest) result.unchanged.push(registered);
@@ -144,10 +159,9 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
 
       const extension = path.extname(absolutePath).toLowerCase();
       const id = `src_${digest.slice(0, 16)}`;
-      const fileStats = await stat(absolutePath);
       const markdown = extension === ".md" || extension === ".markdown";
       const webCapture = markdown
-        ? readWebCaptureMetadata(content.toString("utf8"))
+        ? readWebCaptureMetadata(content?.toString("utf8") ?? "")
         : undefined;
       const plainText = extension === ".txt";
       const html = extension === ".html" || extension === ".htm";
@@ -158,38 +172,50 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
       const pdf = extension === ".pdf";
       const epub = extension === ".epub";
       let extracted: ExtractedSourceV1 | undefined;
-      let extractionError: string | undefined;
+      let extractionError = exceedsSizeLimit
+        ? `Source exceeds configured maximum of ${config.sources.maxFileBytes} bytes`
+        : undefined;
       try {
-        extracted = markdown
-          ? extractMarkdown(id, relativePath, content.toString("utf8"))
-          : plainText
-            ? extractText(id, relativePath, content.toString("utf8"))
-            : html
-              ? extractHtml(id, relativePath, content.toString("utf8"))
-              : json
-                ? extractJson(id, relativePath, content.toString("utf8"))
-                : jsonLines
-                  ? extractJsonLines(id, relativePath, content.toString("utf8"))
-                  : csv || tsv
-                    ? extractCsv(
+        extracted = exceedsSizeLimit
+          ? undefined
+          : markdown
+            ? extractMarkdown(id, relativePath, content?.toString("utf8") ?? "")
+            : plainText
+              ? extractText(id, relativePath, content?.toString("utf8") ?? "")
+              : html
+                ? extractHtml(id, relativePath, content?.toString("utf8") ?? "")
+                : json
+                  ? extractJson(
+                      id,
+                      relativePath,
+                      content?.toString("utf8") ?? "",
+                    )
+                  : jsonLines
+                    ? extractJsonLines(
                         id,
                         relativePath,
-                        content.toString("utf8"),
-                        tsv ? "\t" : ",",
+                        content?.toString("utf8") ?? "",
                       )
-                    : pdf
-                      ? await extractPdf(
+                    : csv || tsv
+                      ? extractCsv(
                           id,
                           relativePath,
-                          new Uint8Array(content),
+                          content?.toString("utf8") ?? "",
+                          tsv ? "\t" : ",",
                         )
-                      : epub
-                        ? await extractEpub(
+                      : pdf
+                        ? await extractPdf(
                             id,
                             relativePath,
-                            new Uint8Array(content),
+                            new Uint8Array(content ?? []),
                           )
-                        : undefined;
+                        : epub
+                          ? await extractEpub(
+                              id,
+                              relativePath,
+                              new Uint8Array(content ?? []),
+                            )
+                          : undefined;
       } catch (error) {
         extractionError =
           error instanceof Error
@@ -231,23 +257,25 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
               ? "extraction-required"
               : "ready"
             : "unsupported",
-        extractor: markdown
-          ? "markdown-v1"
-          : plainText
-            ? "text-v1"
-            : html
-              ? "html-v1"
-              : json
-                ? "json-v1"
-                : jsonLines
-                  ? "jsonl-v1"
-                  : csv || tsv
-                    ? "delimited-v1"
-                    : pdf
-                      ? "pdf-v1"
-                      : epub
-                        ? "epub-v1"
-                        : "none",
+        extractor: exceedsSizeLimit
+          ? "none"
+          : markdown
+            ? "markdown-v1"
+            : plainText
+              ? "text-v1"
+              : html
+                ? "html-v1"
+                : json
+                  ? "json-v1"
+                  : jsonLines
+                    ? "jsonl-v1"
+                    : csv || tsv
+                      ? "delimited-v1"
+                      : pdf
+                        ? "pdf-v1"
+                        : epub
+                          ? "epub-v1"
+                          : "none",
         provenance: webCapture
           ? {
               kind: "web",

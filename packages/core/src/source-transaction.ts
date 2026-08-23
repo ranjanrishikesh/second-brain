@@ -5,7 +5,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { loadBrainConfig } from "./config.js";
 import { scanSources } from "./sources/scan.js";
+import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
+import type { SourceRecordV1 } from "./sources/types.js";
 import type { OperationRecordV1 } from "./transaction.js";
 
 const execFile = promisify(execFileCallback);
@@ -181,6 +183,130 @@ export async function scanAndRegisterSources(
       }
     }
     return result;
+  } finally {
+    await rm(lockPath, { force: true });
+  }
+}
+
+export interface SourceSupersessionResult {
+  source: SourceRecordV1;
+  operationId: string;
+  commit?: string;
+}
+
+export async function supersedeRegisteredSource(
+  root: string,
+  previousSourceId: string,
+  replacementSourceId: string,
+): Promise<SourceSupersessionResult> {
+  await scanAndRegisterSources(root);
+  const gitRepository = await isGitRepository(root);
+  if (gitRepository) {
+    if (await stagedChangesExist(root)) {
+      throw new Error(
+        "Refusing source supersession while Git has staged changes",
+      );
+    }
+    const dirtyManaged = await git(root, [
+      "status",
+      "--porcelain=v1",
+      "--",
+      "wiki",
+      ".brain/source-manifest.json",
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+    ]);
+    if (dirtyManaged) {
+      throw new Error(
+        `Refusing source supersession with dirty managed files:\n${dirtyManaged}`,
+      );
+    }
+  }
+  const manifestPath = path.join(root, ".brain", "source-manifest.json");
+  const operationsPath = path.join(root, ".brain", "operations.jsonl");
+  const logPath = path.join(root, "wiki", "log.md");
+  const before = new Map<string, string>();
+  for (const filePath of [manifestPath, operationsPath, logPath]) {
+    before.set(filePath, await readFile(filePath, "utf8"));
+  }
+  const runtimePath = path.join(root, ".brain", "runtime");
+  const lockPath = path.join(runtimePath, "source-supersede.lock");
+  await mkdir(runtimePath, { recursive: true });
+  await writeFile(lockPath, `${replacementSourceId}\n`, { flag: "wx" });
+  const operationId = `op_supersede_${randomUUID().replaceAll("-", "")}`;
+  try {
+    const source = await supersedeSource(
+      root,
+      previousSourceId,
+      replacementSourceId,
+    );
+    const now = new Date().toISOString();
+    const operation: OperationRecordV1 = {
+      version: 1,
+      id: operationId,
+      kind: "source-supersede",
+      status: "completed",
+      startedAt: now,
+      completedAt: now,
+      summary: `${replacementSourceId} supersedes ${previousSourceId}`,
+      pageIds: [],
+      tiersUsed: [],
+    };
+    await writeFile(
+      operationsPath,
+      `${before.get(operationsPath) ?? ""}${JSON.stringify(operation)}\n`,
+      "utf8",
+    );
+    await writeFile(
+      logPath,
+      `${(before.get(logPath) ?? "").trimEnd()}\n\n## [${now}] source | Supersede source\n\n- Operation: \`${operationId}\`\n- Replacement: \`${replacementSourceId}\`\n- Supersedes: \`${previousSourceId}\`\n`,
+      "utf8",
+    );
+    let commit: string | undefined;
+    const config = await loadBrainConfig(root);
+    if (gitRepository && config.git.autoCommit) {
+      const preHead = await git(root, ["rev-parse", "HEAD"]);
+      await git(root, [
+        "add",
+        "--",
+        ".brain/source-manifest.json",
+        ".brain/operations.jsonl",
+        "wiki/log.md",
+      ]);
+      if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
+        throw new Error("Git HEAD changed during source supersession");
+      }
+      await git(root, [
+        "commit",
+        "-m",
+        `brain(source): supersede ${previousSourceId} [op:${operationId}]`,
+      ]);
+      commit = await git(root, ["rev-parse", "HEAD"]);
+    }
+    return {
+      source,
+      operationId,
+      ...(commit ? { commit } : {}),
+    };
+  } catch (error) {
+    for (const [filePath, content] of before) {
+      await writeFile(filePath, content, "utf8");
+    }
+    if (gitRepository) {
+      await execFile(
+        "git",
+        [
+          "restore",
+          "--staged",
+          "--",
+          ".brain/source-manifest.json",
+          ".brain/operations.jsonl",
+          "wiki/log.md",
+        ],
+        { cwd: root },
+      ).catch(() => undefined);
+    }
+    throw error;
   } finally {
     await rm(lockPath, { force: true });
   }
