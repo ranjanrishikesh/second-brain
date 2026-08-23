@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { z } from "zod";
 import {
   readQuerySession,
@@ -18,6 +18,20 @@ const webCaptureInputSchema = z.object({
   captureKind: z.enum(["page", "snippet"]),
   content: z.string().trim().min(1),
   retrievedAt: z.iso.datetime().optional(),
+});
+
+const preparedCaptureMetadataSchema = z.object({
+  brainWebCapture: z.literal(1),
+  url: z.url(),
+  retrievedAt: z.iso.datetime(),
+  query: z.string().min(1),
+  captureKind: z.enum(["page", "snippet"]),
+  title: z.string().min(1),
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  supersedes: z
+    .string()
+    .regex(/^src_[a-f0-9]{16}$/)
+    .optional(),
 });
 
 export type WebCaptureInput = z.infer<typeof webCaptureInputSchema>;
@@ -42,6 +56,53 @@ function slugify(value: string): string {
       .replace(/^-|-$/g, "")
       .slice(0, 64) || "web-evidence"
   );
+}
+
+async function filesNamed(
+  directory: string,
+  fileName: string,
+): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(
+    (error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  const matches: string[] = [];
+  for (const entry of entries) {
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      matches.push(...(await filesNamed(absolutePath, fileName)));
+    } else if (entry.isFile() && entry.name === fileName) {
+      matches.push(absolutePath);
+    }
+  }
+  return matches;
+}
+
+function captureRelativePath(retrievedAt: string, fileName: string): string {
+  const retrievedDate = new Date(retrievedAt);
+  const year = String(retrievedDate.getUTCFullYear());
+  const month = String(retrievedDate.getUTCMonth() + 1).padStart(2, "0");
+  return path.posix.join("sources", "web", year, month, fileName);
+}
+
+function readPreparedMetadata(
+  markdown: string,
+  relativePath: string,
+): z.infer<typeof preparedCaptureMetadataSchema> {
+  try {
+    if (!markdown.startsWith("---\n")) throw new Error("Missing frontmatter");
+    const closingMarker = markdown.indexOf("\n---\n", 4);
+    if (closingMarker < 0) throw new Error("Unclosed frontmatter");
+    return preparedCaptureMetadataSchema.parse(
+      parse(markdown.slice(4, closingMarker)),
+    );
+  } catch {
+    throw new Error(
+      `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
+    );
+  }
 }
 
 async function readSources(root: string): Promise<SourceRecordV1[]> {
@@ -90,17 +151,32 @@ export async function captureWebEvidence(
     return { source: duplicate, session, created: false };
   }
 
-  const retrievedAt = input.retrievedAt ?? new Date().toISOString();
-  const retrievedDate = new Date(retrievedAt);
-  const year = String(retrievedDate.getUTCFullYear());
-  const month = String(retrievedDate.getUTCMonth() + 1).padStart(2, "0");
-  const relativePath = path.posix.join(
-    "sources",
-    "web",
-    year,
-    month,
-    `${slugify(input.title)}-${evidenceDigest.slice(0, 12)}.md`,
-  );
+  const fileName = `${slugify(input.title)}-${evidenceDigest.slice(0, 12)}.md`;
+  let retrievedAt = input.retrievedAt ?? new Date().toISOString();
+  let relativePath = captureRelativePath(retrievedAt, fileName);
+  if (!input.retrievedAt) {
+    const preparedPaths = await filesNamed(
+      path.join(root, "sources", "web"),
+      fileName,
+    );
+    if (preparedPaths.length > 1) {
+      throw new Error(`Multiple prepared web captures exist: ${fileName}`);
+    }
+    const preparedPath = preparedPaths[0];
+    if (preparedPath) {
+      relativePath = path
+        .relative(root, preparedPath)
+        .split(path.sep)
+        .join("/");
+      const prepared = await readFile(preparedPath, "utf8");
+      retrievedAt = readPreparedMetadata(prepared, relativePath).retrievedAt;
+      if (captureRelativePath(retrievedAt, fileName) !== relativePath) {
+        throw new Error(
+          `Prepared web evidence path does not match its retrieval time: ${relativePath}`,
+        );
+      }
+    }
+  }
   const previous = sources
     .filter(
       (source) =>

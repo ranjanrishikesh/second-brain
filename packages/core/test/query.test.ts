@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -22,6 +22,23 @@ import {
 } from "../src/index.js";
 
 const execFile = promisify(execFileCallback);
+
+async function findFileNamed(
+  directory: string,
+  fileName: string,
+): Promise<string | undefined> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const absolutePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await findFileNamed(absolutePath, fileName);
+      if (nested) return nested;
+    } else if (entry.isFile() && entry.name === fileName) {
+      return absolutePath;
+    }
+  }
+  return undefined;
+}
 
 async function queryBrain(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-query-"));
@@ -357,20 +374,12 @@ describe("query lifecycle", () => {
       title: "Concurrent capture",
       captureKind: "page" as const,
       content: "The concurrent survey found a candidate.",
-      retrievedAt: "2026-08-23T15:00:00.000Z",
     };
     const digest = createHash("sha256")
       .update(`${input.url}\0${input.content}`)
       .digest("hex")
       .slice(0, 12);
-    const evidencePath = path.join(
-      root,
-      "sources",
-      "web",
-      "2026",
-      "08",
-      `concurrent-capture-${digest}.md`,
-    );
+    const evidenceName = `concurrent-capture-${digest}.md`;
     await writeFile(
       path.join(root, ".brain", "runtime", "writer.lock"),
       `${JSON.stringify({
@@ -384,6 +393,11 @@ describe("query lifecycle", () => {
       /exist|lock|writer/i,
     );
 
+    const evidencePath = await findFileNamed(
+      path.join(root, "sources", "web"),
+      evidenceName,
+    );
+    if (!evidencePath) throw new Error("Expected prepared web evidence");
     const preparedEvidence = await readFile(evidencePath, "utf8");
     expect(preparedEvidence).toContain("concurrent survey found a candidate");
 
@@ -393,6 +407,7 @@ describe("query lifecycle", () => {
       /prepared web evidence bytes do not match/i,
     );
     await writeFile(evidencePath, preparedEvidence);
+    await new Promise((resolve) => setTimeout(resolve, 5));
     const resumed = await captureWebEvidence(root, session.id, input);
 
     expect(resumed.created).toBe(true);
