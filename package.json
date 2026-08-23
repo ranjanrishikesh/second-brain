@@ -1,0 +1,30 @@
+{
+  "name": "portable-second-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.9.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "vitest run test/e2e",
+    "verify:fast": "pnpm lint && pnpm typecheck && pnpm test",
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "brain": "tsx packages/cli/src/main.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.15",
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

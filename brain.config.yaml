@@ -1,0 +1,40 @@
+version: 1
+brain:
+  name: Portable Second Brain
+  description: A self-maintaining personal knowledge base.
+  language: en
+sources:
+  roots:
+    - sources
+  maxFileBytes: 104857600
+bootstrap:
+  mode: catalog-map
+  batchSize: 10
+learning:
+  mode: durable
+web:
+  capture: evidence
+graph:
+  semanticAuditEvery: 25
+  relatedPageLimit: 20
+  pageTypes:
+    - source
+    - topic
+    - entity
+    - concept
+    - synthesis
+    - question
+  relationTypes:
+    - related-to
+    - part-of
+    - instance-of
+    - causes
+    - influences
+    - supports
+    - contradicts
+    - compares-with
+    - depends-on
+    - supersedes
+git:
+  autoCommit: true
+  autoPush: false

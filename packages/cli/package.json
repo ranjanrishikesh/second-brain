@@ -1,0 +1,16 @@
+{
+  "name": "@second-brain/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "brain": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@second-brain/core": "workspace:*",
+    "commander": "^14.0.2"
+  }
+}
