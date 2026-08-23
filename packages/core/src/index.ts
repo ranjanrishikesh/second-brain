@@ -15,3 +15,35 @@ export type {
 } from "./sources/types.js";
 export { rebuildSearchIndex, searchBrain } from "./search.js";
 export type { SearchOptions, SearchResult, SearchScope } from "./search.js";
+export {
+  calculatePageRevision,
+  extractCitations,
+  extractHeadingAnchors,
+  extractWikiLinks,
+  parseWikiPage,
+  renderWikiPage,
+} from "./wiki/page.js";
+export type { WikiLinkV1 } from "./wiki/page.js";
+export {
+  changeSetV1Schema,
+  citationV1Schema,
+  relationV1Schema,
+  wikiPageV1Schema,
+} from "./wiki/types.js";
+export {
+  calculateCatalogRevision,
+  loadWikiPages,
+  validateWikiGraph,
+} from "./wiki/graph.js";
+export type { AuditIssueV1, AuditReportV1 } from "./wiki/graph.js";
+export { writeGeneratedWikiFiles } from "./wiki/generated.js";
+export {
+  applyWikiChangeSet,
+  buildReconciliationCandidates,
+} from "./wiki/mutate.js";
+export type {
+  ChangeSetV1,
+  CitationV1,
+  RelationV1,
+  WikiPageV1,
+} from "./wiki/types.js";

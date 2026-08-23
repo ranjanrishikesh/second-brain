@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { access, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { extractMarkdown } from "./sources/extract.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
+import { parseWikiPage } from "./wiki/page.js";
 
 export type SearchScope = "wiki" | "sources" | "all";
 
@@ -110,14 +112,29 @@ export async function rebuildSearchIndex(root: string): Promise<void> {
         .relative(root, absolutePath)
         .split(path.sep)
         .join("/");
-      insert.run(
-        "wiki",
-        `wiki:${relativePath}`,
-        titleFromWiki(markdown, relativePath),
-        relativePath,
-        "document",
-        markdown,
-      );
+      if (relativePath.startsWith("wiki/pages/")) {
+        const page = parseWikiPage(markdown, relativePath);
+        const extracted = extractMarkdown(page.id, relativePath, page.body);
+        for (const chunk of extracted.chunks) {
+          insert.run(
+            "wiki",
+            page.id,
+            page.title,
+            relativePath,
+            chunk.locator,
+            chunk.text,
+          );
+        }
+      } else {
+        insert.run(
+          "wiki",
+          `wiki:${relativePath}`,
+          titleFromWiki(markdown, relativePath),
+          relativePath,
+          "document",
+          markdown,
+        );
+      }
     }
   } finally {
     database.close();

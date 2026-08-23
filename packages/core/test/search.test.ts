@@ -5,8 +5,10 @@ import { describe, expect, test } from "vitest";
 import {
   initBrain,
   rebuildSearchIndex,
+  renderWikiPage,
   scanSources,
   searchBrain,
+  type WikiPageV1,
 } from "../src/index.js";
 
 describe("brain search", () => {
@@ -56,6 +58,41 @@ describe("brain search", () => {
     });
 
     expect(results[0]?.path).toBe("sources/second.md");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("indexes authored wiki sections under stable page IDs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-wiki-"));
+    await initBrain(root, { name: "Search", description: "Wiki search test" });
+    const page: WikiPageV1 = {
+      schema: 1,
+      id: "pg_quasar_concept",
+      path: "wiki/pages/concepts/quasar.md",
+      title: "Quasar",
+      type: "concept",
+      status: "active",
+      summary: "An extremely luminous active galactic nucleus.",
+      aliases: [],
+      tags: ["astronomy"],
+      createdAt: "2026-08-23T00:00:00.000Z",
+      updatedAt: "2026-08-23T00:00:00.000Z",
+      revision: "pending",
+      sources: [],
+      relations: [],
+      body: "# Quasar\n\n## Emissions\n\nA quasar can emit powerful radio jets.",
+    };
+    await writeFile(path.join(root, page.path), renderWikiPage(page));
+
+    const results = await searchBrain(root, {
+      query: "radio jets",
+      scope: "wiki",
+    });
+
+    expect(results[0]).toMatchObject({
+      id: page.id,
+      path: page.path,
+      locator: "heading=emissions",
+    });
     await rm(root, { recursive: true, force: true });
   });
 });
