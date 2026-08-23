@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -135,6 +135,47 @@ describe("applyChangeSetTransaction", () => {
     expect(
       await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
     ).toBe(beforeOperations);
+  });
+
+  test("restores canonical files and HEAD when Git commit fails", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const hook = path.join(root, ".git", "hooks", "pre-commit");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_commit_failure"),
+      ),
+    ).rejects.toThrow();
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
+  test("aborts on concurrent HEAD movement without discarding the new commit", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_concurrent_head"),
+        { simulateHeadMovementBeforeCommit: true },
+      ),
+    ).rejects.toThrow(/HEAD changed/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).not.toBe(beforeHead);
+    expect(await git(root, ["log", "-1", "--pretty=%s"])).toBe(
+      "test: concurrent HEAD movement",
+    );
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
   });
 
   test.each(["prepared", "files-applied"] as const)(

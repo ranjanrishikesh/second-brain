@@ -60,4 +60,52 @@ describe("initBrain", () => {
       access(path.join(root, "wiki", "pages", "concepts")),
     ).resolves.toBeUndefined();
   });
+
+  test("names a pristine cloned template without replacing its charter sections", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-template-init-"));
+    await initBrain(root, {
+      name: "Portable Second Brain",
+      description: "A self-maintaining personal knowledge base.",
+    });
+    await writeFile(
+      path.join(root, "BRAIN.md"),
+      "# Portable Second Brain\n\nA self-maintaining personal knowledge base.\n\n## Purpose\n\nKeep this section.\n",
+    );
+
+    await initBrain(root, {
+      name: "Astronomy",
+      description: "Stars, planets, and observational evidence.",
+    });
+
+    expect((await loadBrainConfig(root)).brain).toMatchObject({
+      name: "Astronomy",
+      description: "Stars, planets, and observational evidence.",
+    });
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toBe(
+      "# Astronomy\n\nStars, planets, and observational evidence.\n\n## Purpose\n\nKeep this section.\n",
+    );
+  });
+
+  test("is idempotent but refuses to rename a populated brain", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-repeat-init-"));
+    await initBrain(root, {
+      name: "Physics",
+      description: "Physical science.",
+    });
+    await writeFile(
+      path.join(root, "BRAIN.md"),
+      "# Physics\n\nPhysical science.\n\n## Boundaries\n\nCustom boundary.\n",
+    );
+
+    await initBrain(root, {
+      name: "Physics",
+      description: "Physical science.",
+    });
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toContain(
+      "Custom boundary.",
+    );
+    await expect(
+      initBrain(root, { name: "Fiction", description: "Books." }),
+    ).rejects.toThrow(/already initialized as Physics/i);
+  });
 });

@@ -60,6 +60,8 @@ export interface TransactionResult {
 export interface TransactionTestOptions {
   /** Deterministic fault injection for recovery tests; never use in normal operation. */
   simulateCrashAfter?: "prepared" | "files-applied" | "committed";
+  /** Simulates an external commit immediately before the transaction's HEAD guard. */
+  simulateHeadMovementBeforeCommit?: boolean;
 }
 
 class SimulatedTransactionCrash extends Error {
@@ -315,6 +317,14 @@ export async function applyChangeSetTransaction(
 
     let commit: string | undefined;
     if (config.git.autoCommit) {
+      if (testOptions.simulateHeadMovementBeforeCommit) {
+        await git(root, [
+          "commit",
+          "--allow-empty",
+          "-m",
+          "test: concurrent HEAD movement",
+        ]);
+      }
       if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
         throw new Error("Git HEAD changed during the brain transaction");
       }

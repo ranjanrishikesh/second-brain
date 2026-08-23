@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^qry_[a-f0-9]{32}$"
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "finished"]
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+    },
+    "completedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["answered", "partial", "unanswered"]
+    },
+    "answerSummary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "currentTier": {
+      "type": "string",
+      "enum": ["wiki", "sources", "web"]
+    },
+    "tiersUsed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["wiki", "sources", "web"]
+      }
+    },
+    "wikiResults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["wiki", "source"]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "locator": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "title",
+          "path",
+          "locator",
+          "snippet",
+          "score"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sourceResults": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["wiki", "source"]
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "locator": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "title",
+          "path",
+          "locator",
+          "snippet",
+          "score"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "tierAssessments": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "tier": {
+            "type": "string",
+            "enum": ["wiki", "sources"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["sufficient", "insufficient"]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["tier", "status", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "bootstrap": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "pendingSourceIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["required", "pendingSourceIds"],
+      "additionalProperties": false
+    },
+    "webEvidenceSourceIds": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "changeOperationIds": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "question",
+    "status",
+    "startedAt",
+    "currentTier",
+    "tiersUsed",
+    "wikiResults",
+    "sourceResults",
+    "tierAssessments",
+    "bootstrap",
+    "webEvidenceSourceIds",
+    "changeOperationIds"
+  ],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/QuerySessionV1.schema.json",
+  "title": "QuerySessionV1"
+}

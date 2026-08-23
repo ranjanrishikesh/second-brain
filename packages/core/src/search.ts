@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { access, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { z } from "zod";
 import { extractMarkdown } from "./sources/extract.js";
+import { rebuildExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
 import { parseWikiPage } from "./wiki/page.js";
 
@@ -14,15 +16,17 @@ export interface SearchOptions {
   limit?: number;
 }
 
-export interface SearchResult {
-  kind: "wiki" | "source";
-  id: string;
-  title: string;
-  path: string;
-  locator: string;
-  snippet: string;
-  score: number;
-}
+export const searchResultV1Schema = z.object({
+  kind: z.enum(["wiki", "source"]),
+  id: z.string().min(1),
+  title: z.string(),
+  path: z.string().min(1),
+  locator: z.string().min(1),
+  snippet: z.string(),
+  score: z.number(),
+});
+
+export type SearchResult = z.infer<typeof searchResultV1Schema>;
 
 const cacheRelativePath = path.join(".brain", "cache", "search.sqlite");
 
@@ -87,12 +91,23 @@ export async function rebuildSearchIndex(root: string): Promise<void> {
     ) as { sources: SourceRecordV1[] };
     for (const source of manifest.sources) {
       if (source.extractionStatus !== "ready") continue;
-      const extracted = JSON.parse(
-        await readFile(
-          path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
-          "utf8",
-        ),
-      ) as ExtractedSourceV1;
+      let extracted: ExtractedSourceV1;
+      try {
+        extracted = JSON.parse(
+          await readFile(
+            path.join(
+              root,
+              ".brain",
+              "cache",
+              "extracted",
+              `${source.id}.json`,
+            ),
+            "utf8",
+          ),
+        ) as ExtractedSourceV1;
+      } catch {
+        extracted = await rebuildExtractedSourceCache(root, source);
+      }
       for (const chunk of extracted.chunks) {
         insert.run(
           "source",

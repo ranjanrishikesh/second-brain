@@ -1,0 +1,4 @@
+interface:
+  display_name: "Second Brain"
+  short_description: "Maintain a cited, compounding knowledge graph"
+  default_prompt: "Use $second-brain to answer this domain question and persist any durable new knowledge."

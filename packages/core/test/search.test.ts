@@ -61,6 +61,32 @@ describe("brain search", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  test("recreates equivalent source search after the entire cache is deleted", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-rebuild-"));
+    await initBrain(root, { name: "Search", description: "Rebuild test" });
+    await writeFile(
+      path.join(root, "sources", "recoverable.md"),
+      "# Recoverable\n\nA magnetar has an intense magnetic field.\n",
+    );
+    await scanSources(root);
+    const before = await searchBrain(root, {
+      query: "magnetar magnetic field",
+      scope: "sources",
+    });
+
+    await rm(path.join(root, ".brain", "cache"), {
+      recursive: true,
+      force: true,
+    });
+    const after = await searchBrain(root, {
+      query: "magnetar magnetic field",
+      scope: "sources",
+    });
+
+    expect(after).toEqual(before);
+    await rm(root, { recursive: true, force: true });
+  });
+
   test("indexes authored wiki sections under stable page IDs", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-search-wiki-"));
     await initBrain(root, { name: "Search", description: "Wiki search test" });

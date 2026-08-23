@@ -1,0 +1,32 @@
+{
+  "id": "second-brain",
+  "name": "Portable Second Brain",
+  "description": "Repository-backed, self-maintaining knowledge tools",
+  "contracts": {
+    "tools": [
+      "brain_status",
+      "brain_begin_query",
+      "brain_expand_query",
+      "brain_search",
+      "brain_read",
+      "brain_capture_web",
+      "brain_apply",
+      "brain_finish_query",
+      "brain_audit"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "brainRoot": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Absolute path to the mounted brain repository"
+      }
+    }
+  }
+}

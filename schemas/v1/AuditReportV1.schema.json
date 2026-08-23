@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "catalogRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pageCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "edgeCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "orphanPageIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["error", "warning"]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pageId": {
+            "type": "string"
+          },
+          "targetId": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": ["code", "severity", "message"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "ok",
+    "catalogRevision",
+    "pageCount",
+    "edgeCount",
+    "orphanPageIds",
+    "issues"
+  ],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/AuditReportV1.schema.json",
+  "title": "AuditReportV1"
+}

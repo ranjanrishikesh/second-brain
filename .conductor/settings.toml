@@ -1,0 +1,22 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "pnpm install --frozen-lockfile"
+run_mode = "concurrent"
+
+[scripts.run.test-watch]
+command = "pnpm test:watch"
+icon = "test-tube"
+
+[scripts.run.verify]
+command = "pnpm verify"
+icon = "badge-check"
+
+[scripts.run.doctor]
+command = "pnpm brain doctor"
+icon = "stethoscope"
+
+[scripts.run.gateway]
+available_in = [ "local" ]
+command = "OPENCLAW_GATEWAY_PORT=$CONDUCTOR_PORT docker compose -p brain-$CONDUCTOR_WORKSPACE_ID -f deploy/openclaw/compose.yaml up --build"
+icon = "brain"

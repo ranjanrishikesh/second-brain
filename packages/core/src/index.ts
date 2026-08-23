@@ -13,7 +13,11 @@ export type {
   SourceRecordV1,
   SourceScanResult,
 } from "./sources/types.js";
-export { rebuildSearchIndex, searchBrain } from "./search.js";
+export {
+  rebuildSearchIndex,
+  searchBrain,
+  searchResultV1Schema,
+} from "./search.js";
 export type { SearchOptions, SearchResult, SearchScope } from "./search.js";
 export {
   calculatePageRevision,
@@ -97,3 +101,5 @@ export type {
   RecordSemanticAuditResult,
   SemanticAuditBatchV1,
 } from "./audit.js";
+export { brainJsonSchemasV1 } from "./json-schemas.js";
+export type { PublicSchemaNameV1 } from "./json-schemas.js";

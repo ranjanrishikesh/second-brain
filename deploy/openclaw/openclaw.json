@@ -1,0 +1,42 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "controlUi": {
+      "allowedOrigins": ["http://127.0.0.1:${OPENCLAW_GATEWAY_PORT}"]
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/brain",
+      "repoRoot": "/brain",
+      "model": {
+        "primary": "${OPENCLAW_MODEL}"
+      }
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "allow": ["second-brain"],
+    "load": {
+      "paths": ["/app/adapters/openclaw"]
+    },
+    "entries": {
+      "second-brain": {
+        "enabled": true,
+        "hooks": {
+          "allowPromptInjection": true,
+          "allowConversationAccess": true
+        },
+        "config": {
+          "brainRoot": "/brain"
+        }
+      }
+    }
+  }
+}

@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { searchBrain, type SearchResult } from "./search.js";
+import { searchBrain, searchResultV1Schema } from "./search.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
 import { loadWikiPages } from "./wiki/graph.js";
@@ -19,8 +19,8 @@ export const querySessionV1Schema = z.object({
   answerSummary: z.string().trim().min(1).optional(),
   currentTier: z.enum(["wiki", "sources", "web"]),
   tiersUsed: z.array(z.enum(["wiki", "sources", "web"])),
-  wikiResults: z.array(z.custom<SearchResult>()),
-  sourceResults: z.array(z.custom<SearchResult>()).default([]),
+  wikiResults: z.array(searchResultV1Schema),
+  sourceResults: z.array(searchResultV1Schema).default([]),
   tierAssessments: z
     .array(
       z.object({
