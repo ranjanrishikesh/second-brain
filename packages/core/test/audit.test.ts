@@ -102,4 +102,62 @@ describe("semantic audit checkpoints", () => {
       "",
     );
   });
+
+  test("immediately schedules the next audit when another threshold passes during review", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-audit-overlap-"));
+    await initBrain(root, { name: "Audit", description: "Overlap test" });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    const statePath = path.join(root, ".brain", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.knowledgeMutations = 24;
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Second Brain Test"]);
+    await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+
+    const firstPage = sourcePage("pg_overlap_one", "Overlap One");
+    const secondPage = sourcePage("pg_overlap_two", "Overlap Two");
+    await applyChangeSetTransaction(root, {
+      version: 1,
+      operationId: "op_overlap_mutation_25",
+      catalogRevision: calculateCatalogRevision([]),
+      reason: "Start an overlapping semantic audit",
+      pages: [
+        { action: "create", page: firstPage },
+        { action: "create", page: secondPage },
+      ],
+      reconciliation: { candidatePageIds: [], reviewed: [] },
+    });
+    await recordSemanticAuditBatch(root, {
+      pageIds: [firstPage.id],
+      summary: "Reviewed the first page.",
+    });
+    const pendingState = JSON.parse(await readFile(statePath, "utf8"));
+    pendingState.knowledgeMutations = 50;
+    await writeFile(statePath, `${JSON.stringify(pendingState, null, 2)}\n`);
+    await git(root, ["add", ".brain/state.json"]);
+    await git(root, ["commit", "-m", "test: mutations during semantic audit"]);
+
+    await recordSemanticAuditBatch(root, {
+      pageIds: [secondPage.id],
+      summary: "Completed the original checkpoint.",
+    });
+
+    expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject({
+      knowledgeMutations: 50,
+      semanticAuditDue: true,
+      lastSemanticAuditMutation: 25,
+    });
+    expect(await nextSemanticAuditBatch(root)).toMatchObject({
+      targetMutation: 50,
+      pageIds: [firstPage.id, secondPage.id],
+      reviewedPageIds: [],
+      complete: false,
+    });
+  });
 });

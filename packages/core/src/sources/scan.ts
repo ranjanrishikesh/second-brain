@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import { loadBrainConfig } from "../config.js";
+import { calculateExtractedSourceSha256 } from "./cache-integrity.js";
 import {
   extractCsv,
   extractEpub,
@@ -276,6 +277,9 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
                         : epub
                           ? "epub-v1"
                           : "none",
+        ...(extracted
+          ? { extractedSha256: calculateExtractedSourceSha256(extracted) }
+          : {}),
         provenance: webCapture
           ? {
               kind: "web",

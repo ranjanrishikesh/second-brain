@@ -5,6 +5,7 @@ import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { searchBrain, searchResultV1Schema } from "./search.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
+import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
 import { recoverBrain } from "./transaction.js";
 import { loadWikiPages } from "./wiki/graph.js";
@@ -212,18 +213,11 @@ export async function nextBootstrapBatch(
       throw new Error(
         `Bootstrap source is missing from the manifest: ${sourceId}`,
       );
-    try {
-      const extracted = JSON.parse(
-        await readFile(
-          path.join(root, ".brain", "cache", "extracted", `${sourceId}.json`),
-          "utf8",
-        ),
-      ) as ExtractedSourceV1;
-      sources.push({ record, extracted });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      sources.push({ record });
-    }
+    const extracted =
+      record.extractionStatus === "ready"
+        ? await loadExtractedSourceCache(root, record)
+        : undefined;
+    sources.push({ record, ...(extracted ? { extracted } : {}) });
   }
   return { version: 1, queryId, sourceIds, sources };
 }

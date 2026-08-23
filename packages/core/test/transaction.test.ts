@@ -183,6 +183,29 @@ describe("applyChangeSetTransaction", () => {
     );
   });
 
+  test("rejects two page paths that resolve to the same file through dot segments", async () => {
+    const root = await initializedGitBrain();
+    const first = sourcePage();
+    const second = {
+      ...sourcePage(),
+      id: "pg_source_dot_collision",
+      path: "wiki/pages/sources/nested/../orbits.md",
+      title: "Dot-segment collision",
+    };
+    const changeSet = createSourcePageChangeSet("op_dot_segment_collision");
+    changeSet.pages = [
+      { action: "create", page: first },
+      { action: "create", page: second },
+    ];
+
+    await expect(applyChangeSetTransaction(root, changeSet)).rejects.toThrow(
+      /non-canonical|unsafe|duplicate wiki page path/i,
+    );
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
   test("requires reconciliation of pages discovered by related-page search", async () => {
     const root = await initializedGitBrain();
     const spectroscopy = {

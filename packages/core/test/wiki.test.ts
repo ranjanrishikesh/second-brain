@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -310,6 +310,66 @@ describe("wiki page format", () => {
       expect.objectContaining({ code: "INVALID_SOURCE_LOCATOR" }),
     );
     await expect(access(cachePath)).resolves.toBeUndefined();
+  });
+
+  test("rebuilds a schema-valid extracted cache whose content hash is not canonical", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-locator-integrity-"));
+    await initBrain(root, { name: "Graph", description: "Cache integrity" });
+    await writeFile(
+      path.join(root, "sources", "gravity.md"),
+      "# Gravity\n\nMass attracts mass.\n",
+    );
+    const sourceId = (await scanSources(root)).added[0]?.id;
+    if (!sourceId) throw new Error("Expected the source to be registered");
+    const cachePath = path.join(
+      root,
+      ".brain",
+      "cache",
+      "extracted",
+      `${sourceId}.json`,
+    );
+    await writeFile(
+      cachePath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          sourceId,
+          title: "Gravity",
+          text: "Invented evidence.",
+          chunks: [
+            {
+              id: `${sourceId}:invented`,
+              sourceId,
+              ordinal: 0,
+              locator: "heading=invented",
+              text: "Invented evidence.",
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const page = conceptPage({
+      path: "wiki/pages/sources/gravity.md",
+      type: "source",
+      sources: [{ id: sourceId, locators: ["heading=invented"] }],
+      body: `# Orbital Mechanics\n\nInvented claim. [@${sourceId}#heading=invented]`,
+    });
+    await writeFile(path.join(root, page.path), renderWikiPage(page));
+
+    const report = await validateWikiGraph(root);
+    const rebuilt = JSON.parse(await readFile(cachePath, "utf8"));
+
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "INVALID_SOURCE_LOCATOR",
+        pageId: page.id,
+      }),
+    );
+    expect(
+      rebuilt.chunks.map((chunk: { locator: string }) => chunk.locator),
+    ).not.toContain("heading=invented");
   });
 
   test("generates connections, backlinks, and the global index", async () => {

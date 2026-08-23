@@ -199,6 +199,19 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
     // No recovery journal is the healthy state.
   }
 
+  try {
+    await access(path.join(root, ".brain", "runtime", "writer.lock"));
+    issues.push({
+      code: "WRITER_LOCK_PRESENT",
+      severity: "error",
+      message:
+        "A canonical writer lock is present; wait for the writer or run recovery",
+      path: ".brain/runtime/writer.lock",
+    });
+  } catch {
+    // No writer lock is the healthy state.
+  }
+
   if (manifest) {
     try {
       const graph = await validateWikiGraph(root);

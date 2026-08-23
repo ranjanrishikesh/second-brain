@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { stringify } from "yaml";
 import { z } from "zod";
@@ -11,7 +11,6 @@ import {
 } from "./query.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
-import { recoverBrain } from "./transaction.js";
 
 const webCaptureInputSchema = z.object({
   url: z.url(),
@@ -129,34 +128,24 @@ export async function captureWebEvidence(
     `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${input.content.trim()}\n`,
     { encoding: "utf8", flag: "wx" },
   );
-  let registered = false;
-  try {
-    const scan = await scanAndRegisterSources(root);
-    const source = scan.added.find(
-      (candidate) => candidate.path === relativePath,
-    );
-    if (!source)
-      throw new Error(`Captured source was not registered: ${relativePath}`);
-    registered = true;
-    session.webEvidenceSourceIds.push(source.id);
-    session.bootstrap.required = true;
-    if (!session.bootstrap.pendingSourceIds.includes(source.id)) {
-      session.bootstrap.pendingSourceIds.push(source.id);
-      session.bootstrap.pendingSourceIds.sort();
-    }
-    if (testOptions.simulateSessionWriteFailure) {
-      throw new Error("Simulated query session write failure");
-    }
-    await writeQuerySession(root, session);
-    return { source, session, created: true };
-  } catch (error) {
-    if (!registered) {
-      await recoverBrain(root).catch(() => undefined);
-      const canonicalSource = (await readSources(root)).find(
-        (source) => source.path === relativePath,
-      );
-      if (!canonicalSource) await rm(absolutePath, { force: true });
-    }
-    throw error;
+  // A prepared capture is immutable source input. If registration or session
+  // linkage is interrupted, preserve it for a later scan instead of racing a
+  // concurrent canonical writer with cleanup.
+  const scan = await scanAndRegisterSources(root);
+  const source = scan.added.find(
+    (candidate) => candidate.path === relativePath,
+  );
+  if (!source)
+    throw new Error(`Captured source was not registered: ${relativePath}`);
+  session.webEvidenceSourceIds.push(source.id);
+  session.bootstrap.required = true;
+  if (!session.bootstrap.pendingSourceIds.includes(source.id)) {
+    session.bootstrap.pendingSourceIds.push(source.id);
+    session.bootstrap.pendingSourceIds.sort();
   }
+  if (testOptions.simulateSessionWriteFailure) {
+    throw new Error("Simulated query session write failure");
+  }
+  await writeQuerySession(root, session);
+  return { source, session, created: true };
 }

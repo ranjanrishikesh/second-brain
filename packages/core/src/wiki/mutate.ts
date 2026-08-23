@@ -1,4 +1,5 @@
 import { calculateCatalogRevision } from "./graph.js";
+import { canonicalWikiPagePathKey } from "./path.js";
 import { calculatePageRevision } from "./page.js";
 import {
   changeSetV1Schema,
@@ -152,10 +153,7 @@ export function applyWikiChangeSet(
   );
   const paths = new Map<string, string>();
   for (const page of proposedPages) {
-    const normalizedPath = page.path
-      .normalize("NFKC")
-      .replaceAll("\\", "/")
-      .toLocaleLowerCase("en");
+    const normalizedPath = canonicalWikiPagePathKey(page.path);
     const existingPageId = paths.get(normalizedPath);
     if (existingPageId && existingPageId !== page.id) {
       throw new Error(

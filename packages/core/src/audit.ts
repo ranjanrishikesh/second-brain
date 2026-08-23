@@ -73,17 +73,17 @@ export async function nextSemanticAuditBatch(
       complete: true,
     };
   }
-  const pendingPageIds =
-    state.semanticAudit?.status === "pending"
-      ? state.semanticAudit.pendingPageIds
-      : await initialPendingPageIds(root);
+  const activeAudit =
+    state.semanticAudit?.status === "pending" ? state.semanticAudit : undefined;
+  const pendingPageIds = activeAudit
+    ? activeAudit.pendingPageIds
+    : await initialPendingPageIds(root);
   const config = await loadBrainConfig(root);
   return {
     version: 1,
-    targetMutation:
-      state.semanticAudit?.targetMutation ?? state.knowledgeMutations,
+    targetMutation: activeAudit?.targetMutation ?? state.knowledgeMutations,
     pageIds: pendingPageIds.slice(0, config.bootstrap.batchSize),
-    reviewedPageIds: state.semanticAudit?.reviewedPageIds ?? [],
+    reviewedPageIds: activeAudit?.reviewedPageIds ?? [],
     complete: pendingPageIds.length === 0,
   };
 }
@@ -114,12 +114,15 @@ export async function recordSemanticAuditBatch(
         throw new Error("A semantic audit is not due");
       }
       const now = new Date().toISOString();
-      const targetMutation =
-        state.semanticAudit?.targetMutation ?? state.knowledgeMutations;
-      const initialPending =
+      const activeAudit =
         state.semanticAudit?.status === "pending"
-          ? state.semanticAudit.pendingPageIds
-          : await initialPendingPageIds(root);
+          ? state.semanticAudit
+          : undefined;
+      const targetMutation =
+        activeAudit?.targetMutation ?? state.knowledgeMutations;
+      const initialPending = activeAudit
+        ? activeAudit.pendingPageIds
+        : await initialPendingPageIds(root);
       const requested = [...new Set(input.pageIds)];
       for (const pageId of requested) {
         if (!initialPending.includes(pageId)) {
@@ -127,22 +130,24 @@ export async function recordSemanticAuditBatch(
         }
       }
       const reviewedPageIds = [
-        ...new Set([
-          ...(state.semanticAudit?.reviewedPageIds ?? []),
-          ...requested,
-        ]),
+        ...new Set([...(activeAudit?.reviewedPageIds ?? []), ...requested]),
       ].sort();
       const requestedIds = new Set(requested);
       const pendingPageIds = initialPending.filter(
         (pageId) => !requestedIds.has(pageId),
       );
       const complete = pendingPageIds.length === 0;
+      const config = await loadBrainConfig(root);
+      const nextAuditDue = complete
+        ? state.knowledgeMutations - targetMutation >=
+          config.graph.semanticAuditEvery
+        : true;
       const operation: OperationRecordV1 = {
         version: 1,
         id: operationId,
         kind: "audit",
         status: "completed",
-        startedAt: state.semanticAudit?.startedAt ?? now,
+        startedAt: activeAudit?.startedAt ?? now,
         completedAt: now,
         summary: input.summary,
         pageIds: requested,
@@ -154,7 +159,7 @@ export async function recordSemanticAuditBatch(
         targetMutation,
         pendingPageIds,
         reviewedPageIds,
-        startedAt: state.semanticAudit?.startedAt ?? now,
+        startedAt: activeAudit?.startedAt ?? now,
         ...(complete ? { completedAt: now } : {}),
       };
       await writeFile(
@@ -162,7 +167,7 @@ export async function recordSemanticAuditBatch(
         `${JSON.stringify(
           {
             ...state,
-            semanticAuditDue: !complete,
+            semanticAuditDue: nextAuditDue,
             ...(complete ? { lastSemanticAuditMutation: targetMutation } : {}),
             semanticAudit,
           },

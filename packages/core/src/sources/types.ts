@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-export const sourceRecordV1Schema = z.object({
+const extractedSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
+const sourceRecordBaseV1Schema = z.object({
   version: z.literal(1),
   id: z.string().regex(/^src_[a-f0-9]{16}$/),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -9,12 +11,6 @@ export const sourceRecordV1Schema = z.object({
   mediaType: z.string().min(1),
   bytes: z.number().int().nonnegative(),
   discoveredAt: z.string().datetime(),
-  extractionStatus: z.enum([
-    "ready",
-    "unsupported",
-    "extraction-required",
-    "failed",
-  ]),
   extractor: z.string().min(1),
   error: z.string().optional(),
   supersedes: z.string().optional(),
@@ -28,6 +24,17 @@ export const sourceRecordV1Schema = z.object({
     })
     .default({ kind: "file" }),
 });
+
+export const sourceRecordV1Schema = z.union([
+  sourceRecordBaseV1Schema.extend({
+    extractionStatus: z.literal("ready"),
+    extractedSha256: extractedSha256Schema,
+  }),
+  sourceRecordBaseV1Schema.extend({
+    extractionStatus: z.enum(["unsupported", "extraction-required", "failed"]),
+    extractedSha256: extractedSha256Schema.optional(),
+  }),
+]);
 
 export type SourceRecordV1 = z.infer<typeof sourceRecordV1Schema>;
 

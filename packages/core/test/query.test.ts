@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -335,6 +336,57 @@ describe("query lifecycle", () => {
       required: true,
       pendingSourceIds: [source.id],
     });
+  });
+
+  test("does not delete prepared web evidence while another canonical writer is active", async () => {
+    const root = await queryBrain();
+    const session = await beginQuery(
+      root,
+      "What did the concurrent survey find?",
+    );
+    await expandQuery(root, session.id, {
+      tier: "sources",
+      reason: "The wiki does not cover the concurrent survey.",
+    });
+    await expandQuery(root, session.id, {
+      tier: "web",
+      reason: "Local sources do not cover the concurrent survey.",
+    });
+    const input = {
+      url: "https://example.test/concurrent-survey",
+      title: "Concurrent capture",
+      captureKind: "page" as const,
+      content: "The concurrent survey found a candidate.",
+      retrievedAt: "2026-08-23T15:00:00.000Z",
+    };
+    const digest = createHash("sha256")
+      .update(`${input.url}\0${input.content}`)
+      .digest("hex")
+      .slice(0, 12);
+    const evidencePath = path.join(
+      root,
+      "sources",
+      "web",
+      "2026",
+      "08",
+      `concurrent-capture-${digest}.md`,
+    );
+    await writeFile(
+      path.join(root, ".brain", "runtime", "writer.lock"),
+      `${JSON.stringify({
+        pid: process.pid,
+        operationId: "op_concurrent_capture",
+        recoverable: false,
+      })}\n`,
+    );
+
+    await expect(captureWebEvidence(root, session.id, input)).rejects.toThrow(
+      /exist|lock|writer/i,
+    );
+
+    expect(await readFile(evidencePath, "utf8")).toContain(
+      "concurrent survey found a candidate",
+    );
   });
 
   test("finishes a wiki-only answer with a log-only knowledge operation", async () => {

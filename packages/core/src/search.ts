@@ -4,8 +4,8 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { z } from "zod";
 import { extractMarkdown } from "./sources/extract.js";
-import { rebuildExtractedSourceCache } from "./sources/rebuild-cache.js";
-import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
+import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
+import type { SourceRecordV1 } from "./sources/types.js";
 import { parseWikiPage } from "./wiki/page.js";
 
 export type SearchScope = "wiki" | "sources" | "all";
@@ -95,23 +95,7 @@ export async function rebuildSearchIndex(root: string): Promise<void> {
       ) as { sources: SourceRecordV1[] };
       for (const source of manifest.sources) {
         if (source.extractionStatus !== "ready") continue;
-        let extracted: ExtractedSourceV1;
-        try {
-          extracted = JSON.parse(
-            await readFile(
-              path.join(
-                root,
-                ".brain",
-                "cache",
-                "extracted",
-                `${source.id}.json`,
-              ),
-              "utf8",
-            ),
-          ) as ExtractedSourceV1;
-        } catch {
-          extracted = await rebuildExtractedSourceCache(root, source);
-        }
+        const extracted = await loadExtractedSourceCache(root, source);
         for (const chunk of extracted.chunks) {
           insert.run(
             "source",

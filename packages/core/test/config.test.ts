@@ -70,6 +70,29 @@ describe("doctorBrain", () => {
       ]),
     );
   });
+
+  test("reports a writer lock even when no recovery journal exists", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-doctor-lock-"));
+    await initBrain(root, { name: "Doctor", description: "Writer checks" });
+    await writeFile(
+      path.join(root, ".brain", "runtime", "writer.lock"),
+      `${JSON.stringify({
+        pid: process.pid,
+        operationId: "op_doctor_writer",
+        recoverable: false,
+      })}\n`,
+    );
+
+    const report = await doctorBrain(root);
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "WRITER_LOCK_PRESENT",
+        severity: "error",
+      }),
+    );
+  });
 });
 
 describe("initBrain", () => {

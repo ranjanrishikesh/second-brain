@@ -11,6 +11,7 @@ import {
   extractPdf,
   extractText,
 } from "./extract.js";
+import { assertCanonicalExtractedSource } from "./cache-integrity.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./types.js";
 
 export async function rebuildExtractedSourceCache(
@@ -68,12 +69,32 @@ export async function rebuildExtractedSourceCache(
     );
   }
 
+  const canonicalExtracted = assertCanonicalExtractedSource(extracted, source);
   const cacheDirectory = path.join(root, ".brain", "cache", "extracted");
   await mkdir(cacheDirectory, { recursive: true });
   await writeFile(
     path.join(cacheDirectory, `${source.id}.json`),
-    `${JSON.stringify(extracted, null, 2)}\n`,
+    `${JSON.stringify(canonicalExtracted, null, 2)}\n`,
     "utf8",
   );
-  return extracted;
+  return canonicalExtracted;
+}
+
+export async function loadExtractedSourceCache(
+  root: string,
+  source: SourceRecordV1,
+): Promise<ExtractedSourceV1> {
+  try {
+    return assertCanonicalExtractedSource(
+      JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+          "utf8",
+        ),
+      ),
+      source,
+    );
+  } catch {
+    return await rebuildExtractedSourceCache(root, source);
+  }
 }

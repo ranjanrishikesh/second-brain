@@ -3,11 +3,8 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "../config.js";
-import { rebuildExtractedSourceCache } from "../sources/rebuild-cache.js";
-import {
-  extractedSourceV1Schema,
-  sourceRecordV1Schema,
-} from "../sources/types.js";
+import { loadExtractedSourceCache } from "../sources/rebuild-cache.js";
+import { sourceRecordV1Schema } from "../sources/types.js";
 import {
   extractCitations,
   extractHeadingAnchors,
@@ -103,30 +100,7 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
   for (const source of manifest.sources) {
     if (source.extractionStatus !== "ready") continue;
     try {
-      let extracted: z.infer<typeof extractedSourceV1Schema>;
-      try {
-        extracted = extractedSourceV1Schema.parse(
-          JSON.parse(
-            await readFile(
-              path.join(
-                root,
-                ".brain",
-                "cache",
-                "extracted",
-                `${source.id}.json`,
-              ),
-              "utf8",
-            ),
-          ),
-        );
-        if (extracted.sourceId !== source.id) {
-          throw new Error(`Extracted cache source ID mismatch: ${source.id}`);
-        }
-      } catch {
-        extracted = extractedSourceV1Schema.parse(
-          await rebuildExtractedSourceCache(root, source),
-        );
-      }
+      const extracted = await loadExtractedSourceCache(root, source);
       validLocators.set(
         source.id,
         new Set(extracted.chunks.map((chunk) => chunk.locator)),

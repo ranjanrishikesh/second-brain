@@ -22,6 +22,7 @@ import {
 import { writeGeneratedWikiFiles } from "./wiki/generated.js";
 import { applyWikiChangeSet } from "./wiki/mutate.js";
 import { renderWikiPage } from "./wiki/page.js";
+import { canonicalWikiPagePath } from "./wiki/path.js";
 import {
   changeSetV1Schema,
   type ChangeSetV1,
@@ -151,7 +152,8 @@ async function hasStagedChanges(root: string): Promise<boolean> {
 
 function safePagePath(root: string, pagePath: string): string {
   const pageRoot = path.resolve(root, "wiki", "pages");
-  const absolutePath = path.resolve(root, pagePath);
+  const canonicalPath = canonicalWikiPagePath(pagePath);
+  const absolutePath = path.resolve(root, canonicalPath);
   if (
     !absolutePath.startsWith(`${pageRoot}${path.sep}`) ||
     !absolutePath.endsWith(".md")
