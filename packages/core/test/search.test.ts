@@ -87,6 +87,37 @@ describe("brain search", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  test("coalesces concurrent searches that discover a missing cache", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-concurrent-"));
+    await initBrain(root, {
+      name: "Search",
+      description: "Concurrent rebuild",
+    });
+    await writeFile(
+      path.join(root, "sources", "magnetar.md"),
+      "# Magnetar\n\nA magnetar has an intense magnetic field.\n",
+    );
+    await scanSources(root);
+    await rm(path.join(root, ".brain", "cache"), {
+      recursive: true,
+      force: true,
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        searchBrain(root, {
+          query: "magnetar magnetic field",
+          scope: "sources",
+        }),
+      ),
+    );
+
+    expect(results.every((result) => result[0]?.title === "Magnetar")).toBe(
+      true,
+    );
+    await rm(root, { recursive: true, force: true });
+  });
+
   test("indexes authored wiki sections under stable page IDs", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-search-wiki-"));
     await initBrain(root, { name: "Search", description: "Wiki search test" });

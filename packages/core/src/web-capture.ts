@@ -5,6 +5,7 @@ import { stringify } from "yaml";
 import { z } from "zod";
 import {
   readQuerySession,
+  refreshQueryBootstrap,
   writeQuerySession,
   type QuerySessionV1,
 } from "./query.js";
@@ -25,6 +26,11 @@ export interface WebCaptureResult {
   source: SourceRecordV1;
   session: QuerySessionV1;
   created: boolean;
+}
+
+export interface WebCaptureTestOptions {
+  /** Deterministic fault injection; never use outside tests. */
+  simulateSessionWriteFailure?: boolean;
 }
 
 function slugify(value: string): string {
@@ -51,6 +57,7 @@ export async function captureWebEvidence(
   root: string,
   queryId: string,
   rawInput: WebCaptureInput,
+  testOptions: WebCaptureTestOptions = {},
 ): Promise<WebCaptureResult> {
   const input = webCaptureInputSchema.parse(rawInput);
   const protocol = new URL(input.url).protocol;
@@ -77,8 +84,9 @@ export async function captureWebEvidence(
   if (duplicate) {
     if (!session.webEvidenceSourceIds.includes(duplicate.id)) {
       session.webEvidenceSourceIds.push(duplicate.id);
-      await writeQuerySession(root, session);
     }
+    await refreshQueryBootstrap(root, session);
+    await writeQuerySession(root, session);
     return { source: duplicate, session, created: false };
   }
 
@@ -120,6 +128,7 @@ export async function captureWebEvidence(
     `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${input.content.trim()}\n`,
     { encoding: "utf8", flag: "wx" },
   );
+  let registered = false;
   try {
     const scan = await scanAndRegisterSources(root);
     const source = scan.added.find(
@@ -127,16 +136,20 @@ export async function captureWebEvidence(
     );
     if (!source)
       throw new Error(`Captured source was not registered: ${relativePath}`);
+    registered = true;
     session.webEvidenceSourceIds.push(source.id);
     session.bootstrap.required = true;
     if (!session.bootstrap.pendingSourceIds.includes(source.id)) {
       session.bootstrap.pendingSourceIds.push(source.id);
       session.bootstrap.pendingSourceIds.sort();
     }
+    if (testOptions.simulateSessionWriteFailure) {
+      throw new Error("Simulated query session write failure");
+    }
     await writeQuerySession(root, session);
     return { source, session, created: true };
   } catch (error) {
-    await rm(absolutePath, { force: true });
+    if (!registered) await rm(absolutePath, { force: true });
     throw error;
   }
 }

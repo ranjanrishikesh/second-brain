@@ -33,7 +33,7 @@ For every create/update/merge/archive:
 2. Collect graph neighbors, shared-source pages, duplicate candidates, and search results.
 3. **Read every candidate page and any targeted anchor before deciding.** Metadata, unchanged tags, or unchanged links are not a review.
 4. Update affected claims, links, anchors, backlinks, conflicts, or summaries together. Record a specific `changed` or `no-change` reason for every candidate.
-5. Submit one validated change set with current catalog/page revisions. Let the core regenerate indexes/backlinks/health and commit exact managed paths.
+5. Submit one validated change set with current catalog/page revisions and the active query ID (`brain apply --query <query-id>`). Let the core bind the evidence tier, regenerate indexes/backlinks/health, and commit exact managed paths.
 
 ## Evidence rules
 

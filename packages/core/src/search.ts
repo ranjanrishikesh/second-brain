@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { access, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { access, mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { z } from "zod";
@@ -65,10 +65,11 @@ export async function rebuildSearchIndex(root: string): Promise<void> {
   const revision = await currentSearchRevision(root);
   const cachePath = path.join(root, cacheRelativePath);
   await mkdir(path.dirname(cachePath), { recursive: true });
-  await rm(cachePath, { force: true });
-  const database = new Database(cachePath);
+  const temporaryPath = `${cachePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    database.exec(`
+    const database = new Database(temporaryPath);
+    try {
+      database.exec(`
       CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE VIRTUAL TABLE documents USING fts5(
         kind UNINDEXED,
@@ -80,79 +81,86 @@ export async function rebuildSearchIndex(root: string): Promise<void> {
         tokenize = 'unicode61 remove_diacritics 2'
       );
     `);
-    database
-      .prepare("INSERT INTO metadata(key, value) VALUES ('revision', ?)")
-      .run(revision);
-    const insert = database.prepare(
-      "INSERT INTO documents(kind, id, title, path, locator, text) VALUES (?, ?, ?, ?, ?, ?)",
-    );
-    const manifest = JSON.parse(
-      await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
-    ) as { sources: SourceRecordV1[] };
-    for (const source of manifest.sources) {
-      if (source.extractionStatus !== "ready") continue;
-      let extracted: ExtractedSourceV1;
-      try {
-        extracted = JSON.parse(
-          await readFile(
-            path.join(
-              root,
-              ".brain",
-              "cache",
-              "extracted",
-              `${source.id}.json`,
+      database
+        .prepare("INSERT INTO metadata(key, value) VALUES ('revision', ?)")
+        .run(revision);
+      const insert = database.prepare(
+        "INSERT INTO documents(kind, id, title, path, locator, text) VALUES (?, ?, ?, ?, ?, ?)",
+      );
+      const manifest = JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      ) as { sources: SourceRecordV1[] };
+      for (const source of manifest.sources) {
+        if (source.extractionStatus !== "ready") continue;
+        let extracted: ExtractedSourceV1;
+        try {
+          extracted = JSON.parse(
+            await readFile(
+              path.join(
+                root,
+                ".brain",
+                "cache",
+                "extracted",
+                `${source.id}.json`,
+              ),
+              "utf8",
             ),
-            "utf8",
-          ),
-        ) as ExtractedSourceV1;
-      } catch {
-        extracted = await rebuildExtractedSourceCache(root, source);
-      }
-      for (const chunk of extracted.chunks) {
-        insert.run(
-          "source",
-          source.id,
-          source.title,
-          source.path,
-          chunk.locator,
-          chunk.text,
-        );
-      }
-    }
-
-    const wikiRoot = path.join(root, "wiki");
-    for (const absolutePath of (await markdownFiles(wikiRoot)).sort()) {
-      const markdown = await readFile(absolutePath, "utf8");
-      const relativePath = path
-        .relative(root, absolutePath)
-        .split(path.sep)
-        .join("/");
-      if (relativePath.startsWith("wiki/pages/")) {
-        const page = parseWikiPage(markdown, relativePath);
-        const extracted = extractMarkdown(page.id, relativePath, page.body);
+          ) as ExtractedSourceV1;
+        } catch {
+          extracted = await rebuildExtractedSourceCache(root, source);
+        }
         for (const chunk of extracted.chunks) {
           insert.run(
-            "wiki",
-            page.id,
-            page.title,
-            relativePath,
+            "source",
+            source.id,
+            source.title,
+            source.path,
             chunk.locator,
             chunk.text,
           );
         }
-      } else {
-        insert.run(
-          "wiki",
-          `wiki:${relativePath}`,
-          titleFromWiki(markdown, relativePath),
-          relativePath,
-          "document",
-          markdown,
-        );
       }
+
+      const wikiRoot = path.join(root, "wiki");
+      for (const absolutePath of (await markdownFiles(wikiRoot)).sort()) {
+        const markdown = await readFile(absolutePath, "utf8");
+        const relativePath = path
+          .relative(root, absolutePath)
+          .split(path.sep)
+          .join("/");
+        if (relativePath.startsWith("wiki/pages/")) {
+          const page = parseWikiPage(markdown, relativePath);
+          const extracted = extractMarkdown(page.id, relativePath, page.body);
+          for (const chunk of extracted.chunks) {
+            insert.run(
+              "wiki",
+              page.id,
+              page.title,
+              relativePath,
+              chunk.locator,
+              chunk.text,
+            );
+          }
+        } else {
+          insert.run(
+            "wiki",
+            `wiki:${relativePath}`,
+            titleFromWiki(markdown, relativePath),
+            relativePath,
+            "document",
+            markdown,
+          );
+        }
+      }
+    } finally {
+      database.close();
     }
+    await rename(temporaryPath, cachePath);
   } finally {
-    database.close();
+    await rm(temporaryPath, { force: true });
   }
 }
 

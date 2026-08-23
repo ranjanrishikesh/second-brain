@@ -59,6 +59,7 @@ export {
   recoverBrain,
 } from "./transaction.js";
 export type {
+  ApplyTransactionOptions,
   OperationRecordV1,
   TransactionResult,
   TransactionTestOptions,
@@ -83,7 +84,11 @@ export {
 } from "./source-transaction.js";
 export type { SourceSupersessionResult } from "./source-transaction.js";
 export { captureWebEvidence } from "./web-capture.js";
-export type { WebCaptureInput, WebCaptureResult } from "./web-capture.js";
+export type {
+  WebCaptureInput,
+  WebCaptureResult,
+  WebCaptureTestOptions,
+} from "./web-capture.js";
 export { attachQueryChange, finishQuery } from "./query-finish.js";
 export type {
   FinishQueryOptions,

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -227,6 +227,91 @@ describe("wiki page format", () => {
     );
   });
 
+  test("requires every inline citation locator to match page frontmatter", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-citation-contract-"));
+    await initBrain(root, { name: "Graph", description: "Citation contract" });
+    await writeFile(
+      path.join(root, "sources", "gravity.md"),
+      "# Gravity\n\nMass attracts mass.\n\n## Evidence\n\nObserved.\n",
+    );
+    const sourceId = (await scanSources(root)).added[0]?.id;
+    if (!sourceId) throw new Error("Expected the source to be registered");
+    const missingLocator = conceptPage({
+      id: "pg_missing_locator",
+      path: "wiki/pages/sources/missing-locator.md",
+      type: "source",
+      title: "Missing locator",
+      aliases: [],
+      sources: [{ id: sourceId, locators: ["heading=gravity"] }],
+      body: `# Missing locator\n\nGravity matters. [@${sourceId}]`,
+    });
+    const undeclaredLocator = conceptPage({
+      id: "pg_undeclared_locator",
+      path: "wiki/pages/sources/undeclared-locator.md",
+      type: "source",
+      title: "Undeclared locator",
+      aliases: [],
+      sources: [{ id: sourceId, locators: ["heading=evidence"] }],
+      body: `# Undeclared locator\n\nGravity matters. [@${sourceId}#heading=gravity]`,
+    });
+    await writeFile(
+      path.join(root, missingLocator.path),
+      renderWikiPage(missingLocator),
+    );
+    await writeFile(
+      path.join(root, undeclaredLocator.path),
+      renderWikiPage(undeclaredLocator),
+    );
+
+    const report = await validateWikiGraph(root);
+
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "MISSING_CITATION_LOCATOR",
+        pageId: missingLocator.id,
+      }),
+    );
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "CITATION_NOT_DECLARED",
+        pageId: undeclaredLocator.id,
+      }),
+    );
+  });
+
+  test("rebuilds missing extracted cache before validating locators", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-locator-cache-"));
+    await initBrain(root, { name: "Graph", description: "Cache rebuild" });
+    await writeFile(
+      path.join(root, "sources", "gravity.md"),
+      "# Gravity\n\nMass attracts mass.\n",
+    );
+    const sourceId = (await scanSources(root)).added[0]?.id;
+    if (!sourceId) throw new Error("Expected the source to be registered");
+    const page = conceptPage({
+      path: "wiki/pages/sources/gravity.md",
+      type: "source",
+      sources: [{ id: sourceId, locators: ["heading=gravity"] }],
+      body: `# Orbital Mechanics\n\nGravity matters. [@${sourceId}#heading=gravity]`,
+    });
+    await writeFile(path.join(root, page.path), renderWikiPage(page));
+    const cachePath = path.join(
+      root,
+      ".brain",
+      "cache",
+      "extracted",
+      `${sourceId}.json`,
+    );
+    await rm(cachePath);
+
+    const report = await validateWikiGraph(root);
+
+    expect(report.issues).not.toContainEqual(
+      expect.objectContaining({ code: "INVALID_SOURCE_LOCATOR" }),
+    );
+    await expect(access(cachePath)).resolves.toBeUndefined();
+  });
+
   test("generates connections, backlinks, and the global index", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-generated-"));
     await initBrain(root, {
@@ -376,6 +461,26 @@ describe("wiki page format", () => {
     );
 
     expect(candidates).toEqual([sharedEvidence.id, target.id].sort());
+  });
+
+  test("selects near-duplicate page names for reconciliation", () => {
+    const current = conceptPage({
+      sources: [],
+      body: "# Orbital Mechanics\n\nA concept page.",
+    });
+    const possibleDuplicate = conceptPage({
+      id: "pg_orbital_dynamics",
+      path: "wiki/pages/concepts/orbital-dynamics.md",
+      title: "Orbital Dynamics",
+      aliases: [],
+      tags: [],
+      sources: [],
+      body: "# Orbital Dynamics\n\nA separate concept page.",
+    });
+
+    expect(
+      buildReconciliationCandidates([current, possibleDuplicate], [current.id]),
+    ).toEqual([possibleDuplicate.id]);
   });
 
   test("merges duplicate pages without deleting history or breaking inbound relations", () => {

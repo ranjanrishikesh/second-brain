@@ -87,6 +87,41 @@ describe("query lifecycle", () => {
     expect(saved.question).toBe("What are quasars?");
   });
 
+  test("recovers an interrupted canonical write before beginning a query", async () => {
+    const root = await queryBrain();
+    const [current] = await loadWikiPages(root);
+    if (!current) throw new Error("Expected a wiki page");
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        {
+          version: 1,
+          operationId: "op_query_recovery",
+          catalogRevision: calculateCatalogRevision([current]),
+          reason: "Simulate an interrupted update",
+          pages: [
+            {
+              action: "update",
+              expectedRevision: current.revision,
+              page: {
+                ...current,
+                summary: "This interrupted summary must be rolled back.",
+                updatedAt: "2026-08-23T14:00:00.000Z",
+              },
+            },
+          ],
+          reconciliation: { candidatePageIds: [], reviewed: [] },
+        },
+        { simulateCrashAfter: "files-applied" },
+      ),
+    ).rejects.toThrow("Simulated transaction crash");
+
+    const session = await beginQuery(root, "What are quasars?");
+
+    expect(session.status).toBe("open");
+    expect((await loadWikiPages(root))[0]?.summary).toBe(current.summary);
+  });
+
   test("expands to raw sources only after the wiki is assessed as insufficient", async () => {
     const root = await queryBrain();
     const session = await beginQuery(
@@ -249,6 +284,59 @@ describe("query lifecycle", () => {
     ]);
   });
 
+  test("never deletes committed web evidence when query-session linkage fails", async () => {
+    const root = await queryBrain();
+    const session = await beginQuery(root, "What did Project Aurora report?");
+    await expandQuery(root, session.id, {
+      tier: "sources",
+      reason: "The wiki does not mention Project Aurora.",
+    });
+    await expandQuery(root, session.id, {
+      tier: "web",
+      reason: "Local sources do not mention Project Aurora.",
+    });
+    const input = {
+      url: "https://example.test/aurora",
+      title: "Project Aurora",
+      captureKind: "page" as const,
+      content: "Aurora reported a candidate signal.",
+      retrievedAt: "2026-08-23T14:00:00.000Z",
+    };
+
+    await expect(
+      captureWebEvidence(root, session.id, input, {
+        simulateSessionWriteFailure: true,
+      }),
+    ).rejects.toThrow(/session write failure/i);
+
+    const manifest = JSON.parse(
+      await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
+    );
+    const source = manifest.sources.find(
+      (candidate: { provenance?: { url?: string } }) =>
+        candidate.provenance?.url === input.url,
+    );
+    expect(source).toBeDefined();
+    expect(await readFile(path.join(root, source.path), "utf8")).toContain(
+      "candidate signal",
+    );
+    expect(
+      await execFile(
+        "git",
+        ["status", "--short", "--", source.path, ".brain/source-manifest.json"],
+        { cwd: root },
+      ).then((result) => result.stdout.trim()),
+    ).toBe("");
+
+    const retry = await captureWebEvidence(root, session.id, input);
+    expect(retry.created).toBe(false);
+    expect(retry.session.webEvidenceSourceIds).toContain(source.id);
+    expect(retry.session.bootstrap).toMatchObject({
+      required: true,
+      pendingSourceIds: [source.id],
+    });
+  });
+
   test("finishes a wiki-only answer with a log-only knowledge operation", async () => {
     const root = await queryBrain();
     const session = await beginQuery(root, "What are quasars?");
@@ -277,6 +365,58 @@ describe("query lifecycle", () => {
     });
   });
 
+  test("resumes query completion after a commit-completed interruption without duplicating the log", async () => {
+    const root = await queryBrain();
+    const session = await beginQuery(root, "What are quasars?");
+    const finishOptions = {
+      outcome: "answered" as const,
+      answerSummary: "Quasars are luminous galactic nuclei.",
+    };
+
+    await expect(
+      finishQuery(root, session.id, finishOptions, {
+        simulateCrashAfter: "committed",
+      }),
+    ).rejects.toThrow("Simulated transaction crash");
+
+    const resumed = await finishQuery(root, session.id, finishOptions);
+    const queryOperations = (
+      await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter(
+        (operation: { kind?: string; queryId?: string }) =>
+          operation.kind === "query" && operation.queryId === session.id,
+      );
+
+    expect(resumed.session.status).toBe("finished");
+    expect(queryOperations).toHaveLength(1);
+    expect(resumed.operationId).toBe(queryOperations[0]?.id);
+  });
+
+  test("blocks query completion while a semantic audit is due", async () => {
+    const root = await queryBrain();
+    const session = await beginQuery(root, "What are quasars?");
+    const statePath = path.join(root, ".brain", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.knowledgeMutations = 25;
+    state.semanticAuditDue = true;
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await execFile("git", ["add", ".brain/state.json"], { cwd: root });
+    await execFile("git", ["commit", "-m", "test: semantic audit due"], {
+      cwd: root,
+    });
+
+    await expect(
+      finishQuery(root, session.id, {
+        outcome: "answered",
+        answerSummary: "Quasars are luminous galactic nuclei.",
+      }),
+    ).rejects.toThrow(/semantic audit/i);
+  });
+
   test("requires a durable wiki mutation before a raw-backed answer can finish", async () => {
     const root = await queryBrain();
     const session = await beginQuery(
@@ -297,26 +437,30 @@ describe("query lifecycle", () => {
 
     const [current] = await loadWikiPages(root);
     if (!current) throw new Error("Expected a wiki page");
-    const transaction = await applyChangeSetTransaction(root, {
-      version: 1,
-      operationId: "op_query_raw_update",
-      catalogRevision: calculateCatalogRevision([current]),
-      reason: "Persist raw-backed spectroscopy knowledge",
-      pages: [
-        {
-          action: "update",
-          expectedRevision: current.revision,
-          page: {
-            ...current,
-            summary:
-              "Quasars are luminous nuclei whose redshift is measured spectroscopically.",
-            updatedAt: "2026-08-23T13:00:00.000Z",
-            body: `${current.body}\n\nSpectroscopy reveals their redshift. [@${current.sources[0]?.id}#heading=quasar-evidence]`,
+    const transaction = await applyChangeSetTransaction(
+      root,
+      {
+        version: 1,
+        operationId: "op_query_raw_update",
+        catalogRevision: calculateCatalogRevision([current]),
+        reason: "Persist raw-backed spectroscopy knowledge",
+        pages: [
+          {
+            action: "update",
+            expectedRevision: current.revision,
+            page: {
+              ...current,
+              summary:
+                "Quasars are luminous nuclei whose redshift is measured spectroscopically.",
+              updatedAt: "2026-08-23T13:00:00.000Z",
+              body: `${current.body}\n\nSpectroscopy reveals their redshift. [@${current.sources[0]?.id}#heading=quasar-evidence]`,
+            },
           },
-        },
-      ],
-      reconciliation: { candidatePageIds: [], reviewed: [] },
-    });
+        ],
+        reconciliation: { candidatePageIds: [], reviewed: [] },
+      },
+      { queryId: session.id },
+    );
     await attachQueryChange(root, session.id, transaction.operationId);
     const finished = await finishQuery(root, session.id, {
       outcome: "answered",
@@ -327,6 +471,80 @@ describe("query lifecycle", () => {
       "op_query_raw_update",
     ]);
     expect(finished.session.status).toBe("finished");
+  });
+
+  test("rejects attaching an unbound historical wiki mutation to a query", async () => {
+    const root = await queryBrain();
+    const [current] = await loadWikiPages(root);
+    if (!current) throw new Error("Expected a wiki page");
+    const transaction = await applyChangeSetTransaction(root, {
+      version: 1,
+      operationId: "op_unbound_history",
+      catalogRevision: calculateCatalogRevision([current]),
+      reason: "A mutation unrelated to the later query",
+      pages: [
+        {
+          action: "update",
+          expectedRevision: current.revision,
+          page: {
+            ...current,
+            summary: "An unrelated historical summary.",
+            updatedAt: "2026-08-23T14:00:00.000Z",
+          },
+        },
+      ],
+      reconciliation: { candidatePageIds: [], reviewed: [] },
+    });
+    const session = await beginQuery(root, "What does spectroscopy reveal?");
+    await expandQuery(root, session.id, {
+      tier: "sources",
+      reason: "The wiki does not answer the question.",
+    });
+
+    await expect(
+      attachQueryChange(root, session.id, transaction.operationId),
+    ).rejects.toThrow(/bound|query/i);
+  });
+
+  test("does not let a wiki-tier mutation satisfy a raw-backed answer", async () => {
+    const root = await queryBrain();
+    const session = await beginQuery(root, "What does spectroscopy reveal?");
+    const [current] = await loadWikiPages(root);
+    if (!current) throw new Error("Expected a wiki page");
+    const transaction = await applyChangeSetTransaction(
+      root,
+      {
+        version: 1,
+        operationId: "op_wiki_tier_only",
+        catalogRevision: calculateCatalogRevision([current]),
+        reason: "Persist a wiki-tier clarification",
+        pages: [
+          {
+            action: "update",
+            expectedRevision: current.revision,
+            page: {
+              ...current,
+              summary: "A clarified wiki-only summary of quasars.",
+              updatedAt: "2026-08-23T14:00:00.000Z",
+            },
+          },
+        ],
+        reconciliation: { candidatePageIds: [], reviewed: [] },
+      },
+      { queryId: session.id },
+    );
+    await attachQueryChange(root, session.id, transaction.operationId);
+    await expandQuery(root, session.id, {
+      tier: "sources",
+      reason: "The clarified wiki still lacks spectroscopy details.",
+    });
+
+    await expect(
+      finishQuery(root, session.id, {
+        outcome: "answered",
+        answerSummary: "Spectroscopy reveals redshift.",
+      }),
+    ).rejects.toThrow(/source|tier|raw/i);
   });
 
   test("blocks completion while catalog bootstrap still has uncataloged sources", async () => {

@@ -46,7 +46,7 @@ export type WikiPageV1 = z.infer<typeof wikiPageV1Schema>;
 
 export const changeSetV1Schema = z.object({
   version: z.literal(1),
-  operationId: z.string().min(1),
+  operationId: z.string().regex(/^op_[a-z0-9_-]{3,96}$/),
   catalogRevision: z.string().min(1),
   reason: z.string().trim().min(1),
   pages: z.array(

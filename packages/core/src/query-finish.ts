@@ -1,20 +1,22 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { z } from "zod";
-import { loadBrainConfig } from "./config.js";
 import {
   readQuerySession,
   refreshQueryBootstrap,
   writeQuerySession,
   type QuerySessionV1,
 } from "./query.js";
-import type { OperationRecordV1 } from "./transaction.js";
+import {
+  operationRecordV1Schema,
+  recoverBrain,
+  runCanonicalWrite,
+  type OperationRecordV1,
+  type TransactionTestOptions,
+} from "./transaction.js";
+import { sourceRecordV1Schema } from "./sources/types.js";
 import { loadWikiPages } from "./wiki/graph.js";
-
-const execFile = promisify(execFileCallback);
 
 const finishQueryOptionsSchema = z.object({
   outcome: z.enum(["answered", "partial", "unanswered"]),
@@ -29,31 +31,6 @@ export interface FinishQueryResult {
   commit?: string;
 }
 
-async function git(root: string, args: string[]): Promise<string> {
-  return (await execFile("git", args, { cwd: root })).stdout.trim();
-}
-
-async function isGitRepository(root: string): Promise<boolean> {
-  try {
-    await git(root, ["rev-parse", "--is-inside-work-tree"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function hasStagedChanges(root: string): Promise<boolean> {
-  try {
-    await execFile("git", ["diff", "--cached", "--quiet", "--exit-code"], {
-      cwd: root,
-    });
-    return false;
-  } catch (error) {
-    if ((error as { code?: number }).code === 1) return true;
-    throw error;
-  }
-}
-
 async function readOperations(root: string): Promise<OperationRecordV1[]> {
   const content = await readFile(
     path.join(root, ".brain", "operations.jsonl"),
@@ -62,7 +39,7 @@ async function readOperations(root: string): Promise<OperationRecordV1[]> {
   return content
     .split("\n")
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as OperationRecordV1);
+    .map((line) => operationRecordV1Schema.parse(JSON.parse(line)));
 }
 
 export async function attachQueryChange(
@@ -79,6 +56,19 @@ export async function attachQueryChange(
   if (operation?.kind !== "apply" || operation.pageIds.length === 0) {
     throw new Error(`Not a durable wiki mutation operation: ${operationId}`);
   }
+  if (operation.queryId !== session.id) {
+    throw new Error(
+      `Wiki mutation ${operationId} is not bound to query ${session.id}`,
+    );
+  }
+  if (
+    operation.tiersUsed.length !== 1 ||
+    !session.tiersUsed.includes(operation.tiersUsed[0] ?? "wiki")
+  ) {
+    throw new Error(
+      `Wiki mutation ${operationId} has no valid query evidence tier`,
+    );
+  }
   if (!session.changeOperationIds.includes(operationId)) {
     session.changeOperationIds.push(operationId);
   }
@@ -91,83 +81,75 @@ async function commitQueryOperation(
   root: string,
   session: QuerySessionV1,
   operation: OperationRecordV1,
+  testOptions: TransactionTestOptions,
 ): Promise<string | undefined> {
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const logPath = path.join(root, "wiki", "log.md");
-  const beforeOperations = await readFile(operationsPath, "utf8");
-  const beforeLog = await readFile(logPath, "utf8");
-  const gitRepository = await isGitRepository(root);
-  const config = await loadBrainConfig(root);
-  if (gitRepository) {
-    if (await hasStagedChanges(root)) {
-      throw new Error("Refusing query completion while Git has staged changes");
-    }
-    const dirtyManaged = await git(root, [
-      "status",
-      "--porcelain=v1",
-      "--",
-      "wiki",
-      ".brain/source-manifest.json",
-      ".brain/state.json",
-      ".brain/operations.jsonl",
-    ]);
-    if (dirtyManaged) {
-      throw new Error(
-        `Refusing query completion with dirty managed files:\n${dirtyManaged}`,
+  const transaction = await runCanonicalWrite(
+    root,
+    {
+      operationId: operation.id,
+      commitMessage: `brain(query): ${session.question.replace(/[\r\n\0]+/g, " ").slice(0, 100)} [op:${operation.id}]`,
+      testOptions,
+    },
+    async () => {
+      const beforeOperations = await readFile(operationsPath, "utf8");
+      const beforeLog = await readFile(logPath, "utf8");
+      await writeFile(
+        operationsPath,
+        `${beforeOperations}${JSON.stringify(operation)}\n`,
+        "utf8",
       );
-    }
-  }
-
-  const runtimePath = path.join(root, ".brain", "runtime");
-  const lockPath = path.join(runtimePath, "query-finish.lock");
-  await mkdir(runtimePath, { recursive: true });
-  await writeFile(lockPath, `${session.id}\n`, { flag: "wx" });
-  try {
-    await writeFile(
-      operationsPath,
-      `${beforeOperations}${JSON.stringify(operation)}\n`,
-      "utf8",
-    );
-    await writeFile(
-      logPath,
-      `${beforeLog.trimEnd()}\n\n## [${operation.completedAt}] query | ${session.question}\n\n- Operation: \`${operation.id}\`\n- Outcome: **${session.outcome}**\n- Tiers: ${session.tiersUsed.join(" → ")}\n- Summary: ${session.answerSummary}\n- Knowledge changes: ${session.changeOperationIds.map((id) => `\`${id}\``).join(", ") || "none"}\n`,
-      "utf8",
-    );
-    if (!gitRepository || !config.git.autoCommit) return undefined;
-    const preHead = await git(root, ["rev-parse", "HEAD"]);
-    await git(root, ["add", "--", ".brain/operations.jsonl", "wiki/log.md"]);
-    if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
-      throw new Error("Git HEAD changed during query completion");
-    }
-    await git(root, [
-      "commit",
-      "-m",
-      `brain(query): ${session.question.replace(/[\r\n\0]+/g, " ").slice(0, 100)} [op:${operation.id}]`,
-    ]);
-    return await git(root, ["rev-parse", "HEAD"]);
-  } catch (error) {
-    await writeFile(operationsPath, beforeOperations, "utf8");
-    await writeFile(logPath, beforeLog, "utf8");
-    if (gitRepository) {
-      await execFile(
-        "git",
-        ["restore", "--staged", "--", ".brain/operations.jsonl", "wiki/log.md"],
-        { cwd: root },
-      ).catch(() => undefined);
-    }
-    throw error;
-  } finally {
-    await rm(lockPath, { force: true });
-  }
+      await writeFile(
+        logPath,
+        `${beforeLog.trimEnd()}\n\n## [${operation.completedAt}] query | ${session.question}\n\n- Operation: \`${operation.id}\`\n- Outcome: **${session.outcome}**\n- Tiers: ${session.tiersUsed.join(" → ")}\n- Summary: ${session.answerSummary}\n- Knowledge changes: ${session.changeOperationIds.map((id) => `\`${id}\``).join(", ") || "none"}\n`,
+        "utf8",
+      );
+      return {
+        value: undefined,
+        stagePaths: [".brain/operations.jsonl", "wiki/log.md"],
+      };
+    },
+  );
+  return transaction.commit;
 }
 
 export async function finishQuery(
   root: string,
   queryId: string,
   rawOptions: FinishQueryOptions,
+  testOptions: TransactionTestOptions = {},
 ): Promise<FinishQueryResult> {
   const options = finishQueryOptionsSchema.parse(rawOptions);
+  await recoverBrain(root);
   const session = await readQuerySession(root, queryId);
+  const existingQueryOperation = (await readOperations(root)).find(
+    (operation) =>
+      operation.kind === "query" && operation.queryId === session.id,
+  );
+  if (existingQueryOperation) {
+    const existingOutcome =
+      existingQueryOperation.status === "completed"
+        ? "answered"
+        : existingQueryOperation.status;
+    if (
+      existingOutcome !== options.outcome ||
+      existingQueryOperation.summary !== options.answerSummary
+    ) {
+      throw new Error(
+        `Query ${queryId} was already completed with a different outcome or summary`,
+      );
+    }
+    session.status = "finished";
+    session.completedAt = existingQueryOperation.completedAt;
+    session.outcome = existingOutcome;
+    session.answerSummary = existingQueryOperation.summary;
+    await writeQuerySession(root, session);
+    return {
+      session,
+      operationId: existingQueryOperation.id,
+    };
+  }
   if (session.status !== "open")
     throw new Error(`Query is not open: ${queryId}`);
   await refreshQueryBootstrap(root, session);
@@ -175,6 +157,27 @@ export async function finishQuery(
   if (session.bootstrap.required) {
     throw new Error(
       `Catalog bootstrap is incomplete for ${session.bootstrap.pendingSourceIds.length} source(s)`,
+    );
+  }
+  const maintenanceState = z
+    .object({
+      semanticAuditDue: z.boolean().optional(),
+      semanticAudit: z
+        .object({ status: z.enum(["pending", "completed"]) })
+        .optional(),
+    })
+    .passthrough()
+    .parse(
+      JSON.parse(
+        await readFile(path.join(root, ".brain", "state.json"), "utf8"),
+      ),
+    );
+  if (
+    maintenanceState.semanticAuditDue ||
+    maintenanceState.semanticAudit?.status === "pending"
+  ) {
+    throw new Error(
+      "Semantic audit maintenance must be completed before finishing a query",
     );
   }
   if (
@@ -202,13 +205,79 @@ export async function finishQuery(
         `Query references an invalid wiki mutation: ${operationId}`,
       );
     }
+    if (
+      operation.queryId !== session.id ||
+      operation.tiersUsed.length !== 1 ||
+      !session.tiersUsed.includes(operation.tiersUsed[0] ?? "wiki")
+    ) {
+      throw new Error(
+        `Query references a wiki mutation that is not bound to this lifecycle: ${operationId}`,
+      );
+    }
     return operation;
   });
+  const pages = await loadWikiPages(root);
+  if (
+    options.outcome !== "unanswered" &&
+    (session.currentTier === "sources" || session.currentTier === "web")
+  ) {
+    const evidenceTierOperations = attachedOperations.filter((operation) =>
+      operation.tiersUsed.includes(session.currentTier),
+    );
+    if (evidenceTierOperations.length === 0) {
+      throw new Error(
+        `A ${session.currentTier}-backed answer requires a wiki mutation bound to the ${session.currentTier} tier`,
+      );
+    }
+    const evidencePageIds = new Set(
+      evidenceTierOperations.flatMap((operation) => operation.pageIds),
+    );
+    const citedSourceIds = new Set(
+      pages
+        .filter((page) => evidencePageIds.has(page.id))
+        .flatMap((page) => page.sources.map((source) => source.id)),
+    );
+    if (session.currentTier === "web") {
+      if (
+        !session.webEvidenceSourceIds.some((sourceId) =>
+          citedSourceIds.has(sourceId),
+        )
+      ) {
+        throw new Error(
+          "A web-backed answer must cite captured web evidence in its wiki mutation",
+        );
+      }
+    } else {
+      const manifest = z
+        .object({
+          version: z.literal(1),
+          sources: z.array(sourceRecordV1Schema),
+        })
+        .parse(
+          JSON.parse(
+            await readFile(
+              path.join(root, ".brain", "source-manifest.json"),
+              "utf8",
+            ),
+          ),
+        );
+      if (
+        !manifest.sources.some(
+          (source) =>
+            source.provenance.kind === "file" && citedSourceIds.has(source.id),
+        )
+      ) {
+        throw new Error(
+          "A raw-source-backed answer must cite an immutable local source in its wiki mutation",
+        );
+      }
+    }
+  }
   if (options.outcome === "unanswered") {
     const changedPageIds = new Set(
       attachedOperations.flatMap((item) => item.pageIds),
     );
-    const hasGapPage = (await loadWikiPages(root)).some(
+    const hasGapPage = pages.some(
       (page) => page.type === "question" && changedPageIds.has(page.id),
     );
     if (!hasGapPage) {
@@ -236,7 +305,12 @@ export async function finishQuery(
     tiersUsed: session.tiersUsed,
     queryId: session.id,
   };
-  const commit = await commitQueryOperation(root, session, operation);
+  const commit = await commitQueryOperation(
+    root,
+    session,
+    operation,
+    testOptions,
+  );
   await writeQuerySession(root, session);
   return {
     session,

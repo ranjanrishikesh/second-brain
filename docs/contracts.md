@@ -35,6 +35,8 @@ The same source and locator must be declared in frontmatter. Normal navigation u
 
 Agents do not write canonical wiki/state files directly. `ChangeSetV1` carries page operations plus a reconciliation receipt. The receipt covers graph neighbors, shared evidence and tags, duplicates, and related search results. Every candidate needs a content-based `changed` or `no-change` decision after its body and targeted anchor are read.
 
+Query-driven changes must be submitted with `brain apply --query <query-id>`. The core records the query's active evidence tier on the operation; an unbound historical mutation or a mutation from an earlier tier cannot satisfy raw/web persistence requirements.
+
 The transaction validates all pages, citations, anchors, aliases, relation types, source IDs, revisions, duplicates, and the complete structural graph. It then regenerates index, map, backlinks, sources, health, state, and logs atomically.
 
 Contradictory claims remain cited in a conflicts section and use `supports` or `contradicts` edges. Pages are archived, merged, renamed, or superseded rather than destructively erased.

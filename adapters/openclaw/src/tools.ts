@@ -62,7 +62,11 @@ export function createBrainToolHandlers(root: string) {
       changeSet: ChangeSetV1;
       queryId?: string;
     }) => {
-      const result = await applyChangeSetTransaction(root, input.changeSet);
+      const result = await applyChangeSetTransaction(
+        root,
+        input.changeSet,
+        input.queryId ? { queryId: input.queryId } : {},
+      );
       if (input.queryId) {
         await attachQueryChange(root, input.queryId, result.operationId);
       }

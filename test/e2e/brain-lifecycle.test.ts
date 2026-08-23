@@ -85,25 +85,49 @@ async function applyCreatedPages(
 ): Promise<void> {
   const current = await loadWikiPages(root);
   const proposed = [...current, ...pages];
-  const candidates = buildReconciliationCandidates(
-    proposed,
-    pages.map((page) => page.id),
-  );
-  const result = await applyChangeSetTransaction(root, {
-    version: 1,
-    operationId,
-    catalogRevision: calculateCatalogRevision(current),
-    reason: `E2E fake-host mutation ${operationId}`,
-    pages: pages.map((page) => ({ action: "create" as const, page })),
-    reconciliation: {
-      candidatePageIds: candidates,
-      reviewed: candidates.map((pageId) => ({
-        pageId,
-        decision: "no-change" as const,
-        reason: "Read in full; the new cited claim does not alter this page.",
+  const changedPageIds = new Set(pages.map((page) => page.id));
+  const currentPageIds = new Set(current.map((page) => page.id));
+  const relatedSearchResults: Awaited<ReturnType<typeof searchBrain>> = [];
+  for (const page of pages) {
+    relatedSearchResults.push(
+      ...(await searchBrain(root, {
+        query: `${page.title} ${page.summary}`,
+        scope: "wiki",
+        limit: 20,
       })),
+    );
+  }
+  const searchedCandidates = relatedSearchResults
+    .filter(
+      (result) =>
+        currentPageIds.has(result.id) && !changedPageIds.has(result.id),
+    )
+    .map((result) => result.id);
+  const candidates = [
+    ...new Set([
+      ...buildReconciliationCandidates(proposed, [...changedPageIds]),
+      ...searchedCandidates,
+    ]),
+  ].sort();
+  const result = await applyChangeSetTransaction(
+    root,
+    {
+      version: 1,
+      operationId,
+      catalogRevision: calculateCatalogRevision(current),
+      reason: `E2E fake-host mutation ${operationId}`,
+      pages: pages.map((page) => ({ action: "create" as const, page })),
+      reconciliation: {
+        candidatePageIds: candidates,
+        reviewed: candidates.map((pageId) => ({
+          pageId,
+          decision: "no-change" as const,
+          reason: "Read in full; the new cited claim does not alter this page.",
+        })),
+      },
     },
-  });
+    { queryId },
+  );
   await attachQueryChange(root, queryId, result.operationId);
 }
 
@@ -197,6 +221,11 @@ describe("portable second-brain fake host", () => {
       "op_e2e_bootstrap_formats",
       batch.sources.map(sourcePage),
     );
+    expect(
+      JSON.parse(
+        await readFile(path.join(root, ".brain", "state.json"), "utf8"),
+      ).bootstrap,
+    ).toEqual({ status: "completed", pendingSourceIds: [] });
 
     const expanded = await expandQuery(root, session.id, {
       tier: "sources",

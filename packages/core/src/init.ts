@@ -1,4 +1,12 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { brainConfigV1Schema } from "./config.js";
@@ -25,7 +33,17 @@ async function writeIfMissing(
     await readFile(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await writeFile(filePath, content, "utf8");
+    await atomicWrite(filePath, content);
+  }
+}
+
+async function atomicWrite(filePath: string, content: string): Promise<void> {
+  const temporaryPath = `${filePath}.tmp-${randomUUID()}`;
+  try {
+    await writeFile(temporaryPath, content, "utf8");
+    await rename(temporaryPath, filePath);
+  } finally {
+    await rm(temporaryPath, { force: true });
   }
 }
 
@@ -74,6 +92,12 @@ function updateCharterIdentity(
   );
   if (descriptionIndex >= 0) lines[descriptionIndex] = description;
   else lines.splice(1, 0, "", description);
+  return `${lines.join("\n")}\n`;
+}
+
+function updateHomeIdentity(content: string, name: string): string {
+  const lines = content.trimEnd().split("\n");
+  lines[0] = `# ${name}`;
   return `${lines.join("\n")}\n`;
 }
 
@@ -137,7 +161,9 @@ export async function initBrain(
       `# ${config.brain.name}\n\n${config.brain.description}\n\n## Boundaries\n\nDocument what belongs in this brain and what does not.\n`,
     );
   } else if (identityMode === "replace-template") {
-    await writeFile(path.join(root, "brain.config.yaml"), stringify(config));
+    await atomicWrite(path.join(root, "brain.config.yaml"), stringify(config));
+  }
+  if (identityMode !== "new") {
     let charter: string;
     try {
       charter = await readFile(path.join(root, "BRAIN.md"), "utf8");
@@ -146,20 +172,22 @@ export async function initBrain(
       charter =
         "# Portable Second Brain\n\nA self-maintaining personal knowledge base.\n";
     }
-    await writeFile(
+    await atomicWrite(
       path.join(root, "BRAIN.md"),
       updateCharterIdentity(
         charter,
         config.brain.name,
         config.brain.description,
       ),
-      "utf8",
     );
-    await writeFile(
-      path.join(root, "wiki", "home.md"),
-      `# ${config.brain.name}\n`,
-      "utf8",
-    );
+    const homePath = path.join(root, "wiki", "home.md");
+    let home = `# ${config.brain.name}\n`;
+    try {
+      home = await readFile(homePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await atomicWrite(homePath, updateHomeIdentity(home, config.brain.name));
   }
   await writeIfMissing(
     path.join(root, ".brain", "source-manifest.json"),

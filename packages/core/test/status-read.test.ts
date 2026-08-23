@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -43,6 +43,10 @@ describe("brain status and reading", () => {
 
     const status = await statusBrain(root);
     const pageRead = await readBrainItem(root, page.id);
+    await rm(path.join(root, ".brain", "cache"), {
+      recursive: true,
+      force: true,
+    });
     const sourceRead = await readBrainItem(root, source.id, "heading=stars");
 
     expect(status).toMatchObject({

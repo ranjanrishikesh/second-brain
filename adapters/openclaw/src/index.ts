@@ -8,6 +8,7 @@ import { createBrainToolHandlers } from "./tools.js";
 
 const sourceId = Type.String({ pattern: "^src_[a-f0-9]{16}$" });
 const pageId = Type.String({ pattern: "^pg_[a-z0-9_]{3,64}$" });
+const operationId = Type.String({ pattern: "^op_[a-z0-9_-]{3,96}$" });
 const nonempty = Type.String({ minLength: 1 });
 
 const relation = Type.Object(
@@ -59,7 +60,7 @@ const wikiPage = Type.Object(
 const changeSet = Type.Object(
   {
     version: Type.Literal(1),
-    operationId: nonempty,
+    operationId,
     catalogRevision: nonempty,
     reason: nonempty,
     pages: Type.Array(

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import {
   initBrain,
+  recoverBrain,
   scanAndRegisterSources,
   supersedeRegisteredSource,
 } from "../src/index.js";
@@ -17,6 +18,57 @@ async function git(root: string, args: string[]): Promise<string> {
 }
 
 describe("registered source transactions", () => {
+  test("shares the canonical writer lock with wiki mutations", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-lock-"));
+    await initBrain(root, { name: "Sources", description: "Lock test" });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Second Brain Test"]);
+    await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+    await writeFile(path.join(root, "sources", "facts.md"), "# Facts\n");
+    await writeFile(
+      path.join(root, ".brain", "runtime", "writer.lock"),
+      "busy\n",
+    );
+
+    await expect(scanAndRegisterSources(root)).rejects.toThrow(/exist|lock/i);
+  });
+
+  test("recovers a source registration interrupted after canonical files change", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-recover-"));
+    await initBrain(root, { name: "Sources", description: "Recovery test" });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Second Brain Test"]);
+    await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const before = await readFile(manifestPath, "utf8");
+    const sourcePath = path.join(root, "sources", "facts.md");
+    await writeFile(sourcePath, "# Facts\n\nRecover me.\n");
+
+    await expect(
+      scanAndRegisterSources(root, { simulateCrashAfter: "files-applied" }),
+    ).rejects.toThrow("Simulated transaction crash");
+    expect(await readFile(manifestPath, "utf8")).not.toBe(before);
+
+    await expect(recoverBrain(root)).resolves.toBe("restored");
+    expect(await readFile(manifestPath, "utf8")).toBe(before);
+    expect(await readFile(sourcePath, "utf8")).toContain("Recover me");
+    await expect(scanAndRegisterSources(root)).resolves.toMatchObject({
+      added: [{ path: "sources/facts.md" }],
+    });
+  });
+
   test("commits explicit supersession while retaining both immutable versions", async () => {
     const root = await mkdtemp(
       path.join(tmpdir(), "brain-source-transaction-"),

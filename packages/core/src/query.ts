@@ -6,6 +6,7 @@ import { loadBrainConfig } from "./config.js";
 import { searchBrain, searchResultV1Schema } from "./search.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
+import { recoverBrain } from "./transaction.js";
 import { loadWikiPages } from "./wiki/graph.js";
 
 export const querySessionV1Schema = z.object({
@@ -98,6 +99,7 @@ export async function beginQuery(
 ): Promise<QuerySessionV1> {
   const normalizedQuestion = question.trim();
   if (!normalizedQuestion) throw new Error("Question cannot be empty");
+  await recoverBrain(root);
   await scanAndRegisterSources(root);
   const wikiResults = await searchBrain(root, {
     query: normalizedQuestion,

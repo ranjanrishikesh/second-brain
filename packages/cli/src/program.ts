@@ -334,6 +334,7 @@ export async function runCli(
         const result = await applyChangeSetTransaction(
           options.root,
           JSON.parse(await readFile(changeSetFile, "utf8")),
+          options.query ? { queryId: options.query } : {},
         );
         if (options.query) {
           await attachQueryChange(

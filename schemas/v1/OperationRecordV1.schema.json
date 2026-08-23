@@ -8,7 +8,7 @@
     },
     "id": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^op_[a-z0-9_-]{3,96}$"
     },
     "kind": {
       "type": "string",

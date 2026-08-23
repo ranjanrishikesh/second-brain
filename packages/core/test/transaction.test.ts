@@ -8,6 +8,7 @@ import {
   applyChangeSetTransaction,
   calculateCatalogRevision,
   initBrain,
+  loadWikiPages,
   recoverBrain,
   type ChangeSetV1,
   type WikiPageV1,
@@ -71,6 +72,16 @@ function createSourcePageChangeSet(
 }
 
 describe("applyChangeSetTransaction", () => {
+  test("does not recover over a live canonical writer", async () => {
+    const root = await initializedGitBrain();
+    await writeFile(
+      path.join(root, ".brain", "runtime", "writer.lock"),
+      `${JSON.stringify({ pid: process.pid, operationId: "op_live_writer" })}\n`,
+    );
+
+    await expect(recoverBrain(root)).rejects.toThrow(/writer.*active/i);
+  });
+
   test("commits validated managed files while preserving unrelated worktree edits", async () => {
     const root = await initializedGitBrain();
     await writeFile(
@@ -137,6 +148,122 @@ describe("applyChangeSetTransaction", () => {
     ).toBe(beforeOperations);
   });
 
+  test("rejects operation IDs that could escape the transaction directory", async () => {
+    const root = await initializedGitBrain();
+    const marker = path.join(root, "escape-marker.txt");
+    await writeFile(marker, "must survive\n");
+    const changeSet = createSourcePageChangeSet();
+    changeSet.operationId = "../../escape-marker.txt";
+
+    await expect(applyChangeSetTransaction(root, changeSet)).rejects.toThrow(
+      /operationId|invalid/i,
+    );
+    expect(await readFile(marker, "utf8")).toBe("must survive\n");
+  });
+
+  test("rejects two stable page IDs targeting the same normalized path", async () => {
+    const root = await initializedGitBrain();
+    const first = sourcePage();
+    const second = {
+      ...sourcePage(),
+      id: "pg_source_collision",
+      title: "Colliding source",
+    };
+    const changeSet = createSourcePageChangeSet("op_duplicate_page_path");
+    changeSet.pages = [
+      { action: "create", page: first },
+      { action: "create", page: second },
+    ];
+
+    await expect(applyChangeSetTransaction(root, changeSet)).rejects.toThrow(
+      /duplicate wiki page path/i,
+    );
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
+  test("requires reconciliation of pages discovered by related-page search", async () => {
+    const root = await initializedGitBrain();
+    const spectroscopy = {
+      ...sourcePage(),
+      id: "pg_quasar_spectroscopy",
+      path: "wiki/pages/sources/quasar-spectroscopy.md",
+      title: "Quasar Spectroscopy",
+      summary: "Measures distant redshift.",
+      tags: [],
+      body: "# Quasar Spectroscopy\n\nMeasures distant redshift.",
+    };
+    const observatory = {
+      ...sourcePage(),
+      id: "pg_observatory_notes",
+      path: "wiki/pages/sources/observatory-notes.md",
+      title: "Observatory Notes",
+      summary: "A nightly observing source.",
+      tags: [],
+      body: "# Observatory Notes\n\nThe quasar spectroscopy run measured a redshift.",
+    };
+    await applyChangeSetTransaction(root, {
+      version: 1,
+      operationId: "op_seed_related_search",
+      catalogRevision: calculateCatalogRevision([]),
+      reason: "Seed related source pages",
+      pages: [
+        { action: "create", page: spectroscopy },
+        { action: "create", page: observatory },
+      ],
+      reconciliation: { candidatePageIds: [], reviewed: [] },
+    });
+    const pages = await loadWikiPages(root);
+    const current = pages.find((page) => page.id === spectroscopy.id);
+    if (!current) throw new Error("Expected spectroscopy page");
+
+    await expect(
+      applyChangeSetTransaction(root, {
+        version: 1,
+        operationId: "op_omit_related_search",
+        catalogRevision: calculateCatalogRevision(pages),
+        reason: "Update spectroscopy without reviewing search results",
+        pages: [
+          {
+            action: "update",
+            expectedRevision: current.revision,
+            page: {
+              ...current,
+              summary: "Measures quasar redshift with spectroscopy.",
+              updatedAt: "2026-08-23T15:00:00.000Z",
+            },
+          },
+        ],
+        reconciliation: { candidatePageIds: [], reviewed: [] },
+      }),
+    ).rejects.toThrow(/reconciliation.*pg_observatory_notes/i);
+  });
+
+  test("rejects a declared page update that makes no canonical change", async () => {
+    const root = await initializedGitBrain();
+    await applyChangeSetTransaction(root, createSourcePageChangeSet());
+    const [current] = await loadWikiPages(root);
+    if (!current) throw new Error("Expected source page");
+
+    await expect(
+      applyChangeSetTransaction(root, {
+        version: 1,
+        operationId: "op_noop_update",
+        catalogRevision: calculateCatalogRevision([current]),
+        reason: "Attempt a no-op update",
+        pages: [
+          {
+            action: "update",
+            expectedRevision: current.revision,
+            page: current,
+          },
+        ],
+        reconciliation: { candidatePageIds: [], reviewed: [] },
+      }),
+    ).rejects.toThrow(/no canonical change|no-op/i);
+  });
+
   test("restores canonical files and HEAD when Git commit fails", async () => {
     const root = await initializedGitBrain();
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);
@@ -199,6 +326,97 @@ describe("applyChangeSetTransaction", () => {
       ).toBe("");
     },
   );
+
+  test("restores a files-applied crash even when an unrelated commit moves HEAD", async () => {
+    const root = await initializedGitBrain();
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_crash_external_head"),
+        { simulateCrashAfter: "files-applied" },
+      ),
+    ).rejects.toThrow("Simulated transaction crash");
+    await git(root, [
+      "commit",
+      "--allow-empty",
+      "-m",
+      "test: unrelated external commit",
+    ]);
+    const externalHead = await git(root, ["rev-parse", "HEAD"]);
+
+    expect(await recoverBrain(root)).toBe("restored");
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(externalHead);
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
+  test("recognizes its exact operation commit from a files-applied journal", async () => {
+    const root = await initializedGitBrain();
+    const operationId = "op_crash_after_git_commit";
+    await expect(
+      applyChangeSetTransaction(root, createSourcePageChangeSet(operationId), {
+        simulateCrashAfter: "files-applied",
+      }),
+    ).rejects.toThrow("Simulated transaction crash");
+    await git(root, [
+      "add",
+      "--",
+      "wiki",
+      ".brain/source-manifest.json",
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+    ]);
+    await git(root, [
+      "commit",
+      "-m",
+      `brain(apply): recovered commit [op:${operationId}]`,
+    ]);
+
+    expect(await recoverBrain(root)).toBe("committed");
+    expect(
+      await readFile(
+        path.join(root, "wiki", "pages", "sources", "orbits.md"),
+        "utf8",
+      ),
+    ).toContain("Orbits source");
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
+  test("rejects a recovery journal whose backup path escapes runtime", async () => {
+    const root = await initializedGitBrain();
+    const external = await mkdtemp(
+      path.join(tmpdir(), "brain-journal-external-"),
+    );
+    const journalPath = path.join(
+      root,
+      ".brain",
+      "runtime",
+      "transaction.json",
+    );
+    await writeFile(
+      journalPath,
+      `${JSON.stringify({
+        version: 1,
+        operationId: "op_forged_journal",
+        phase: "prepared",
+        preHead: await git(root, ["rev-parse", "HEAD"]),
+        backupPath: path.join(external, "backup"),
+        gitRepository: true,
+        stagePaths: [],
+      })}\n`,
+    );
+
+    await expect(recoverBrain(root)).rejects.toThrow(
+      "Unsafe recovery journal backup path",
+    );
+  });
 
   test("recognizes a commit-completed crash without rolling back the commit", async () => {
     const root = await initializedGitBrain();

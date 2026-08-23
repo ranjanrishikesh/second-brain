@@ -31,21 +31,25 @@ export const sourceRecordV1Schema = z.object({
 
 export type SourceRecordV1 = z.infer<typeof sourceRecordV1Schema>;
 
-export interface SourceChunkV1 {
-  id: string;
-  sourceId: string;
-  ordinal: number;
-  locator: string;
-  text: string;
-}
+export const sourceChunkV1Schema = z.object({
+  id: z.string().min(1),
+  sourceId: z.string().regex(/^src_[a-f0-9]{16}$/),
+  ordinal: z.number().int().nonnegative(),
+  locator: z.string().trim().min(1),
+  text: z.string(),
+});
 
-export interface ExtractedSourceV1 {
-  version: 1;
-  sourceId: string;
-  title: string;
-  text: string;
-  chunks: SourceChunkV1[];
-}
+export type SourceChunkV1 = z.infer<typeof sourceChunkV1Schema>;
+
+export const extractedSourceV1Schema = z.object({
+  version: z.literal(1),
+  sourceId: z.string().regex(/^src_[a-f0-9]{16}$/),
+  title: z.string().min(1),
+  text: z.string(),
+  chunks: z.array(sourceChunkV1Schema),
+});
+
+export type ExtractedSourceV1 = z.infer<typeof extractedSourceV1Schema>;
 
 export interface SourceScanResult {
   added: SourceRecordV1[];

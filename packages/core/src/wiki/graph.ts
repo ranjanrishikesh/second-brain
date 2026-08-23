@@ -3,7 +3,11 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "../config.js";
-import type { ExtractedSourceV1, SourceRecordV1 } from "../sources/types.js";
+import { rebuildExtractedSourceCache } from "../sources/rebuild-cache.js";
+import {
+  extractedSourceV1Schema,
+  sourceRecordV1Schema,
+} from "../sources/types.js";
 import {
   extractCitations,
   extractHeadingAnchors,
@@ -84,20 +88,45 @@ export function calculateCatalogRevision(pages: WikiPageV1[]): string {
 export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
   const config = await loadBrainConfig(root);
   const pages = await loadWikiPages(root);
-  const manifest = JSON.parse(
-    await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
-  ) as { sources: SourceRecordV1[] };
+  const manifest = z
+    .object({ version: z.literal(1), sources: z.array(sourceRecordV1Schema) })
+    .parse(
+      JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      ),
+    );
   const sourceIds = new Set(manifest.sources.map((source) => source.id));
   const validLocators = new Map<string, Set<string>>();
   for (const source of manifest.sources) {
     if (source.extractionStatus !== "ready") continue;
     try {
-      const extracted = JSON.parse(
-        await readFile(
-          path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
-          "utf8",
-        ),
-      ) as ExtractedSourceV1;
+      let extracted: z.infer<typeof extractedSourceV1Schema>;
+      try {
+        extracted = extractedSourceV1Schema.parse(
+          JSON.parse(
+            await readFile(
+              path.join(
+                root,
+                ".brain",
+                "cache",
+                "extracted",
+                `${source.id}.json`,
+              ),
+              "utf8",
+            ),
+          ),
+        );
+        if (extracted.sourceId !== source.id) {
+          throw new Error(`Extracted cache source ID mismatch: ${source.id}`);
+        }
+      } catch {
+        extracted = extractedSourceV1Schema.parse(
+          await rebuildExtractedSourceCache(root, source),
+        );
+      }
       validLocators.set(
         source.id,
         new Set(extracted.chunks.map((chunk) => chunk.locator)),
@@ -170,9 +199,10 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
         names.set(normalized, page.id);
       }
     }
+    const citations = extractCitations(page.body);
     const referencedSourceIds = new Set([
       ...page.sources.map((source) => source.id),
-      ...extractCitations(page.body).map((citation) => citation.sourceId),
+      ...citations.map((citation) => citation.sourceId),
       ...page.relations.flatMap((relation) => relation.sourceIds),
     ]);
     for (const sourceId of referencedSourceIds) {
@@ -193,6 +223,37 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
           code: "INVALID_SOURCE_LOCATOR",
           severity: "error",
           message: `Source locator does not exist: ${sourceReference.id}#${locator}`,
+          pageId: page.id,
+        });
+      }
+    }
+    const declaredLocators = new Map(
+      page.sources.map((source) => [source.id, new Set(source.locators)]),
+    );
+    for (const citation of citations) {
+      if (!citation.locator) {
+        issues.push({
+          code: "MISSING_CITATION_LOCATOR",
+          severity: "error",
+          message: `Inline citation requires a locator: ${citation.sourceId}`,
+          pageId: page.id,
+        });
+        continue;
+      }
+      if (!declaredLocators.get(citation.sourceId)?.has(citation.locator)) {
+        issues.push({
+          code: "CITATION_NOT_DECLARED",
+          severity: "error",
+          message: `Inline citation is not declared exactly in page sources: ${citation.sourceId}#${citation.locator}`,
+          pageId: page.id,
+        });
+      }
+      const sourceLocators = validLocators.get(citation.sourceId);
+      if (sourceLocators && !sourceLocators.has(citation.locator)) {
+        issues.push({
+          code: "INVALID_CITATION_LOCATOR",
+          severity: "error",
+          message: `Inline citation locator does not exist: ${citation.sourceId}#${citation.locator}`,
           pageId: page.id,
         });
       }

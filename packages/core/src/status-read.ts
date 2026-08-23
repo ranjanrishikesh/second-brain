@@ -2,7 +2,9 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "./config.js";
 import { pendingBootstrapSourceIds } from "./query.js";
+import { rebuildExtractedSourceCache } from "./sources/rebuild-cache.js";
 import {
+  extractedSourceV1Schema,
   sourceRecordV1Schema,
   type ExtractedSourceV1,
   type SourceChunkV1,
@@ -142,14 +144,22 @@ export async function readBrainItem(
   if (!source) throw new Error(`Brain item not found: ${reference}`);
   let extracted: ExtractedSourceV1 | undefined;
   try {
-    extracted = JSON.parse(
-      await readFile(
-        path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
-        "utf8",
+    extracted = extractedSourceV1Schema.parse(
+      JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+          "utf8",
+        ),
       ),
-    ) as ExtractedSourceV1;
+    );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (source.extractionStatus === "ready") {
+      extracted = extractedSourceV1Schema.parse(
+        await rebuildExtractedSourceCache(root, source),
+      );
+    } else if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
   }
   const chunks = locator
     ? (extracted?.chunks.filter((chunk) => chunk.locator === locator) ?? [])
