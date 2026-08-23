@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -384,8 +384,21 @@ describe("query lifecycle", () => {
       /exist|lock|writer/i,
     );
 
-    expect(await readFile(evidencePath, "utf8")).toContain(
-      "concurrent survey found a candidate",
+    const preparedEvidence = await readFile(evidencePath, "utf8");
+    expect(preparedEvidence).toContain("concurrent survey found a candidate");
+
+    await rm(path.join(root, ".brain", "runtime", "writer.lock"));
+    await writeFile(evidencePath, "mismatched prepared bytes\n");
+    await expect(captureWebEvidence(root, session.id, input)).rejects.toThrow(
+      /prepared web evidence bytes do not match/i,
+    );
+    await writeFile(evidencePath, preparedEvidence);
+    const resumed = await captureWebEvidence(root, session.id, input);
+
+    expect(resumed.created).toBe(true);
+    expect(resumed.session.webEvidenceSourceIds).toContain(resumed.source.id);
+    expect(resumed.source.path).toBe(
+      path.relative(root, evidencePath).split(path.sep).join("/"),
     );
   });
 

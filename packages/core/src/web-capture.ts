@@ -122,19 +122,32 @@ export async function captureWebEvidence(
     ...(previous ? { supersedes: previous.id } : {}),
   };
   const absolutePath = path.join(root, relativePath);
+  const captureMarkdown = `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${input.content.trim()}\n`;
   await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(
-    absolutePath,
-    `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${input.content.trim()}\n`,
-    { encoding: "utf8", flag: "wx" },
-  );
+  try {
+    await writeFile(absolutePath, captureMarkdown, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const prepared = await readFile(absolutePath, "utf8");
+    if (prepared !== captureMarkdown) {
+      throw new Error(
+        `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
+      );
+    }
+  }
   // A prepared capture is immutable source input. If registration or session
   // linkage is interrupted, preserve it for a later scan instead of racing a
   // concurrent canonical writer with cleanup.
   const scan = await scanAndRegisterSources(root);
-  const source = scan.added.find(
+  const addedSource = scan.added.find(
     (candidate) => candidate.path === relativePath,
   );
+  const source =
+    addedSource ??
+    scan.unchanged.find((candidate) => candidate.path === relativePath);
   if (!source)
     throw new Error(`Captured source was not registered: ${relativePath}`);
   session.webEvidenceSourceIds.push(source.id);
@@ -147,5 +160,5 @@ export async function captureWebEvidence(
     throw new Error("Simulated query session write failure");
   }
   await writeQuerySession(root, session);
-  return { source, session, created: true };
+  return { source, session, created: Boolean(addedSource) };
 }
