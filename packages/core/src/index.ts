@@ -47,3 +47,41 @@ export type {
   RelationV1,
   WikiPageV1,
 } from "./wiki/types.js";
+export { applyChangeSetTransaction, recoverBrain } from "./transaction.js";
+export type {
+  OperationRecordV1,
+  TransactionResult,
+  TransactionTestOptions,
+} from "./transaction.js";
+export {
+  beginQuery,
+  expandQuery,
+  nextBootstrapBatch,
+  querySessionV1Schema,
+  readQuerySession,
+  writeQuerySession,
+} from "./query.js";
+export type { QuerySessionV1 } from "./query.js";
+export type { ExpandQueryOptions } from "./query.js";
+export type {
+  BootstrapBatchV1,
+  BootstrapSourceContextV1,
+} from "./query.js";
+export { scanAndRegisterSources } from "./source-transaction.js";
+export { captureWebEvidence } from "./web-capture.js";
+export type { WebCaptureInput, WebCaptureResult } from "./web-capture.js";
+export { attachQueryChange, finishQuery } from "./query-finish.js";
+export type {
+  FinishQueryOptions,
+  FinishQueryResult,
+} from "./query-finish.js";
+export {
+  auditBrain,
+  nextSemanticAuditBatch,
+  recordSemanticAuditBatch,
+} from "./audit.js";
+export type {
+  RecordSemanticAuditInput,
+  RecordSemanticAuditResult,
+  SemanticAuditBatchV1,
+} from "./audit.js";

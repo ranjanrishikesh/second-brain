@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parse } from "yaml";
 import { loadBrainConfig } from "../config.js";
 import {
   extractCsv,
@@ -22,6 +23,49 @@ import {
 interface SourceManifestV1 {
   version: 1;
   sources: SourceRecordV1[];
+}
+
+interface WebCaptureMetadata {
+  brainWebCapture: 1;
+  url: string;
+  retrievedAt: string;
+  query: string;
+  captureKind: "page" | "snippet";
+  title: string;
+  supersedes?: string;
+}
+
+function readWebCaptureMetadata(
+  content: string,
+): WebCaptureMetadata | undefined {
+  if (!content.startsWith("---\n")) return undefined;
+  const closingMarker = content.indexOf("\n---\n", 4);
+  if (closingMarker < 0) return undefined;
+  const metadata = parse(content.slice(4, closingMarker)) as Record<
+    string,
+    unknown
+  >;
+  if (
+    metadata.brainWebCapture !== 1 ||
+    typeof metadata.url !== "string" ||
+    typeof metadata.retrievedAt !== "string" ||
+    typeof metadata.query !== "string" ||
+    (metadata.captureKind !== "page" && metadata.captureKind !== "snippet") ||
+    typeof metadata.title !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    brainWebCapture: 1,
+    url: metadata.url,
+    retrievedAt: metadata.retrievedAt,
+    query: metadata.query,
+    captureKind: metadata.captureKind,
+    title: metadata.title,
+    ...(typeof metadata.supersedes === "string"
+      ? { supersedes: metadata.supersedes }
+      : {}),
+  };
 }
 
 async function walk(directory: string): Promise<string[]> {
@@ -102,6 +146,9 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
       const id = `src_${digest.slice(0, 16)}`;
       const fileStats = await stat(absolutePath);
       const markdown = extension === ".md" || extension === ".markdown";
+      const webCapture = markdown
+        ? readWebCaptureMetadata(content.toString("utf8"))
+        : undefined;
       const plainText = extension === ".txt";
       const html = extension === ".html" || extension === ".htm";
       const json = extension === ".json";
@@ -154,7 +201,8 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
         id,
         sha256: digest,
         path: relativePath,
-        title: extracted?.title ?? path.basename(relativePath),
+        title:
+          webCapture?.title ?? extracted?.title ?? path.basename(relativePath),
         mediaType: markdown
           ? "text/markdown"
           : plainText
@@ -200,7 +248,18 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
                       : epub
                         ? "epub-v1"
                         : "none",
-        provenance: { kind: "file" },
+        provenance: webCapture
+          ? {
+              kind: "web",
+              url: webCapture.url,
+              retrievedAt: webCapture.retrievedAt,
+              query: webCapture.query,
+              captureKind: webCapture.captureKind,
+            }
+          : { kind: "file" },
+        ...(webCapture?.supersedes
+          ? { supersedes: webCapture.supersedes }
+          : {}),
         ...(extractionError ? { error: extractionError } : {}),
       });
       result.added.push(record);

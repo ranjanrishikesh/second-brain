@@ -165,7 +165,7 @@ function ftsQuery(query: string): string {
   const terms = query.match(/[\p{L}\p{N}_-]+/gu) ?? [];
   if (terms.length === 0)
     throw new Error("Search query must contain a letter or number");
-  return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" AND ");
+  return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
 }
 
 export async function searchBrain(
