@@ -12,6 +12,8 @@ import { attemptManagedSync } from "./sync.js";
 import { recoverBrain } from "./transaction.js";
 import { assertWebApproval, webApprovalV1Schema } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
+import { readReceiptV1Schema, type ReadReceiptV1 } from "./wiki/types.js";
+import type { BrainReadResultV1 } from "./status-read.js";
 
 export const querySessionV1Schema = z.object({
   version: z.literal(1),
@@ -62,11 +64,19 @@ export const querySessionV1Schema = z.object({
     .default({ required: false, pendingSourceIds: [] }),
   sync: syncStatusV1Schema.default({ status: "unconfigured" }),
   webApproval: webApprovalV1Schema.optional(),
+  readReceipts: z.array(readReceiptV1Schema).default([]),
   webEvidenceSourceIds: z.array(z.string()).default([]),
   changeOperationIds: z.array(z.string()).default([]),
 });
 
 export type QuerySessionV1 = z.infer<typeof querySessionV1Schema>;
+
+export interface QueryReadResultV1 {
+  version: 1;
+  queryId: string;
+  item: BrainReadResultV1;
+  receipt?: ReadReceiptV1;
+}
 
 function sessionPath(root: string, queryId: string): string {
   return path.join(root, ".brain", "runtime", "queries", `${queryId}.json`);
@@ -197,11 +207,44 @@ export async function beginQuery(
         state.setup.status === "completed" ? pendingSourceIds : [],
     },
     sync,
+    readReceipts: [],
     webEvidenceSourceIds: [],
     changeOperationIds: [],
   });
   await writeQuerySession(root, session);
   return session;
+}
+
+/** Records the exact revision of a wiki page read during an open query. */
+export async function readQueryItem(
+  root: string,
+  queryId: string,
+  reference: string,
+  locator?: string,
+): Promise<QueryReadResultV1> {
+  const session = await readQuerySession(root, queryId);
+  if (session.status !== "open") {
+    throw new Error(`Query is not open: ${queryId}`);
+  }
+  const { readBrainItem } = await import("./status-read.js");
+  const item = await readBrainItem(root, reference, locator);
+  if (item.kind !== "wiki") {
+    return { version: 1, queryId, item };
+  }
+  const receipt = readReceiptV1Schema.parse({
+    pageId: item.page.id,
+    revision: item.page.revision,
+    ...(locator ? { anchor: locator } : {}),
+    readAt: new Date().toISOString(),
+  });
+  session.readReceipts = [
+    ...session.readReceipts.filter(
+      (existing) => existing.pageId !== receipt.pageId,
+    ),
+    receipt,
+  ];
+  await writeQuerySession(root, session);
+  return { version: 1, queryId, item, receipt };
 }
 
 export interface ExpandQueryOptions {

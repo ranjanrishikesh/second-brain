@@ -1,22 +1,36 @@
 import {
   applyChangeSetTransaction,
+  attemptManagedSync,
   attachQueryChange,
   auditBrain,
+  beginSetup,
   beginQuery,
   captureWebEvidence,
+  changeSetV1Schema,
+  configureSyncTarget,
   doctorBrain,
   expandQuery,
+  finishSetup,
   finishQuery,
+  formatSyncWarning,
   initBrain,
   nextBootstrapBatch,
+  nextSetupBatch,
+  planReconciliation,
   readBrainItem,
+  readQueryItem,
+  readQuerySession,
   recordSemanticAuditBatch,
   rebuildSearchIndex,
   recoverBrain,
+  requestWebApproval,
   scanAndRegisterSources,
+  resolveWebApproval,
   searchBrain,
   statusBrain,
   supersedeRegisteredSource,
+  syncStatus,
+  type BrainRuntimeServices,
   type SearchScope,
 } from "@second-brain/core";
 import { Command, CommanderError, Option } from "commander";
@@ -26,9 +40,14 @@ export interface CliOutput {
   write(value: string): void;
 }
 
+export interface CliRuntimeOptions {
+  runtimeServices?: BrainRuntimeServices;
+}
+
 export async function runCli(
   args: string[],
   output: CliOutput,
+  runtimeOptions: CliRuntimeOptions = {},
 ): Promise<number> {
   const program = new Command()
     .name("brain")
@@ -193,6 +212,55 @@ export async function runCli(
       output.write("Search index rebuilt.\n");
     });
 
+  const setup = program
+    .command("setup")
+    .description("Build the one-time initial source catalog");
+  setup
+    .command("begin")
+    .requiredOption("--purpose <text>")
+    .option("--boundaries <text>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (options: {
+        purpose: string;
+        boundaries?: string;
+        root: string;
+      }) => {
+        json(
+          await beginSetup(
+            options.root,
+            {
+              purpose: options.purpose,
+              ...(options.boundaries ? { boundaries: options.boundaries } : {}),
+            },
+            runtimeOptions.runtimeServices,
+          ),
+        );
+      },
+    );
+  setup
+    .command("next <setup-id>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(async (setupId: string, options: { root: string }) => {
+      json(await nextSetupBatch(options.root, setupId));
+    });
+  setup
+    .command("finish <setup-id>")
+    .requiredOption("--summary <text>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (setupId: string, options: { summary: string; root: string }) => {
+        json(
+          await finishSetup(options.root, setupId, {
+            summary: options.summary,
+          }),
+        );
+      },
+    );
+
   const query = program
     .command("query")
     .description("Run a tiered knowledge query");
@@ -221,6 +289,77 @@ export async function runCli(
           await expandQuery(options.root, queryId, {
             tier: options.tier,
             reason: options.reason,
+          }),
+        );
+      },
+    );
+  query
+    .command("read <query-id> <reference>")
+    .option("--locator <locator>", "source locator or wiki anchor")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (
+        queryId: string,
+        reference: string,
+        options: { locator?: string; root: string },
+      ) => {
+        json(
+          await readQueryItem(
+            options.root,
+            queryId,
+            reference,
+            options.locator,
+          ),
+        );
+      },
+    );
+  query
+    .command("request-web <query-id>")
+    .requiredOption("--reason <text>")
+    .requiredOption("--host-session <id>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (
+        queryId: string,
+        options: { reason: string; hostSession: string; root: string },
+      ) => {
+        json(
+          await requestWebApproval(options.root, queryId, {
+            reason: options.reason,
+            hostSessionId: options.hostSession,
+          }),
+        );
+      },
+    );
+  query
+    .command("approve-web <query-id>")
+    .requiredOption("--approved <true|false>")
+    .requiredOption("--decided-by <id>")
+    .option("--denial-reason <text>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (
+        queryId: string,
+        options: {
+          approved: string;
+          decidedBy: string;
+          denialReason?: string;
+          root: string;
+        },
+      ) => {
+        if (options.approved !== "true" && options.approved !== "false") {
+          throw new Error("--approved must be true or false");
+        }
+        json(
+          await resolveWebApproval(options.root, queryId, {
+            approved: options.approved === "true",
+            decidedBy: options.decidedBy,
+            ...(options.denialReason
+              ? { denialReason: options.denialReason }
+              : {}),
           }),
         );
       },
@@ -321,6 +460,61 @@ export async function runCli(
       },
     );
 
+  const reconcile = program
+    .command("reconcile")
+    .description("Plan whole-graph reconciliation before a wiki mutation");
+  reconcile
+    .command("plan <change-set-draft-file>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(async (changeSetFile: string, options: { root: string }) => {
+      json(
+        await planReconciliation(
+          options.root,
+          JSON.parse(await readFile(changeSetFile, "utf8")),
+          runtimeOptions.runtimeServices,
+        ),
+      );
+    });
+
+  const sync = program
+    .command("sync")
+    .description("Safely synchronize confirmed managed brain commits")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(async (options: { root: string }) => {
+      json(await attemptManagedSync(options.root));
+    });
+  sync
+    .command("configure")
+    .requiredOption("--remote <name>")
+    .requiredOption("--branch <name>")
+    .requiredOption("--confirm", "confirm this existing Git target")
+    .action(
+      async (
+        options: { remote: string; branch: string; confirm: boolean },
+        command: Command,
+      ) => {
+        if (options.confirm !== true) {
+          throw new Error("--confirm is required to configure synchronization");
+        }
+        const root = command.parent?.opts().root as string | undefined;
+        json(
+          await configureSyncTarget(root ?? process.cwd(), {
+            remote: options.remote,
+            branch: options.branch,
+            confirm: true,
+          }),
+        );
+      },
+    );
+  sync
+    .command("status")
+    .action(async (_options: Record<string, never>, command: Command) => {
+      const root = command.parent?.opts().root as string | undefined;
+      json(await syncStatus(root ?? process.cwd()));
+    });
+
   program
     .command("apply <change-set-file>")
     .option("--query <query-id>", "attach the committed mutation to a query")
@@ -329,11 +523,31 @@ export async function runCli(
     .action(
       async (
         changeSetFile: string,
-        options: { query?: string; root: string },
+        options: { query?: string; root: string; json?: boolean },
       ) => {
+        const changeSet = changeSetV1Schema.parse(
+          JSON.parse(await readFile(changeSetFile, "utf8")),
+        );
+        const query = options.query
+          ? await readQuerySession(options.root, options.query)
+          : undefined;
+        const candidatePageIds = new Set(
+          changeSet.reconciliation.candidatePageIds,
+        );
+        const reconciledChangeSet = query
+          ? {
+              ...changeSet,
+              reconciliation: {
+                ...changeSet.reconciliation,
+                readReceipts: query.readReceipts.filter((receipt) =>
+                  candidatePageIds.has(receipt.pageId),
+                ),
+              },
+            }
+          : changeSet;
         const result = await applyChangeSetTransaction(
           options.root,
-          JSON.parse(await readFile(changeSetFile, "utf8")),
+          reconciledChangeSet,
           options.query ? { queryId: options.query } : {},
         );
         if (options.query) {
@@ -343,7 +557,16 @@ export async function runCli(
             result.operationId,
           );
         }
-        json(result);
+        if (options.json) {
+          json(result);
+        } else {
+          const warning = result.sync
+            ? formatSyncWarning(result.sync)
+            : undefined;
+          output.write(
+            warning ? `${warning}\n` : `Applied ${result.operationId}.\n`,
+          );
+        }
       },
     );
 

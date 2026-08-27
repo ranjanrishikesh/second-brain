@@ -16,6 +16,7 @@ import {
   initBrain,
   loadWikiPages,
   nextBootstrapBatch,
+  readQuerySession,
   readBrainState,
   renderWikiPage,
   requestWebApproval,
@@ -136,6 +137,36 @@ describe("query lifecycle", () => {
       ),
     );
     expect(saved.question).toBe("What are quasars?");
+  });
+
+  test("records a current wiki read receipt for an open query", async () => {
+    const root = await queryBrain();
+    const session = await beginQuery(root, "What are quasars?");
+    const exports = (await import("../src/index.js")) as Record<
+      string,
+      unknown
+    >;
+
+    expect(exports).toHaveProperty("readQueryItem");
+    const readQueryItem = exports.readQueryItem as (
+      root: string,
+      queryId: string,
+      reference: string,
+    ) => Promise<{
+      receipt?: { pageId: string; revision: string };
+      item: { kind: string };
+    }>;
+    const result = await readQueryItem(root, session.id, "pg_quasar_source");
+    const persisted = await readQuerySession(root, session.id);
+
+    expect(result.item).toMatchObject({ kind: "wiki" });
+    expect(result.receipt).toMatchObject({ pageId: "pg_quasar_source" });
+    expect(persisted.readReceipts).toEqual([
+      expect.objectContaining({
+        pageId: "pg_quasar_source",
+        revision: result.receipt?.revision,
+      }),
+    ]);
   });
 
   test("recovers an interrupted canonical write before beginning a query", async () => {

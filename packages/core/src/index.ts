@@ -128,10 +128,11 @@ export {
   expandQuery,
   nextBootstrapBatch,
   querySessionV1Schema,
+  readQueryItem,
   readQuerySession,
   writeQuerySession,
 } from "./query.js";
-export type { QuerySessionV1 } from "./query.js";
+export type { QueryReadResultV1, QuerySessionV1 } from "./query.js";
 export type { ExpandQueryOptions } from "./query.js";
 export type {
   BootstrapBatchV1,
