@@ -1,17 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { prepareSemanticModel, type BrainRuntimeServices } from "./semantic.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
-import { readBrainState, writeBrainState, type SetupStateV1 } from "./state.js";
+import {
+  readBrainState,
+  renderBrainState,
+  type SetupStateV1,
+} from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
 import {
   operationRecordV1Schema,
   recoverBrain,
   runCanonicalWrite,
+  type CanonicalMutationWriter,
   type OperationRecordV1,
   type TransactionTestOptions,
 } from "./transaction.js";
@@ -199,7 +204,7 @@ export async function attachSetupChange(
       commitMessage: `brain(setup): checkpoint source pages [op:${checkpointOperationId}]`,
       testOptions,
     },
-    async () => {
+    async (writer) => {
       const [state, sources, pendingSourceIds] = await Promise.all([
         readBrainState(root),
         sourceRecords(root),
@@ -218,7 +223,10 @@ export async function attachSetupChange(
         ].sort(),
         pendingSourceIds,
       };
-      await writeBrainState(root, { ...state, setup });
+      await writer.writeText(
+        ".brain/state.json",
+        renderBrainState({ ...state, setup }),
+      );
       const now = new Date().toISOString();
       const operation: OperationRecordV1 = {
         version: 1,
@@ -232,7 +240,7 @@ export async function attachSetupChange(
         tiersUsed: [],
         setupId,
       };
-      await appendSetupOperation(root, operation);
+      await appendSetupOperation(root, operation, writer);
       return {
         value: toSession(setup),
         stagePaths: [
@@ -249,22 +257,21 @@ export async function attachSetupChange(
 function appendSetupOperation(
   root: string,
   operation: OperationRecordV1,
+  writer: CanonicalMutationWriter,
 ): Promise<void> {
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const logPath = path.join(root, "wiki", "log.md");
   return Promise.all([
     readFile(operationsPath, "utf8").then((existing) =>
-      writeFile(
-        operationsPath,
+      writer.writeText(
+        ".brain/operations.jsonl",
         `${existing}${JSON.stringify(operation)}\n`,
-        "utf8",
       ),
     ),
     readFile(logPath, "utf8").then((existing) =>
-      writeFile(
-        logPath,
+      writer.writeText(
+        "wiki/log.md",
         `${existing.trimEnd()}\n\n## [${operation.completedAt}] setup | ${operation.summary}\n\n- Operation: \`${operation.id}\`\n`,
-        "utf8",
       ),
     ),
   ]).then(() => undefined);
@@ -294,7 +301,7 @@ export async function beginSetup(
       commitMessage: `brain(setup): begin initial catalog [op:${operationId}]`,
       testOptions,
     },
-    async () => {
+    async (writer) => {
       const [state, sources, pendingSourceIds, pages] = await Promise.all([
         readBrainState(root),
         sourceRecords(root),
@@ -320,13 +327,16 @@ export async function beginSetup(
         ].sort(),
         pendingSourceIds,
       };
-      await writeBrainState(root, {
-        ...state,
-        setup,
-        semanticAuditDue:
-          pendingSourceIds.length > 0 ||
-          pages.some((page) => page.status === "active"),
-      });
+      await writer.writeText(
+        ".brain/state.json",
+        renderBrainState({
+          ...state,
+          setup,
+          semanticAuditDue:
+            pendingSourceIds.length > 0 ||
+            pages.some((page) => page.status === "active"),
+        }),
+      );
       const operation: OperationRecordV1 = {
         version: 1,
         id: operationId,
@@ -338,7 +348,7 @@ export async function beginSetup(
         pageIds: [],
         tiersUsed: [],
       };
-      await appendSetupOperation(root, operation);
+      await appendSetupOperation(root, operation, writer);
       return {
         value: toSession(setup),
         stagePaths: [
@@ -370,7 +380,7 @@ export async function finishSetup(
       commitMessage: `brain(setup): finish initial catalog [op:${operationId}]`,
       testOptions,
     },
-    async () => {
+    async (writer) => {
       const [state, sources, pendingSourceIds] = await Promise.all([
         readBrainState(root),
         sourceRecords(root),
@@ -407,7 +417,10 @@ export async function finishSetup(
         pendingSourceIds: [],
         completedAt: now,
       };
-      await writeBrainState(root, { ...state, setup });
+      await writer.writeText(
+        ".brain/state.json",
+        renderBrainState({ ...state, setup }),
+      );
       const operation: OperationRecordV1 = {
         version: 1,
         id: operationId,
@@ -419,7 +432,7 @@ export async function finishSetup(
         pageIds: [],
         tiersUsed: [],
       };
-      await appendSetupOperation(root, operation);
+      await appendSetupOperation(root, operation, writer);
       return {
         value: toSession(setup),
         stagePaths: [

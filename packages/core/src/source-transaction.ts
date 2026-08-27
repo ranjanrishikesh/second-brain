@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
@@ -118,7 +118,7 @@ export async function scanAndRegisterSources(
     ".brain/operations.jsonl",
     "wiki/log.md",
   ] as const;
-  const transaction = await runCanonicalWrite(
+  const transaction = await runCanonicalWrite<SourceScanResult>(
     root,
     {
       operationId,
@@ -126,8 +126,10 @@ export async function scanAndRegisterSources(
         `brain(source): register ${result.added.length} source${result.added.length === 1 ? "" : "s"} [op:${operationId}]`,
       testOptions,
     },
-    async () => {
-      const result = await scanSources(root);
+    async (writer) => {
+      const result = await scanSources(root, (content) =>
+        writer.writeText(".brain/source-manifest.json", content),
+      );
       if (result.modified.length || result.deleted.length) {
         throw new Error(
           `Immutable source violation: ${[
@@ -138,6 +140,12 @@ export async function scanAndRegisterSources(
       }
       if (result.added.length === 0) {
         return { value: result, stagePaths: [] };
+      }
+      for (const source of result.added) {
+        await writer.sealExisting(source.path, {
+          bytes: source.bytes,
+          sha256: source.sha256,
+        });
       }
 
       const now = new Date().toISOString();
@@ -180,8 +188,8 @@ export async function scanAndRegisterSources(
               ].sort(),
             }
           : state.setup;
-      await writeFile(
-        statePath,
+      await writer.writeText(
+        ".brain/state.json",
         `${JSON.stringify(
           {
             ...state,
@@ -195,7 +203,6 @@ export async function scanAndRegisterSources(
           null,
           2,
         )}\n`,
-        "utf8",
       );
       const record: OperationRecordV1 = {
         version: 1,
@@ -210,17 +217,15 @@ export async function scanAndRegisterSources(
       };
       const operationsPath = path.join(root, ".brain", "operations.jsonl");
       const existingOperations = await readFile(operationsPath, "utf8");
-      await writeFile(
-        operationsPath,
+      await writer.writeText(
+        ".brain/operations.jsonl",
         `${existingOperations}${JSON.stringify(record)}\n`,
-        "utf8",
       );
       const logPath = path.join(root, "wiki", "log.md");
       const existingLog = await readFile(logPath, "utf8");
-      await writeFile(
-        logPath,
+      await writer.writeText(
+        "wiki/log.md",
         `${existingLog.trimEnd()}\n\n## [${now}] source | Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}\n\n- Operation: \`${operationId}\`\n${result.added.map((source) => `- \`${source.id}\` — \`${source.path}\` (${source.extractionStatus})`).join("\n")}\n`,
-        "utf8",
       );
       return {
         value: result,
@@ -259,11 +264,12 @@ export async function supersedeRegisteredSource(
       commitMessage: `brain(source): supersede ${previousSourceId} [op:${operationId}]`,
       testOptions,
     },
-    async () => {
+    async (writer) => {
       const source = await supersedeSource(
         root,
         previousSourceId,
         replacementSourceId,
+        (content) => writer.writeText(".brain/source-manifest.json", content),
       );
       const now = new Date().toISOString();
       const operation: OperationRecordV1 = {
@@ -277,15 +283,13 @@ export async function supersedeRegisteredSource(
         pageIds: [],
         tiersUsed: [],
       };
-      await writeFile(
-        operationsPath,
+      await writer.writeText(
+        ".brain/operations.jsonl",
         `${await readFile(operationsPath, "utf8")}${JSON.stringify(operation)}\n`,
-        "utf8",
       );
-      await writeFile(
-        logPath,
+      await writer.writeText(
+        "wiki/log.md",
         `${(await readFile(logPath, "utf8")).trimEnd()}\n\n## [${now}] source | Supersede source\n\n- Operation: \`${operationId}\`\n- Replacement: \`${replacementSourceId}\`\n- Supersedes: \`${previousSourceId}\`\n`,
-        "utf8",
       );
       return {
         value: { source, operationId },

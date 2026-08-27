@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
@@ -95,7 +95,6 @@ export async function recordSemanticAuditBatch(
 ): Promise<RecordSemanticAuditResult> {
   const input = recordAuditInputSchema.parse(rawInput);
   const operationId = `op_audit_${randomUUID().replaceAll("-", "")}`;
-  const statePath = path.join(root, ".brain", "state.json");
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const logPath = path.join(root, "wiki", "log.md");
   const transaction = await runCanonicalWrite(
@@ -105,7 +104,7 @@ export async function recordSemanticAuditBatch(
       commitMessage: `brain(audit): review ${input.pageIds.length} page${input.pageIds.length === 1 ? "" : "s"} [op:${operationId}]`,
       testOptions,
     },
-    async () => {
+    async (writer) => {
       const state = await readState(root);
       if (
         !state.semanticAuditDue &&
@@ -162,8 +161,8 @@ export async function recordSemanticAuditBatch(
         startedAt: activeAudit?.startedAt ?? now,
         ...(complete ? { completedAt: now } : {}),
       };
-      await writeFile(
-        statePath,
+      await writer.writeText(
+        ".brain/state.json",
         `${JSON.stringify(
           {
             ...state,
@@ -174,17 +173,14 @@ export async function recordSemanticAuditBatch(
           null,
           2,
         )}\n`,
-        "utf8",
       );
-      await writeFile(
-        operationsPath,
+      await writer.writeText(
+        ".brain/operations.jsonl",
         `${await readFile(operationsPath, "utf8")}${JSON.stringify(operation)}\n`,
-        "utf8",
       );
-      await writeFile(
-        logPath,
+      await writer.writeText(
+        "wiki/log.md",
         `${(await readFile(logPath, "utf8")).trimEnd()}\n\n## [${now}] audit | Semantic checkpoint\n\n- Operation: \`${operationId}\`\n- Reviewed: ${requested.map((id) => `\`${id}\``).join(", ")}\n- Remaining: ${pendingPageIds.length}\n- Summary: ${input.summary}\n`,
-        "utf8",
       );
       return {
         value: {

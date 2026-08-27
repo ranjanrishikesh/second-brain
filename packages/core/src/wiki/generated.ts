@@ -5,6 +5,11 @@ import { loadWikiPages, validateWikiGraph } from "./graph.js";
 import { renderWikiPage } from "./page.js";
 import type { WikiPageV1 } from "./types.js";
 
+export type GeneratedWikiWriter = (
+  relativePath: string,
+  content: string,
+) => Promise<void>;
+
 function wikiTarget(page: WikiPageV1, anchor?: string): string {
   const vaultPath = page.path.replace(/^wiki\//, "").replace(/\.md$/, "");
   return `${vaultPath}${anchor ? `#${anchor}` : ""}`;
@@ -63,7 +68,12 @@ function generatedSections(
   ].join("\n");
 }
 
-export async function writeGeneratedWikiFiles(root: string): Promise<void> {
+export async function writeGeneratedWikiFiles(
+  root: string,
+  writeGenerated: GeneratedWikiWriter = async (relativePath, content) => {
+    await writeFile(path.join(root, relativePath), content, "utf8");
+  },
+): Promise<void> {
   const pages = await loadWikiPages(root);
   const manifest = JSON.parse(
     await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
@@ -72,10 +82,9 @@ export async function writeGeneratedWikiFiles(root: string): Promise<void> {
     manifest.sources.map((source) => [source.id, source]),
   );
   for (const page of pages) {
-    await writeFile(
-      path.join(root, page.path),
+    await writeGenerated(
+      page.path,
       renderWikiPage(page, generatedSections(page, pages, sourcesById)),
-      "utf8",
     );
   }
 
@@ -95,10 +104,7 @@ export async function writeGeneratedWikiFiles(root: string): Promise<void> {
     }
     indexLines.push("");
   }
-  await writeFile(
-    path.join(root, "wiki", "index.md"),
-    `${indexLines.join("\n").trim()}\n`,
-  );
+  await writeGenerated("wiki/index.md", `${indexLines.join("\n").trim()}\n`);
 
   const mapLines = ["# Knowledge Map", "", "## Relationships", ""];
   const relationships = pages.flatMap((page) =>
@@ -114,10 +120,7 @@ export async function writeGeneratedWikiFiles(root: string): Promise<void> {
   mapLines.push(
     ...(relationships.length ? relationships : ["_No relationships yet._"]),
   );
-  await writeFile(
-    path.join(root, "wiki", "map.md"),
-    `${mapLines.join("\n")}\n`,
-  );
+  await writeGenerated("wiki/map.md", `${mapLines.join("\n")}\n`);
 
   const report = await validateWikiGraph(root);
   const healthLines = [
@@ -137,8 +140,5 @@ export async function writeGeneratedWikiFiles(root: string): Promise<void> {
         )
       : ["_No structural issues._"]),
   ];
-  await writeFile(
-    path.join(root, "wiki", "reports", "health.md"),
-    `${healthLines.join("\n")}\n`,
-  );
+  await writeGenerated("wiki/reports/health.md", `${healthLines.join("\n")}\n`);
 }

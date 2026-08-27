@@ -1,10 +1,12 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   access,
+  chmod,
   copyFile,
   cp,
+  lstat,
   mkdir,
   readFile,
   realpath,
@@ -96,6 +98,8 @@ export interface TransactionTestOptions {
   beforeStage?: () => Promise<void> | void;
   /** Runs after a mutation completes and before its private index is staged. */
   afterMutation?: () => Promise<void> | void;
+  /** Runs after a mutation completes but before its authoritative output is sealed. */
+  afterMutationBeforeSeal?: () => Promise<void> | void;
   /** Runs only after this transaction owns the ordinary Git index lock. */
   afterIndexLock?: () => Promise<void> | void;
   /** Runs after the private index replaces the owned lock but before rename. */
@@ -109,6 +113,11 @@ export interface ApplyTransactionOptions extends TransactionTestOptions {
   context?: KnowledgeMutationContext;
   /** Dependency injection for verified local semantic reconciliation. */
   runtimeServices?: BrainRuntimeServices;
+}
+
+export interface RecoveryTestOptions {
+  /** Runs after recovery acquires its replacement Git index lock. */
+  afterIndexLock?: () => Promise<void> | void;
 }
 
 export type KnowledgeMutationContext =
@@ -366,6 +375,7 @@ async function publishRecoveredIsolatedIndex(
   operationId: string,
   journalPath: string,
   journal: TransactionJournal,
+  testOptions: RecoveryTestOptions = {},
 ): Promise<void> {
   const isolatedIndexPath = path.join(transactionPath, "git-index");
   if (!(await pathExists(isolatedIndexPath))) {
@@ -385,6 +395,7 @@ async function publishRecoveredIsolatedIndex(
   const validationIndexPath = path.join(transactionPath, "recovery-index");
   try {
     indexLock = await holdGitIndexLock(root, operationId);
+    await testOptions.afterIndexLock?.();
     recordGitIndexLockOwnership(journal, indexLock);
     await writeJournal(journalPath, journal);
     // `write-tree` may update index extensions, so inspect a copy while the
@@ -600,56 +611,276 @@ interface ManagedFileFingerprint {
   exists: boolean;
   bytes?: number;
   sha256?: string;
+  mode?: "100644" | "100755";
 }
 
-async function fingerprintManagedFile(
+async function digestFile(filePath: string): Promise<{
+  bytes: number;
+  sha256: string;
+}> {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(filePath)) {
+    bytes += chunk.byteLength;
+    hash.update(chunk);
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
+
+async function digestIndexedFile(
   root: string,
+  indexPath: string,
   relativePath: string,
-): Promise<ManagedFileFingerprint> {
-  try {
+): Promise<{ bytes: number; sha256: string }> {
+  const child = spawn("git", ["show", `:${relativePath}`], {
+    cwd: root,
+    env: gitEnvironment(indexPath),
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-4_096);
+  });
+  const digest = (async () => {
     const hash = createHash("sha256");
     let bytes = 0;
-    for await (const chunk of createReadStream(path.join(root, relativePath))) {
+    for await (const chunk of child.stdout) {
       bytes += chunk.byteLength;
       hash.update(chunk);
     }
-    return {
+    return { bytes, sha256: hash.digest("hex") };
+  })();
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  const result = await digest;
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || `Git could not read ${relativePath}`);
+  }
+  return result;
+}
+
+function gitRegularFileMode(mode: number): "100644" | "100755" {
+  return mode & 0o111 ? "100755" : "100644";
+}
+
+function canonicalManagedPath(root: string, relativePath: string): string {
+  const [safePath] = safeStagePaths(root, [relativePath]);
+  if (
+    !safePath ||
+    (!safePath.startsWith("wiki/") &&
+      !safePath?.startsWith("sources/") &&
+      !trackedBrainFiles.includes(
+        safePath as (typeof trackedBrainFiles)[number],
+      ))
+  ) {
+    throw new Error(`Unsafe canonical file path: ${relativePath}`);
+  }
+  return path.join(root, safePath);
+}
+
+export interface CanonicalMutationWriter {
+  writeText(relativePath: string, content: string): Promise<void>;
+  writeBytes(relativePath: string, content: Uint8Array): Promise<void>;
+  remove(relativePath: string): Promise<void>;
+  /** Seals an immutable user-provided file against its independently known digest. */
+  sealExisting(
+    relativePath: string,
+    expected: { bytes: number; sha256: string },
+  ): Promise<void>;
+}
+
+class TransactionCanonicalWriter implements CanonicalMutationWriter {
+  private readonly expected = new Map<string, ManagedFileFingerprint>();
+
+  private constructor(
+    private readonly root: string,
+    private readonly realRoot: string,
+  ) {}
+
+  static async create(root: string): Promise<TransactionCanonicalWriter> {
+    return new TransactionCanonicalWriter(root, await realpath(root));
+  }
+
+  private async canonicalParent(absolutePath: string): Promise<string> {
+    const directory = path.dirname(absolutePath);
+    await mkdir(directory, { recursive: true });
+    const realDirectory = await realpath(directory);
+    if (
+      realDirectory !== this.realRoot &&
+      !realDirectory.startsWith(`${this.realRoot}${path.sep}`)
+    ) {
+      throw new Error(`Unsafe canonical file parent: ${absolutePath}`);
+    }
+    return directory;
+  }
+
+  async writeText(relativePath: string, content: string): Promise<void> {
+    await this.writeBytes(relativePath, Buffer.from(content, "utf8"));
+  }
+
+  async writeBytes(relativePath: string, content: Uint8Array): Promise<void> {
+    const absolutePath = canonicalManagedPath(this.root, relativePath);
+    const directory = await this.canonicalParent(absolutePath);
+    const temporaryPath = path.join(
+      directory,
+      `.${path.basename(absolutePath)}.brain-write-${randomUUID()}`,
+    );
+    const bytes = Buffer.from(content);
+    try {
+      await writeFile(temporaryPath, bytes, { flag: "wx", mode: 0o644 });
+      await chmod(temporaryPath, 0o644);
+      await rename(temporaryPath, absolutePath);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
+    this.expected.set(relativePath, {
       relativePath,
       exists: true,
-      bytes,
-      sha256: hash.digest("hex"),
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { relativePath, exists: false };
-    }
-    throw error;
+      bytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      mode: "100644",
+    });
   }
-}
 
-async function fingerprintManagedFiles(
-  root: string,
-  stagePaths: string[],
-): Promise<ManagedFileFingerprint[]> {
-  return Promise.all(
-    [...stagePaths]
-      .sort()
-      .map((relativePath) => fingerprintManagedFile(root, relativePath)),
-  );
-}
+  async remove(relativePath: string): Promise<void> {
+    const absolutePath = canonicalManagedPath(this.root, relativePath);
+    try {
+      await this.canonicalParent(absolutePath);
+      await rm(absolutePath, { force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    this.expected.set(relativePath, { relativePath, exists: false });
+  }
 
-async function assertManagedFilesAreSealed(
-  root: string,
-  sealedFiles: ManagedFileFingerprint[],
-): Promise<void> {
-  const actual = await fingerprintManagedFiles(
-    root,
-    sealedFiles.map((file) => file.relativePath),
-  );
-  if (JSON.stringify(actual) !== JSON.stringify(sealedFiles)) {
-    throw new Error(
-      "Managed canonical files changed after graph validation; refusing to commit an unvalidated tree",
+  async sealExisting(
+    relativePath: string,
+    expected: { bytes: number; sha256: string },
+  ): Promise<void> {
+    const absolutePath = canonicalManagedPath(this.root, relativePath);
+    await this.canonicalParent(absolutePath);
+    const metadata = await lstat(absolutePath);
+    if (!metadata.isFile()) {
+      throw new Error(
+        `Managed canonical file must be regular before staging: ${relativePath}`,
+      );
+    }
+    this.expected.set(relativePath, {
+      relativePath,
+      exists: true,
+      ...expected,
+      mode: gitRegularFileMode(metadata.mode),
+    });
+  }
+
+  assertStagePaths(stagePaths: string[]): void {
+    const expectedPaths = [...this.expected.keys()].sort();
+    const expectedSet = new Set(expectedPaths);
+    const stagedSet = new Set(stagePaths);
+    const missing = stagePaths.filter(
+      (relativePath) => !expectedSet.has(relativePath),
     );
+    const unstaged = expectedPaths.filter(
+      (relativePath) => !stagedSet.has(relativePath),
+    );
+    if (missing.length > 0 || unstaged.length > 0) {
+      throw new Error(
+        `Canonical mutation must provide authoritative expected files (missing: ${missing.join(", ") || "none"}; unstaged: ${unstaged.join(", ") || "none"})`,
+      );
+    }
+  }
+
+  async assertWorktree(): Promise<void> {
+    for (const expected of this.expected.values()) {
+      const absolutePath = canonicalManagedPath(
+        this.root,
+        expected.relativePath,
+      );
+      let metadata: Awaited<ReturnType<typeof lstat>>;
+      try {
+        metadata = await lstat(absolutePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          if (!expected.exists) continue;
+          throw new Error(
+            `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
+          );
+        }
+        throw error;
+      }
+      if (!expected.exists) {
+        throw new Error(
+          `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
+        );
+      }
+      if (!metadata.isFile()) {
+        throw new Error(
+          `Managed canonical file is not a regular file after graph validation: ${expected.relativePath}`,
+        );
+      }
+      const digest = await digestFile(absolutePath);
+      if (
+        digest.bytes !== expected.bytes ||
+        digest.sha256 !== expected.sha256 ||
+        gitRegularFileMode(metadata.mode) !== expected.mode
+      ) {
+        throw new Error(
+          `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
+        );
+      }
+    }
+  }
+
+  async assertPrivateIndex(indexPath: string): Promise<void> {
+    for (const expected of this.expected.values()) {
+      const entry = await this.indexEntry(indexPath, expected.relativePath);
+      if (!expected.exists) {
+        if (entry) {
+          throw new Error(
+            `Private Git index changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
+          );
+        }
+        continue;
+      }
+      if (!entry || entry.mode !== expected.mode) {
+        throw new Error(
+          `Private Git index has an unexpected object mode after graph validation: ${expected.relativePath}`,
+        );
+      }
+      const digest = await digestIndexedFile(
+        this.root,
+        indexPath,
+        expected.relativePath,
+      );
+      if (
+        digest.bytes !== expected.bytes ||
+        digest.sha256 !== expected.sha256
+      ) {
+        throw new Error(
+          `Private Git index changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
+        );
+      }
+    }
+  }
+
+  private async indexEntry(
+    indexPath: string,
+    relativePath: string,
+  ): Promise<{ mode: string } | undefined> {
+    const { stdout } = await execFile(
+      "git",
+      ["ls-files", "--stage", "-z", "--", relativePath],
+      { cwd: this.root, env: gitEnvironment(indexPath), encoding: "buffer" },
+    );
+    const record = stdout.toString("utf8").split("\0")[0];
+    if (!record) return undefined;
+    const match = /^(\d+) [a-f0-9]+ 0\t/.exec(record);
+    if (!match) {
+      throw new Error(`Unexpected private Git index entry: ${relativePath}`);
+    }
+    return { mode: match[1] ?? "" };
   }
 }
 
@@ -769,7 +1000,9 @@ export interface CanonicalWriteOptions<T> {
 export async function runCanonicalWrite<T>(
   root: string,
   options: CanonicalWriteOptions<T>,
-  mutate: () => Promise<CanonicalMutationResult<T>>,
+  mutate: (
+    writer: CanonicalMutationWriter,
+  ) => Promise<CanonicalMutationResult<T>>,
 ): Promise<CanonicalWriteResult<T>> {
   if (!/^op_[a-z0-9_-]{3,96}$/.test(options.operationId)) {
     throw new Error(`Invalid operationId: ${options.operationId}`);
@@ -850,13 +1083,14 @@ export async function runCanonicalWrite<T>(
     await writeJournal(journalPath, journal);
     simulateCrash(options.testOptions ?? {}, "prepared");
 
-    const mutation = await mutate();
+    const writer = await TransactionCanonicalWriter.create(root);
+    const mutation = await mutate(writer);
     stagePaths = safeStagePaths(root, mutation.stagePaths);
-    // Capture every file produced by the mutation before any external seam.
-    // This protects generated Markdown, state, and logs as well as page data.
-    const sealedFiles = await fingerprintManagedFiles(root, stagePaths);
+    writer.assertStagePaths(stagePaths);
+    await options.testOptions?.afterMutationBeforeSeal?.();
+    await writer.assertWorktree();
     await options.testOptions?.afterMutation?.();
-    await assertManagedFilesAreSealed(root, sealedFiles);
+    await writer.assertWorktree();
     journal.stagePaths = stagePaths;
     // New transactions never write the caller's Git index. Older journals use
     // preexistingIndexPaths during recovery and remain backward-compatible.
@@ -885,7 +1119,7 @@ export async function runCanonicalWrite<T>(
         );
       }
       await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
-      await assertManagedFilesAreSealed(root, sealedFiles);
+      await writer.assertWorktree();
       let indexLock: HeldGitIndexLock | undefined;
       try {
         // Build the complete transaction tree before yielding to anything
@@ -904,7 +1138,8 @@ export async function runCanonicalWrite<T>(
           stagePaths,
         );
         await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
-        await assertManagedFilesAreSealed(root, sealedFiles);
+        await writer.assertWorktree();
+        await writer.assertPrivateIndex(isolatedIndexPath);
         await mutation.verifySealedState?.();
         await assertPrivateIndexMatchesWorktree(
           root,
@@ -912,7 +1147,8 @@ export async function runCanonicalWrite<T>(
           stagePaths,
         );
         await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
-        await assertManagedFilesAreSealed(root, sealedFiles);
+        await writer.assertWorktree();
+        await writer.assertPrivateIndex(isolatedIndexPath);
         const validatedTree = await privateIndexTree(root, isolatedIndexPath);
 
         // This deterministic seam represents work that can occur after the
@@ -929,7 +1165,7 @@ export async function runCanonicalWrite<T>(
           gitRepository: true,
           indexPath: isolatedIndexPath,
         });
-        await assertManagedFilesAreSealed(root, sealedFiles);
+        await writer.assertWorktree();
         await assertPrivateIndexMatchesWorktree(
           root,
           isolatedIndexPath,
@@ -937,7 +1173,8 @@ export async function runCanonicalWrite<T>(
         );
         await mutation.verifySealedState?.();
         await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
-        await assertManagedFilesAreSealed(root, sealedFiles);
+        await writer.assertWorktree();
+        await writer.assertPrivateIndex(isolatedIndexPath);
         await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
         if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
           throw new Error("Git HEAD changed during the canonical write");
@@ -972,7 +1209,8 @@ export async function runCanonicalWrite<T>(
         );
         await mutation.verifySealedState?.();
         await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
-        await assertManagedFilesAreSealed(root, sealedFiles);
+        await writer.assertWorktree();
+        await writer.assertPrivateIndex(isolatedIndexPath);
         await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
         const commitMessage =
           typeof options.commitMessage === "function"
@@ -1021,7 +1259,7 @@ export async function runCanonicalWrite<T>(
       await options.testOptions?.beforeStage?.();
       await mutation.verifyBeforeCommit?.({ gitRepository: false });
       await mutation.verifySealedState?.();
-      await assertManagedFilesAreSealed(root, sealedFiles);
+      await writer.assertWorktree();
       committed = true;
     }
     journal.canonicalCommitComplete = true;
@@ -1116,6 +1354,7 @@ async function appendOperation(
   root: string,
   changeSet: ChangeSetV1,
   now: string,
+  writer: CanonicalMutationWriter,
   binding?: MutationBinding,
 ): Promise<void> {
   const record: OperationRecordV1 = {
@@ -1133,17 +1372,15 @@ async function appendOperation(
   };
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const existing = await readFile(operationsPath, "utf8");
-  await writeFile(
-    operationsPath,
+  await writer.writeText(
+    ".brain/operations.jsonl",
     `${existing}${JSON.stringify(record)}\n`,
-    "utf8",
   );
   const logPath = path.join(root, "wiki", "log.md");
   const log = await readFile(logPath, "utf8");
-  await writeFile(
-    logPath,
+  await writer.writeText(
+    "wiki/log.md",
     `${log.trimEnd()}\n\n## [${now}] apply | ${changeSet.reason}\n\n- Operation: \`${changeSet.operationId}\`\n- Pages: ${record.pageIds.map((id) => `\`${id}\``).join(", ") || "none"}\n`,
-    "utf8",
   );
 }
 
@@ -1205,7 +1442,7 @@ export async function applyChangeSetTransaction(
       commitMessage: `brain(apply): ${safeCommitText(changeSet.reason)} [op:${safeCommitText(changeSet.operationId)}]`,
       testOptions: options,
     },
-    async () => {
+    async (writer) => {
       if (options.context && options.queryId) {
         throw new Error("Use either context or queryId, not both");
       }
@@ -1250,15 +1487,15 @@ export async function applyChangeSetTransaction(
       for (const page of proposedPages) safePagePath(root, page.path);
       for (const currentPage of currentPages) {
         if (!proposedPaths.has(currentPage.path)) {
-          await rm(safePagePath(root, currentPage.path), { force: true });
+          await writer.remove(currentPage.path);
         }
       }
       for (const page of proposedPages) {
-        const absolutePath = safePagePath(root, page.path);
-        await mkdir(path.dirname(absolutePath), { recursive: true });
-        await writeFile(absolutePath, renderWikiPage(page), "utf8");
+        await writer.writeText(page.path, renderWikiPage(page));
       }
-      await writeGeneratedWikiFiles(root);
+      await writeGeneratedWikiFiles(root, (relativePath, content) =>
+        writer.writeText(relativePath, content),
+      );
       const audit = await validateWikiGraph(root);
       if (!audit.ok) {
         throw new Error(
@@ -1323,8 +1560,8 @@ export async function applyChangeSetTransaction(
         .map((source) => source.id)
         .filter((sourceId) => !catalogedSourceIds.has(sourceId))
         .sort();
-      await writeFile(
-        statePath,
+      await writer.writeText(
+        ".brain/state.json",
         `${JSON.stringify(
           {
             ...state,
@@ -1344,9 +1581,8 @@ export async function applyChangeSetTransaction(
           null,
           2,
         )}\n`,
-        "utf8",
       );
-      await appendOperation(root, changeSet, now, binding);
+      await appendOperation(root, changeSet, now, writer, binding);
       const generatedPaths = [
         "wiki/index.md",
         "wiki/map.md",
@@ -1364,7 +1600,8 @@ export async function applyChangeSetTransaction(
             ...currentPages.map((page) => page.path),
             ...proposedPages.map((page) => page.path),
             ...generatedPaths,
-            ...trackedBrainFiles,
+            ".brain/state.json",
+            ".brain/operations.jsonl",
           ]),
         ],
         verifySealedState: async () => {
@@ -1387,6 +1624,7 @@ export async function applyChangeSetTransaction(
 
 export async function recoverBrain(
   root: string,
+  testOptions: RecoveryTestOptions = {},
 ): Promise<"clean" | "restored" | "committed"> {
   const runtimePath = path.join(root, ".brain", "runtime");
   const journalPath = path.join(runtimePath, "transaction.json");
@@ -1457,6 +1695,11 @@ export async function recoverBrain(
       journal.gitIndexLockPath,
       journal.gitIndexLock,
     );
+    // The recovered transaction may acquire a fresh lock. Persisting this
+    // reset makes a crash between acquisition and the new identity record
+    // recoverable through the JSON marker rather than a stale inode.
+    delete journal.gitIndexLock;
+    await writeJournal(journalPath, journal);
   }
   const head = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
   let transactionCommitExists = false;
@@ -1505,6 +1748,7 @@ export async function recoverBrain(
       journal.operationId,
       journalPath,
       journal,
+      testOptions,
     );
     journal.indexPublished = true;
     await writeJournal(journalPath, journal);

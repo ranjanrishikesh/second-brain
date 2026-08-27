@@ -4,9 +4,9 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import {
   readBrainState,
+  renderBrainState,
   syncStatusV1Schema,
   syncTargetV1Schema,
-  writeBrainState,
   type SyncStatusV1,
   type SyncTargetV1,
 } from "./state.js";
@@ -415,9 +415,12 @@ export async function configureSyncTarget(
       operationId,
       commitMessage: `brain(sync): confirm ${target.remote}/${target.branch} [op:${operationId}]`,
     },
-    async () => {
+    async (writer) => {
       const state = await readBrainState(root);
-      await writeBrainState(root, { ...state, syncTarget: target });
+      await writer.writeText(
+        ".brain/state.json",
+        renderBrainState({ ...state, syncTarget: target }),
+      );
       return {
         value: target,
         stagePaths: [".brain/state.json"],

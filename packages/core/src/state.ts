@@ -124,6 +124,10 @@ export async function readBrainState(root: string): Promise<BrainStateV1> {
   );
 }
 
+export function renderBrainState(state: BrainStateV1): string {
+  return `${JSON.stringify(brainStateV1Schema.parse(state), null, 2)}\n`;
+}
+
 export async function writeBrainState(
   root: string,
   state: BrainStateV1,
@@ -131,11 +135,7 @@ export async function writeBrainState(
   const destination = statePath(root);
   const temporary = `${destination}.tmp-${randomUUID()}`;
   try {
-    await writeFile(
-      temporary,
-      `${JSON.stringify(brainStateV1Schema.parse(state), null, 2)}\n`,
-      "utf8",
-    );
+    await writeFile(temporary, renderBrainState(state), "utf8");
     await rename(temporary, destination);
   } finally {
     await rm(temporary, { force: true });

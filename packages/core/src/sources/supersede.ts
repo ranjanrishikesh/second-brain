@@ -2,10 +2,15 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./types.js";
 
+export type SourceSupersessionManifestWriter = (
+  content: string,
+) => Promise<void>;
+
 export async function supersedeSource(
   root: string,
   previousSourceId: string,
   replacementSourceId: string,
+  writeManifest?: SourceSupersessionManifestWriter,
 ): Promise<SourceRecordV1> {
   if (previousSourceId === replacementSourceId) {
     throw new Error("A source cannot supersede itself");
@@ -33,10 +38,8 @@ export async function supersedeSource(
     supersedes: previousSourceId,
   });
   sources[replacementIndex] = replacement;
-  await writeFile(
-    manifestPath,
-    `${JSON.stringify({ version: 1, sources }, null, 2)}\n`,
-    "utf8",
-  );
+  const manifestContent = `${JSON.stringify({ version: 1, sources }, null, 2)}\n`;
+  if (writeManifest) await writeManifest(manifestContent);
+  else await writeFile(manifestPath, manifestContent, "utf8");
   return replacement;
 }

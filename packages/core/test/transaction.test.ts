@@ -1,5 +1,13 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { access, chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -293,6 +301,51 @@ describe("applyChangeSetTransaction", () => {
       applyChangeSetTransaction(
         root,
         createSourcePageChangeSet("op_post_mutation_log_overwrite"),
+        options,
+      ),
+    ).rejects.toThrow(/changed after graph validation|unvalidated/i);
+    expect(await readFile(logPath, "utf8")).toBe(beforeLog);
+  });
+
+  test("rejects a same-content symlink substituted for a generated wiki file", async () => {
+    const root = await initializedGitBrain();
+    const logPath = path.join(root, "wiki", "log.md");
+    const mirroredLogPath = path.join(root, "same-log-content.md");
+    const options = {
+      afterMutation: async () => {
+        const generatedLog = await readFile(logPath, "utf8");
+        await writeFile(mirroredLogPath, generatedLog);
+        await rm(logPath);
+        await symlink(mirroredLogPath, logPath);
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_same_content_log_symlink"),
+        options,
+      ),
+    ).rejects.toThrow(/regular|symlink|unvalidated/i);
+  });
+
+  test("rejects a generated wiki log overwrite before initial transaction sealing", async () => {
+    const root = await initializedGitBrain();
+    const logPath = path.join(root, "wiki", "log.md");
+    const beforeLog = await readFile(logPath, "utf8");
+    const options = {
+      afterMutationBeforeSeal: async () => {
+        await writeFile(
+          logPath,
+          "# Operation Log\n\nInjected before the transaction could seal it.\n",
+        );
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_preseal_log_overwrite"),
         options,
       ),
     ).rejects.toThrow(/changed after graph validation|unvalidated/i);
@@ -628,6 +681,54 @@ describe("applyChangeSetTransaction", () => {
 
     try {
       await waitForIndexPublicationLock(indexLock, journalPath);
+      worker.kill("SIGKILL");
+      if (!worker.pid) throw new Error("Hard-crash worker has no process ID");
+      await waitForProcessExit(worker.pid);
+      await expect(access(indexLock)).resolves.toBeUndefined();
+    } finally {
+      if (!worker.killed) worker.kill("SIGKILL");
+    }
+
+    expect(await recoverBrain(root)).toBe("committed");
+    await expect(access(indexLock)).rejects.toThrow();
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
+  test("recovers after a second hard crash while recovery reacquires the index lock", async () => {
+    const root = await initializedGitBrain();
+    const operationId = "op_recovery_reacquire_index";
+    await expect(
+      applyChangeSetTransaction(root, createSourcePageChangeSet(operationId), {
+        simulateIndexPublishFailure: true,
+      }),
+    ).rejects.toThrow(/commit completed.*recovery/i);
+
+    const workerPath = path.join(root, "hard-crash-recovery-worker.mts");
+    const coreEntry = new URL("../src/index.ts", import.meta.url).href;
+    await writeFile(
+      workerPath,
+      `import { recoverBrain } from ${JSON.stringify(coreEntry)};\nconst root = process.argv.at(-1);\nif (!root) throw new Error("missing root");\nawait recoverBrain(root, { afterIndexLock: async () => new Promise(() => {}) });\n`,
+    );
+    const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const workspaceRoot = path.resolve(testDirectory, "../../..");
+    const tsxLoader = path.join(
+      workspaceRoot,
+      "node_modules",
+      "tsx",
+      "dist",
+      "loader.mjs",
+    );
+    const worker = spawn(
+      process.execPath,
+      ["--import", tsxLoader, workerPath, root],
+      { cwd: root, stdio: "ignore" },
+    );
+    const indexLock = path.join(root, ".git", "index.lock");
+
+    try {
+      await waitForOwnedIndexLock(indexLock, operationId);
       worker.kill("SIGKILL");
       if (!worker.pid) throw new Error("Hard-crash worker has no process ID");
       await waitForProcessExit(worker.pid);

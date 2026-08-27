@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -96,18 +96,16 @@ async function commitQueryOperation(
       commitMessage: `brain(query): ${session.question.replace(/[\r\n\0]+/g, " ").slice(0, 100)} [op:${operation.id}]`,
       testOptions,
     },
-    async () => {
+    async (writer) => {
       const beforeOperations = await readFile(operationsPath, "utf8");
       const beforeLog = await readFile(logPath, "utf8");
-      await writeFile(
-        operationsPath,
+      await writer.writeText(
+        ".brain/operations.jsonl",
         `${beforeOperations}${JSON.stringify(operation)}\n`,
-        "utf8",
       );
-      await writeFile(
-        logPath,
+      await writer.writeText(
+        "wiki/log.md",
         `${beforeLog.trimEnd()}\n\n## [${operation.completedAt}] query | ${session.question}\n\n- Operation: \`${operation.id}\`\n- Outcome: **${session.outcome}**\n- Tiers: ${session.tiersUsed.join(" → ")}\n- Summary: ${session.answerSummary}\n- Knowledge changes: ${session.changeOperationIds.map((id) => `\`${id}\``).join(", ") || "none"}\n`,
-        "utf8",
       );
       return {
         value: undefined,

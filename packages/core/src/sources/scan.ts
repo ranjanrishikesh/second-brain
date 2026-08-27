@@ -27,6 +27,8 @@ interface SourceManifestV1 {
   sources: SourceRecordV1[];
 }
 
+export type SourceManifestWriter = (content: string) => Promise<void>;
+
 interface WebCaptureMetadata {
   brainWebCapture: 1;
   url: string;
@@ -108,7 +110,10 @@ async function readManifest(root: string): Promise<SourceManifestV1> {
   };
 }
 
-export async function scanSources(root: string): Promise<SourceScanResult> {
+export async function scanSources(
+  root: string,
+  writeManifest?: SourceManifestWriter,
+): Promise<SourceScanResult> {
   const config = await loadBrainConfig(root);
   const manifest = await readManifest(root);
   const registeredByPath = new Map(
@@ -312,9 +317,13 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
     (source) => !seenPaths.has(source.path),
   );
   manifest.sources.sort((left, right) => left.path.localeCompare(right.path));
-  await writeFile(
-    path.join(root, ".brain", "source-manifest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  );
+  if (result.added.length === 0) return result;
+  const manifestContent = `${JSON.stringify(manifest, null, 2)}\n`;
+  if (writeManifest) await writeManifest(manifestContent);
+  else
+    await writeFile(
+      path.join(root, ".brain", "source-manifest.json"),
+      manifestContent,
+    );
   return result;
 }
