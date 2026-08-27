@@ -27,6 +27,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
       - run: pnpm test:e2e
+      - run: pnpm brain doctor
       - run: pnpm schemas:generate
       - run: git diff --exit-code -- schemas
 

@@ -111,6 +111,12 @@ docker compose -f deploy/openclaw/compose.yaml up --build
 
 The gateway is exposed only on `127.0.0.1`. The repository is a writable bind mount and OpenClaw runtime state uses a separate disposable named volume. See [deploy/openclaw/README.md](deploy/openclaw/README.md) for remote access and multiple-brain hosting.
 
+## Verification and live-smoke handoff
+
+The deterministic end-to-end suite uses a disposable source fixture, a fake local embedding provider, fake captured web content, and temporary Git remotes. It proves the template contracts without model or web credentials, including source setup, source-backed persistence, semantic-cache rebuilding, synonym candidates, reciprocal contradictions, denied/approved web paths, audit resumption, safe-sync warnings, and independent brains.
+
+Run [the v1 exit checklist](docs/V1_EXIT_CHECKLIST.md) before calling a clone v1-verified. It separates the deterministic template gate from two credential-gated live smokes: one through Codex and one through the hosted OpenClaw gateway. A successful build or unit test is not a hosted live smoke; OpenClaw verification remains pending until its real gateway sequence has been recorded as passed. Only after those template checks should a personal-brain pilot begin, as a usefulness evaluation rather than a safety substitute.
+
 ## Repository map
 
 ```text

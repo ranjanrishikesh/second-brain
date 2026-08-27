@@ -45,3 +45,24 @@ Secrets enter through environment variables and are not written to the repositor
 ## Web research approval
 
 For each question, the agent must first request web research approval after exhausting the wiki and local sources. OpenClaw then presents one owner approval control covering that question's web research. Only after approval can the active session call `web_search` or `web_fetch`; captured evidence is still written through the shared immutable-source workflow.
+
+## Credential-gated live smoke
+
+CI validates the adapter contract and builds this container, but it does not prove a live gateway, an LLM provider, or the owner approval interface. Treat hosted verification as pending until this disposable-test sequence is recorded as passed:
+
+```bash
+docker compose -f deploy/openclaw/compose.yaml up --build -d
+curl -fsS http://127.0.0.1:18789/readyz
+docker compose -f deploy/openclaw/compose.yaml exec brain-gateway \
+  pnpm --filter @second-brain/openclaw-adapter exec openclaw plugins list --enabled --verbose
+```
+
+Confirm that `second-brain` is enabled, then use only a disposable repository and test credentials to:
+
+1. Ask a source-backed question and confirm automatic setup, a cited raw-backed mutation, and a repeat wiki-only answer.
+2. Exhaust local evidence for a separate question, deny the web approval request, and confirm both `web_search` and `web_fetch` remain blocked.
+3. Repeat with owner approval, confirm native web access is allowed only for that active query, and capture the evidence before it supports a wiki claim.
+4. Restart the gateway and confirm that repository knowledge persists while the OpenClaw runtime cache remains non-canonical.
+5. Use a disposable bare Git remote to prove a safe push and a rejected push with the visible sync-pending warning.
+
+Record the commit, date, environment, and each result. Until then report: **“OpenClaw live verification pending.”** A personal-brain pilot happens only after the template smoke gates pass and measures usefulness rather than replacing them.
