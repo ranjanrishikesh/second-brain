@@ -78,7 +78,11 @@ export interface TransactionResult {
 
 export interface TransactionTestOptions {
   /** Deterministic fault injection for recovery tests; never use in normal operation. */
-  simulateCrashAfter?: "prepared" | "files-applied" | "committed";
+  simulateCrashAfter?:
+    | "prepared"
+    | "files-applied"
+    | "committed"
+    | "journal-removed";
   /** Simulates an external commit immediately before the transaction's HEAD guard. */
   simulateHeadMovementBeforeCommit?: boolean;
   /** Simulates a rollback failure after a canonical mutation has failed. */
@@ -87,6 +91,8 @@ export interface TransactionTestOptions {
   simulateIndexPublishFailure?: boolean;
   /** Runs immediately before managed files are staged; used for deterministic race tests. */
   beforeStage?: () => Promise<void> | void;
+  /** Runs only after this transaction owns the ordinary Git index lock. */
+  afterIndexLock?: () => Promise<void> | void;
 }
 
 export interface ApplyTransactionOptions extends TransactionTestOptions {
@@ -154,6 +160,8 @@ const transactionJournalSchema = z.object({
   isolatedIndex: z.boolean().optional(),
   /** The private index has been atomically published as the repository index. */
   indexPublished: z.boolean().optional(),
+  /** The exact standard Git lock that this journal is authorized to recover. */
+  gitIndexLockPath: z.string().min(1).optional(),
   canonicalCommitComplete: z.boolean().optional(),
 });
 
@@ -163,6 +171,12 @@ const writerLockSchema = z.object({
   pid: z.number().int().positive(),
   operationId: z.string().regex(/^op_[a-z0-9_-]{3,96}$/),
   recoverable: z.boolean().optional(),
+});
+
+const gitIndexLockSchema = z.object({
+  version: z.literal(1),
+  operationId: z.string().regex(/^op_[a-z0-9_-]{3,96}$/),
+  pid: z.number().int().positive(),
 });
 
 const trackedBrainFiles = [
@@ -212,6 +226,7 @@ async function hasStagedChanges(root: string): Promise<boolean> {
 interface HeldGitIndexLock {
   indexPath: string;
   lockPath: string;
+  operationId: string;
 }
 
 async function gitIndexPath(root: string): Promise<string> {
@@ -219,12 +234,19 @@ async function gitIndexPath(root: string): Promise<string> {
   return path.resolve(root, configuredPath);
 }
 
-async function holdGitIndexLock(root: string): Promise<HeldGitIndexLock> {
+async function holdGitIndexLock(
+  root: string,
+  operationId: string,
+): Promise<HeldGitIndexLock> {
   const indexPath = await gitIndexPath(root);
   const lockPath = `${indexPath}.lock`;
   try {
     await mkdir(path.dirname(lockPath), { recursive: true });
-    await writeFile(lockPath, "", { flag: "wx" });
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ version: 1, operationId, pid: process.pid })}\n`,
+      { flag: "wx" },
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw new Error(
@@ -233,13 +255,30 @@ async function holdGitIndexLock(root: string): Promise<HeldGitIndexLock> {
     }
     throw error;
   }
-  return { indexPath, lockPath };
+  return { indexPath, lockPath, operationId };
 }
 
 async function releaseGitIndexLock(
   lock: HeldGitIndexLock | undefined,
 ): Promise<void> {
-  if (lock) await rm(lock.lockPath, { force: true });
+  if (!lock) return;
+  let owned: z.infer<typeof gitIndexLockSchema>;
+  try {
+    owned = gitIndexLockSchema.parse(
+      JSON.parse(await readFile(lock.lockPath, "utf8")),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(
+      "The Git index lock changed ownership before it could be released; recovery is required",
+    );
+  }
+  if (owned.operationId !== lock.operationId) {
+    throw new Error(
+      "The Git index lock belongs to another operation; recovery is required",
+    );
+  }
+  await rm(lock.lockPath);
 }
 
 async function publishHeldGitIndex(
@@ -266,6 +305,7 @@ async function publishRecoveredIsolatedIndex(
   transactionPath: string,
   preHead: string,
   commitHash: string,
+  operationId: string,
 ): Promise<void> {
   const isolatedIndexPath = path.join(transactionPath, "git-index");
   if (!(await pathExists(isolatedIndexPath))) {
@@ -284,7 +324,7 @@ async function publishRecoveredIsolatedIndex(
   let indexLock: HeldGitIndexLock | undefined;
   const validationIndexPath = path.join(transactionPath, "recovery-index");
   try {
-    indexLock = await holdGitIndexLock(root);
+    indexLock = await holdGitIndexLock(root, operationId);
     // `write-tree` may update index extensions, so inspect a copy while the
     // shared index lock prevents a concurrent caller from changing it.
     await copyFile(indexLock.indexPath, validationIndexPath);
@@ -376,6 +416,37 @@ async function pathExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function removeOwnedGitIndexLock(
+  root: string,
+  operationId: string,
+  declaredLockPath?: string,
+): Promise<void> {
+  const expectedLockPath = `${await gitIndexPath(root)}.lock`;
+  if (
+    declaredLockPath &&
+    path.resolve(declaredLockPath) !== path.resolve(expectedLockPath)
+  ) {
+    throw new Error("Unsafe Git index lock path in recovery journal");
+  }
+  if (!(await pathExists(expectedLockPath))) return;
+  let marker: z.infer<typeof gitIndexLockSchema>;
+  try {
+    marker = gitIndexLockSchema.parse(
+      JSON.parse(await readFile(expectedLockPath, "utf8")),
+    );
+  } catch {
+    throw new Error(
+      "Git index lock is present but cannot be safely attributed to this interrupted transaction; manual Git recovery is required",
+    );
+  }
+  if (marker.operationId !== operationId) {
+    throw new Error(
+      "Git index lock belongs to another operation; manual Git recovery is required",
+    );
+  }
+  await rm(expectedLockPath);
 }
 
 function safeStagePaths(root: string, stagePaths: string[]): string[] {
@@ -665,7 +736,10 @@ export async function runCanonicalWrite<T>(
         // Hold the ordinary index lock before checking it again. This closes
         // the gap where a user starts staging after the check but before we
         // publish the sealed private index.
-        indexLock = await holdGitIndexLock(root);
+        journal.gitIndexLockPath = `${await gitIndexPath(root)}.lock`;
+        await writeJournal(journalPath, journal);
+        indexLock = await holdGitIndexLock(root, options.operationId);
+        await options.testOptions?.afterIndexLock?.();
         if (await hasStagedChanges(root)) {
           throw new Error(
             "Git staged changes appeared during the canonical write; refusing to commit",
@@ -734,9 +808,10 @@ export async function runCanonicalWrite<T>(
     await writeJournal(journalPath, journal);
     simulateCrash(options.testOptions ?? {}, "committed");
 
-    await rm(transactionPath, { recursive: true, force: true });
     await rm(journalPath, { force: true });
+    simulateCrash(options.testOptions ?? {}, "journal-removed");
     await rm(lockPath, { force: true });
+    await rm(transactionPath, { recursive: true, force: true });
     let sync: SyncStatusV1 | undefined;
     if (commit) {
       try {
@@ -1113,6 +1188,9 @@ export async function recoverBrain(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       if (writerLock) {
+        if (await isGitRepository(root)) {
+          await removeOwnedGitIndexLock(root, writerLock.operationId);
+        }
         await rm(
           path.join(runtimePath, "transactions", writerLock.operationId),
           { recursive: true, force: true },
@@ -1143,6 +1221,13 @@ export async function recoverBrain(
   }
   safeStagePaths(root, journal.stagePaths ?? []);
   const gitRepository = journal.gitRepository ?? true;
+  if (gitRepository && journal.gitIndexLockPath) {
+    await removeOwnedGitIndexLock(
+      root,
+      journal.operationId,
+      journal.gitIndexLockPath,
+    );
+  }
   const head = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
   let transactionCommitExists = false;
   if (journal.phase === "committed" && journal.commitHash) {
@@ -1187,6 +1272,7 @@ export async function recoverBrain(
       path.dirname(journal.backupPath),
       journal.preHead,
       journal.commitHash,
+      journal.operationId,
     );
     journal.indexPublished = true;
     await writeJournal(journalPath, journal);

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { brainStateV1Schema } from "./state.js";
@@ -8,6 +10,8 @@ import { sourceRecordV1Schema } from "./sources/types.js";
 import { syncStatus } from "./sync.js";
 import { operationRecordV1Schema } from "./transaction.js";
 import { validateWikiGraph } from "./wiki/graph.js";
+
+const execFile = promisify(execFileCallback);
 
 export interface DoctorIssue {
   code: string;
@@ -188,6 +192,32 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
     });
   } catch {
     // No writer lock is the healthy state.
+  }
+
+  try {
+    const gitIndex = (
+      await execFile("git", ["rev-parse", "--git-path", "index"], {
+        cwd: root,
+      })
+    ).stdout.trim();
+    const indexLock = `${path.resolve(root, gitIndex)}.lock`;
+    try {
+      await access(indexLock);
+      const relativeLock = path
+        .relative(root, indexLock)
+        .replaceAll(path.sep, "/");
+      issues.push({
+        code: "GIT_INDEX_LOCK_PRESENT",
+        severity: "error",
+        message:
+          "A Git index lock is present; recover an owned transaction or resolve the Git operation before writing canonical knowledge",
+        path: relativeLock,
+      });
+    } catch {
+      // No Git index lock is the healthy state.
+    }
+  } catch {
+    // A non-Git brain has no shared Git index to inspect.
   }
 
   try {

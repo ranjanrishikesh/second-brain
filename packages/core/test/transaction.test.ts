@@ -1,12 +1,14 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback, spawn } from "node:child_process";
+import { access, chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
   applyChangeSetTransaction,
   calculateCatalogRevision,
+  doctorBrain,
   initBrain,
   loadWikiPages,
   recoverBrain,
@@ -18,6 +20,19 @@ const execFile = promisify(execFileCallback);
 
 async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
+}
+
+async function waitForPath(filePath: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await access(filePath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
 }
 
 async function initializedGitBrain(): Promise<string> {
@@ -80,6 +95,21 @@ describe("applyChangeSetTransaction", () => {
     );
 
     await expect(recoverBrain(root)).rejects.toThrow(/writer.*active/i);
+  });
+
+  test("reports a stale Git index lock instead of declaring the brain healthy", async () => {
+    const root = await initializedGitBrain();
+    await writeFile(path.join(root, ".git", "index.lock"), "stale\n");
+
+    const doctor = await doctorBrain(root);
+
+    expect(doctor.ok).toBe(false);
+    expect(doctor.issues).toContainEqual(
+      expect.objectContaining({
+        code: "GIT_INDEX_LOCK_PRESENT",
+        severity: "error",
+      }),
+    );
   });
 
   test("commits validated managed files while preserving unrelated worktree edits", async () => {
@@ -162,9 +192,9 @@ describe("applyChangeSetTransaction", () => {
       await git(root, ["show", "--format=", "--name-only", result.commit]),
     ).not.toContain("wiki/injected.md");
     expect(await readFile(injectedPath, "utf8")).toContain("Private draft");
-    expect(await git(root, ["status", "--short", "--", "wiki/injected.md"])).toBe(
-      "?? wiki/injected.md",
-    );
+    expect(
+      await git(root, ["status", "--short", "--", "wiki/injected.md"]),
+    ).toBe("?? wiki/injected.md");
   });
 
   test("refuses a pre-commit hook that stages an unrelated file", async () => {
@@ -188,9 +218,9 @@ describe("applyChangeSetTransaction", () => {
     expect(await readFile(path.join(root, "hook-private.txt"), "utf8")).toBe(
       "private hook output\n",
     );
-    expect(await git(root, ["status", "--short", "--", "hook-private.txt"])).toBe(
-      "?? hook-private.txt",
-    );
+    expect(
+      await git(root, ["status", "--short", "--", "hook-private.txt"]),
+    ).toBe("?? hook-private.txt");
   });
 
   test("restores canonical files and HEAD after whole-graph validation fails", async () => {
@@ -409,6 +439,96 @@ describe("applyChangeSetTransaction", () => {
     );
   });
 
+  test("removes an owned stale Git index lock after a hard writer crash", async () => {
+    const root = await initializedGitBrain();
+    const workerPath = path.join(root, "hard-crash-worker.mts");
+    const coreEntry = new URL("../src/index.ts", import.meta.url).href;
+    const changeSet = createSourcePageChangeSet("op_hard_crash_index_lock");
+    await writeFile(
+      workerPath,
+      `import { applyChangeSetTransaction } from ${JSON.stringify(coreEntry)};\nconst root = process.argv.at(-1);\nif (!root) throw new Error("missing root");\nawait applyChangeSetTransaction(root, ${JSON.stringify(changeSet)}, { afterIndexLock: async () => new Promise(() => {}) });\n`,
+    );
+    const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const workspaceRoot = path.resolve(testDirectory, "../../..");
+    const tsxLoader = path.join(
+      workspaceRoot,
+      "node_modules",
+      "tsx",
+      "dist",
+      "loader.mjs",
+    );
+    const worker = spawn(
+      process.execPath,
+      ["--import", tsxLoader, workerPath, root],
+      {
+        cwd: root,
+        stdio: "ignore",
+      },
+    );
+
+    try {
+      const indexLock = path.join(root, ".git", "index.lock");
+      await waitForPath(indexLock);
+      const exited = new Promise<void>((resolve) =>
+        worker.once("exit", () => resolve()),
+      );
+      worker.kill("SIGKILL");
+      await exited;
+      await expect(access(indexLock)).resolves.toBeUndefined();
+    } finally {
+      if (!worker.killed) worker.kill("SIGKILL");
+    }
+
+    const indexLock = path.join(root, ".git", "index.lock");
+    expect(await recoverBrain(root)).toBe("restored");
+    await expect(access(indexLock)).rejects.toThrow();
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_after_hard_crash_recovery"),
+      ),
+    ).resolves.toMatchObject({
+      commit: expect.stringMatching(/^[a-f0-9]{40}$/),
+    });
+  });
+
+  test("does not remove an index lock owned by another operation during recovery", async () => {
+    const root = await initializedGitBrain();
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_recovery_lock_owner"),
+        { simulateCrashAfter: "files-applied" },
+      ),
+    ).rejects.toThrow("Simulated transaction crash");
+    const indexLock = path.join(root, ".git", "index.lock");
+    await writeFile(
+      indexLock,
+      `${JSON.stringify({
+        version: 1,
+        operationId: "op_someone_else",
+        pid: process.pid,
+      })}\n`,
+    );
+    const journalPath = path.join(
+      root,
+      ".brain",
+      "runtime",
+      "transaction.json",
+    );
+    const journal = JSON.parse(await readFile(journalPath, "utf8"));
+    journal.gitIndexLockPath = indexLock;
+    await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+    await expect(recoverBrain(root)).rejects.toThrow(
+      /belongs to another operation/i,
+    );
+    await expect(access(indexLock)).resolves.toBeUndefined();
+  });
+
   test("preserves recovery material when rollback itself fails", async () => {
     const root = await initializedGitBrain();
     const invalid = sourcePage();
@@ -611,6 +731,28 @@ describe("applyChangeSetTransaction", () => {
     ).rejects.toThrow("Simulated transaction crash");
 
     expect(await recoverBrain(root)).toBe("committed");
+    expect(await git(root, ["rev-parse", "HEAD"])).not.toBe(beforeHead);
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
+  test("recovers cleanly when interrupted after the journal is removed", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_cleanup_journal_removed"),
+        { simulateCrashAfter: "journal-removed" as never },
+      ),
+    ).rejects.toThrow("Simulated transaction crash");
+
+    await expect(
+      readFile(path.join(root, ".brain", "runtime", "transaction.json")),
+    ).rejects.toThrow();
+    expect(await recoverBrain(root)).toBe("clean");
     expect(await git(root, ["rev-parse", "HEAD"])).not.toBe(beforeHead);
     expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
       "",
