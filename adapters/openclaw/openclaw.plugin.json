@@ -5,14 +5,23 @@
   "contracts": {
     "tools": [
       "brain_status",
+      "brain_begin_setup",
+      "brain_next_setup",
+      "brain_finish_setup",
       "brain_begin_query",
       "brain_expand_query",
+      "brain_bootstrap_next",
+      "brain_query_read",
       "brain_search",
       "brain_read",
+      "brain_plan_reconciliation",
+      "brain_request_web_approval",
+      "brain_resolve_web_approval",
       "brain_capture_web",
       "brain_apply",
       "brain_finish_query",
-      "brain_audit"
+      "brain_audit",
+      "brain_sync"
     ]
   },
   "activation": {

@@ -20,6 +20,10 @@
       }
     }
   },
+  "tools": {
+    "profile": "minimal",
+    "allow": ["second-brain", "web_search", "web_fetch"]
+  },
   "plugins": {
     "enabled": true,
     "allow": ["second-brain"],

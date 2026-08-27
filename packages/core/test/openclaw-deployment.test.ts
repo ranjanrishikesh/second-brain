@@ -18,7 +18,7 @@ describe("OpenClaw deployment", () => {
       ),
     );
 
-    expect(dockerfile).toContain("FROM node:22.22.3-bookworm-slim");
+    expect(dockerfile).toContain("FROM node:24.15.0-bookworm-slim");
     expect(dockerfile).toContain(
       "pnpm --filter @second-brain/openclaw-adapter build",
     );
@@ -29,7 +29,7 @@ describe("OpenClaw deployment", () => {
     );
     expect(gateway.volumes).toContain("../..:/brain");
     expect(gateway.volumes).toContain("openclaw-runtime:/home/node/.openclaw");
-    expect(gateway.healthcheck.test.join(" ")).toContain("/healthz");
+    expect(gateway.healthcheck.test.join(" ")).toContain("/readyz");
     expect(gateway.command.join(" ")).toContain("--bind lan");
     expect(compose.volumes).toHaveProperty("openclaw-runtime");
   });
@@ -50,6 +50,14 @@ describe("OpenClaw deployment", () => {
         allowPromptInjection: true,
       },
       config: { brainRoot: "/brain" },
+    });
+    expect(config.tools).toMatchObject({
+      profile: "minimal",
+      allow: expect.arrayContaining([
+        "second-brain",
+        "web_search",
+        "web_fetch",
+      ]),
     });
     expect(JSON.stringify(config).toLowerCase()).not.toContain("memory wiki");
   });
