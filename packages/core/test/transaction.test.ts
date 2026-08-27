@@ -307,6 +307,52 @@ describe("applyChangeSetTransaction", () => {
     );
   });
 
+  test("preserves recovery material when rollback itself fails", async () => {
+    const root = await initializedGitBrain();
+    const invalid = sourcePage();
+    invalid.relations = [
+      {
+        targetId: "pg_missing_target",
+        kind: "related-to",
+        sourceIds: [],
+      },
+    ];
+    const changeSet = createSourcePageChangeSet("op_rollback_failure");
+    changeSet.pages[0] = { action: "create", page: invalid };
+
+    await expect(
+      applyChangeSetTransaction(root, changeSet, {
+        simulateRollbackFailure: true,
+      }),
+    ).rejects.toThrow(/rollback.*recovery/i);
+
+    const runtime = path.join(root, ".brain", "runtime");
+    await expect(
+      readFile(path.join(runtime, "transaction.json"), "utf8"),
+    ).resolves.toContain("op_rollback_failure");
+    await expect(
+      readFile(
+        path.join(
+          runtime,
+          "transactions",
+          "op_rollback_failure",
+          "backup",
+          "wiki",
+          "home.md",
+        ),
+        "utf8",
+      ),
+    ).resolves.toContain("# Transactions");
+    await expect(
+      readFile(path.join(runtime, "writer.lock"), "utf8"),
+    ).resolves.toContain('"recoverable":true');
+
+    await expect(recoverBrain(root)).resolves.toBe("restored");
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+  });
+
   test("aborts on concurrent HEAD movement without discarding the new commit", async () => {
     const root = await initializedGitBrain();
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);

@@ -80,6 +80,8 @@ export interface TransactionTestOptions {
   simulateCrashAfter?: "prepared" | "files-applied" | "committed";
   /** Simulates an external commit immediately before the transaction's HEAD guard. */
   simulateHeadMovementBeforeCommit?: boolean;
+  /** Simulates a rollback failure after a canonical mutation has failed. */
+  simulateRollbackFailure?: boolean;
 }
 
 export interface ApplyTransactionOptions extends TransactionTestOptions {
@@ -123,6 +125,13 @@ function simulateCrash(
   }
 }
 
+function rollbackRecoveryError(operationId: string, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `Canonical rollback failed; recovery is required for ${operationId}: ${detail}`,
+  );
+}
+
 const transactionJournalSchema = z.object({
   version: z.literal(1),
   operationId: z.string().regex(/^op_[a-z0-9_-]{3,96}$/),
@@ -135,6 +144,7 @@ const transactionJournalSchema = z.object({
     .optional(),
   gitRepository: z.boolean().optional(),
   stagePaths: z.array(z.string()).optional(),
+  preexistingIndexPaths: z.array(z.string()).optional(),
   canonicalCommitComplete: z.boolean().optional(),
 });
 
@@ -260,6 +270,48 @@ function safeStagePaths(root: string, stagePaths: string[]): string[] {
   });
 }
 
+function zeroDelimitedPaths(value: string): string[] {
+  return value.split("\0").filter(Boolean);
+}
+
+async function indexedPaths(
+  root: string,
+  stagePaths: string[],
+): Promise<string[]> {
+  if (stagePaths.length === 0) return [];
+  const { stdout } = await execFile(
+    "git",
+    ["ls-files", "-z", "--", ...stagePaths],
+    { cwd: root },
+  );
+  return zeroDelimitedPaths(stdout).sort();
+}
+
+async function restoreStagedIndex(
+  root: string,
+  stagePaths: string[],
+  preexistingIndexPaths: string[],
+): Promise<void> {
+  if (stagePaths.length === 0) return;
+  const before = new Set(preexistingIndexPaths);
+  const current = await indexedPaths(root, stagePaths);
+  const newlyIndexed = current.filter(
+    (relativePath) => !before.has(relativePath),
+  );
+  if (newlyIndexed.length > 0) {
+    await git(root, [
+      "rm",
+      "--cached",
+      "--ignore-unmatch",
+      "--",
+      ...newlyIndexed,
+    ]);
+  }
+  if (preexistingIndexPaths.length > 0) {
+    await git(root, ["restore", "--staged", "--", ...preexistingIndexPaths]);
+  }
+}
+
 export interface CanonicalWriteResult<T> {
   value: T;
   commit?: string;
@@ -335,6 +387,7 @@ export async function runCanonicalWrite<T>(
   );
   let committed = false;
   let stagePaths: string[] = [];
+  let preexistingIndexPaths: string[] = [];
   let snapshotPrepared = false;
   try {
     const preHead = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
@@ -362,6 +415,10 @@ export async function runCanonicalWrite<T>(
     const mutation = await mutate();
     stagePaths = safeStagePaths(root, mutation.stagePaths);
     journal.stagePaths = stagePaths;
+    preexistingIndexPaths = gitRepository
+      ? await indexedPaths(root, stagePaths)
+      : [];
+    journal.preexistingIndexPaths = preexistingIndexPaths;
     journal.phase = "files-applied";
     await writeJournal(journalPath, journal);
     simulateCrash(options.testOptions ?? {}, "files-applied");
@@ -441,18 +498,32 @@ export async function runCanonicalWrite<T>(
       throw error;
     }
     if (!committed && snapshotPrepared) {
-      await restoreBrainSnapshot(root, backupPath).catch(() => undefined);
-      if (gitRepository && stagePaths.length > 0) {
-        await execFile("git", ["restore", "--staged", "--", ...stagePaths], {
-          cwd: root,
-        }).catch(() => undefined);
+      try {
+        if (options.testOptions?.simulateRollbackFailure) {
+          throw new Error("Simulated rollback failure");
+        }
+        await restoreBrainSnapshot(root, backupPath);
+        if (gitRepository && stagePaths.length > 0) {
+          await restoreStagedIndex(root, stagePaths, preexistingIndexPaths);
+        }
+      } catch (rollbackError) {
+        await writeFile(
+          lockPath,
+          `${JSON.stringify({
+            pid: process.pid,
+            operationId: options.operationId,
+            recoverable: true,
+          })}\n`,
+          "utf8",
+        ).catch(() => undefined);
+        throw rollbackRecoveryError(options.operationId, rollbackError);
       }
     }
+    await rm(journalPath, { force: true }).catch(() => undefined);
+    await rm(lockPath, { force: true }).catch(() => undefined);
     await rm(transactionPath, { recursive: true, force: true }).catch(
       () => undefined,
     );
-    await rm(journalPath, { force: true }).catch(() => undefined);
-    await rm(lockPath, { force: true }).catch(() => undefined);
     throw error;
   }
 }
@@ -778,16 +849,16 @@ export async function recoverBrain(
   if (outcome === "restored") {
     await restoreBrainSnapshot(root, journal.backupPath);
     if (gitRepository && (journal.stagePaths?.length ?? 0) > 0) {
-      await execFile(
-        "git",
-        ["restore", "--staged", "--", ...(journal.stagePaths ?? [])],
-        { cwd: root },
-      ).catch(() => undefined);
+      await restoreStagedIndex(
+        root,
+        journal.stagePaths ?? [],
+        journal.preexistingIndexPaths ?? [],
+      );
     }
   }
-  await rm(path.dirname(journal.backupPath), { recursive: true, force: true });
   await rm(journalPath, { force: true });
   await rm(path.join(runtimePath, "mutation.lock"), { force: true });
   await rm(lockPath, { force: true });
+  await rm(path.dirname(journal.backupPath), { recursive: true, force: true });
   return outcome;
 }
