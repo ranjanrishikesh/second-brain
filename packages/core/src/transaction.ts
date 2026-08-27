@@ -13,7 +13,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { searchBrain } from "./search.js";
+import type { BrainRuntimeServices } from "./semantic.js";
+import {
+  assertReconciliationPlanMatches,
+  assertReconciliationReceipt,
+  planReconciliation,
+} from "./reconciliation.js";
 import {
   loadWikiPages,
   validateWikiGraph,
@@ -74,6 +79,8 @@ export interface TransactionTestOptions {
 export interface ApplyTransactionOptions extends TransactionTestOptions {
   /** Bind this mutation to the currently open query and its active evidence tier. */
   queryId?: string;
+  /** Dependency injection for verified local semantic reconciliation. */
+  runtimeServices?: BrainRuntimeServices;
 }
 
 interface QueryMutationBinding {
@@ -497,39 +504,34 @@ export async function applyChangeSetTransaction(
         ? await readQueryMutationBinding(root, options.queryId)
         : undefined;
       const currentPages = await loadWikiPages(root);
-      const proposedPages = applyWikiChangeSet(currentPages, changeSet);
-      const config = await loadBrainConfig(root);
-      const changedPageIds = new Set(
-        changeSet.pages.map((mutation) => mutation.page.id),
+      const expectedPlan = await planReconciliation(
+        root,
+        changeSet,
+        options.runtimeServices,
       );
-      const proposedById = new Map(
-        proposedPages.map((page) => [page.id, page]),
-      );
-      const declaredCandidates = new Set(
-        changeSet.reconciliation.candidatePageIds,
-      );
-      for (const mutation of changeSet.pages) {
-        const relatedResults = await searchBrain(root, {
-          query: `${mutation.page.title} ${mutation.page.summary}`,
-          scope: "wiki",
-          limit: config.graph.relatedPageLimit,
-        });
-        for (const result of relatedResults) {
-          const candidate = proposedById.get(result.id);
-          if (
-            !candidate ||
-            changedPageIds.has(candidate.id) ||
-            candidate.status === "archived"
-          ) {
-            continue;
-          }
-          if (!declaredCandidates.has(candidate.id)) {
-            throw new Error(
-              `Reconciliation related-page search candidate is missing: ${candidate.id}`,
-            );
-          }
-        }
+      if (
+        expectedPlan.candidates.length > 0 &&
+        !changeSet.reconciliation.plan
+      ) {
+        throw new Error(
+          `Reconciliation plan is required for discovered candidates: ${expectedPlan.candidates
+            .map((candidate) => candidate.pageId)
+            .join(", ")}`,
+        );
       }
+      const proposedPages = applyWikiChangeSet(currentPages, changeSet);
+      if (changeSet.reconciliation.plan) {
+        assertReconciliationPlanMatches(
+          changeSet.reconciliation.plan,
+          expectedPlan,
+        );
+        assertReconciliationReceipt(
+          currentPages,
+          proposedPages,
+          changeSet.reconciliation,
+        );
+      }
+      const config = await loadBrainConfig(root);
       const proposedPaths = new Set(proposedPages.map((page) => page.path));
       for (const page of proposedPages) safePagePath(root, page.path);
       for (const currentPage of currentPages) {

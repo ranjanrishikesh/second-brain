@@ -6,10 +6,7 @@ import { z } from "zod";
 import { extractMarkdown } from "./sources/extract.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { SourceRecordV1 } from "./sources/types.js";
-import {
-  semanticSearch,
-  type BrainRuntimeServices,
-} from "./semantic.js";
+import { semanticSearch, type BrainRuntimeServices } from "./semantic.js";
 import { parseWikiPage } from "./wiki/page.js";
 
 export type SearchScope = "wiki" | "sources" | "all";

@@ -13,6 +13,9 @@ import {
 import { auditReportV1Schema } from "./wiki/graph.js";
 import {
   changeSetV1Schema,
+  readReceiptV1Schema,
+  reconciliationPlanV1Schema,
+  reconciliationReceiptV1Schema,
   relationV1Schema,
   wikiPageV1Schema,
 } from "./wiki/types.js";
@@ -24,6 +27,9 @@ export type PublicSchemaNameV1 =
   | "ChangeSetV1"
   | "OperationRecordV1"
   | "QuerySessionV1"
+  | "ReadReceiptV1"
+  | "ReconciliationPlanV1"
+  | "ReconciliationReceiptV1"
   | "RelationV1"
   | "SourceRecordV1"
   | "SemanticIndexMetadataV1"
@@ -53,6 +59,15 @@ export const brainJsonSchemasV1: Record<
   ChangeSetV1: jsonSchema("ChangeSetV1", changeSetV1Schema),
   OperationRecordV1: jsonSchema("OperationRecordV1", operationRecordV1Schema),
   QuerySessionV1: jsonSchema("QuerySessionV1", querySessionV1Schema),
+  ReadReceiptV1: jsonSchema("ReadReceiptV1", readReceiptV1Schema),
+  ReconciliationPlanV1: jsonSchema(
+    "ReconciliationPlanV1",
+    reconciliationPlanV1Schema,
+  ),
+  ReconciliationReceiptV1: jsonSchema(
+    "ReconciliationReceiptV1",
+    reconciliationReceiptV1Schema,
+  ),
   RelationV1: jsonSchema("RelationV1", relationV1Schema),
   SourceRecordV1: jsonSchema("SourceRecordV1", sourceRecordV1Schema),
   SemanticIndexMetadataV1: jsonSchema(

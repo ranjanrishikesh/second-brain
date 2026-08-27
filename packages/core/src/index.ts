@@ -56,6 +56,12 @@ export type { WikiLinkV1 } from "./wiki/page.js";
 export {
   changeSetV1Schema,
   citationV1Schema,
+  pageMutationV1Schema,
+  readReceiptV1Schema,
+  reconciliationCandidateV1Schema,
+  reconciliationPlanV1Schema,
+  reconciliationReasonV1Schema,
+  reconciliationReceiptV1Schema,
   relationV1Schema,
   wikiPageV1Schema,
 } from "./wiki/types.js";
@@ -71,13 +77,25 @@ export { writeGeneratedWikiFiles } from "./wiki/generated.js";
 export {
   applyWikiChangeSet,
   buildReconciliationCandidates,
+  proposeWikiPageChanges,
 } from "./wiki/mutate.js";
 export type {
   ChangeSetV1,
   CitationV1,
+  PageMutationV1,
+  ReadReceiptV1,
+  ReconciliationCandidateV1,
+  ReconciliationPlanV1,
+  ReconciliationReasonV1,
+  ReconciliationReceiptV1,
   RelationV1,
   WikiPageV1,
 } from "./wiki/types.js";
+export {
+  assertReconciliationPlanMatches,
+  assertReconciliationReceipt,
+  planReconciliation,
+} from "./reconciliation.js";
 export {
   applyChangeSetTransaction,
   operationRecordV1Schema,

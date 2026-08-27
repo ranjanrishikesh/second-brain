@@ -2,6 +2,17 @@ import { describe, expect, test } from "vitest";
 import { auditReportV1Schema, operationRecordV1Schema } from "../src/index.js";
 
 describe("versioned public schemas", () => {
+  test("exports reconciliation contracts for host agents", async () => {
+    const exports = (await import("../src/index.js")) as Record<
+      string,
+      unknown
+    >;
+
+    expect(exports).toHaveProperty("reconciliationPlanV1Schema");
+    expect(exports).toHaveProperty("reconciliationReceiptV1Schema");
+    expect(exports).toHaveProperty("readReceiptV1Schema");
+  });
+
   test("exports state contracts that default omitted v1 fields safely", async () => {
     const exports = (await import("../src/index.js")) as Record<
       string,

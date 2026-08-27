@@ -1,7 +1,9 @@
 import { z } from "zod";
 
+const pageIdV1Schema = z.string().regex(/^pg_[a-z0-9_]{3,64}$/);
+
 export const relationV1Schema = z.object({
-  targetId: z.string().regex(/^pg_[a-z0-9_]{3,64}$/),
+  targetId: pageIdV1Schema,
   kind: z.string().trim().min(1),
   anchor: z.string().trim().min(1).optional(),
   note: z.string().trim().min(1).optional(),
@@ -44,31 +46,85 @@ export const wikiPageV1Schema = z.object({
 
 export type WikiPageV1 = z.infer<typeof wikiPageV1Schema>;
 
+export const reconciliationReasonV1Schema = z.enum([
+  "graph-neighbor",
+  "shared-source",
+  "shared-locator",
+  "shared-tag",
+  "shared-alias",
+  "near-duplicate",
+  "contradiction",
+  "lexical",
+  "semantic",
+]);
+
+export type ReconciliationReasonV1 = z.infer<
+  typeof reconciliationReasonV1Schema
+>;
+
+export const reconciliationCandidateV1Schema = z.object({
+  pageId: pageIdV1Schema,
+  revision: z.string().min(1),
+  reasons: z.array(reconciliationReasonV1Schema).min(1),
+});
+
+export type ReconciliationCandidateV1 = z.infer<
+  typeof reconciliationCandidateV1Schema
+>;
+
+export const reconciliationPlanV1Schema = z.object({
+  version: z.literal(1),
+  catalogRevision: z.string().min(1),
+  changedPageIds: z.array(pageIdV1Schema),
+  candidates: z.array(reconciliationCandidateV1Schema),
+});
+
+export type ReconciliationPlanV1 = z.infer<typeof reconciliationPlanV1Schema>;
+
+export const readReceiptV1Schema = z.object({
+  pageId: pageIdV1Schema,
+  revision: z.string().min(1),
+  anchor: z.string().trim().min(1).optional(),
+  readAt: z.string().datetime(),
+});
+
+export type ReadReceiptV1 = z.infer<typeof readReceiptV1Schema>;
+
+export const reconciliationReceiptV1Schema = z.object({
+  candidatePageIds: z.array(pageIdV1Schema).default([]),
+  plan: reconciliationPlanV1Schema.optional(),
+  readReceipts: z.array(readReceiptV1Schema).default([]),
+  reviewed: z
+    .array(
+      z.object({
+        pageId: pageIdV1Schema,
+        decision: z.enum(["changed", "no-change"]),
+        reason: z.string().trim().min(1),
+      }),
+    )
+    .default([]),
+});
+
+export type ReconciliationReceiptV1 = z.infer<
+  typeof reconciliationReceiptV1Schema
+>;
+
+export const pageMutationV1Schema = z.object({
+  action: z.enum(["create", "update", "rename", "merge", "archive"]),
+  expectedRevision: z.string().optional(),
+  mergeSourceIds: z.array(pageIdV1Schema).optional(),
+  page: wikiPageV1Schema,
+});
+
+export type PageMutationV1 = z.infer<typeof pageMutationV1Schema>;
+
 export const changeSetV1Schema = z.object({
   version: z.literal(1),
   operationId: z.string().regex(/^op_[a-z0-9_-]{3,96}$/),
   catalogRevision: z.string().min(1),
   reason: z.string().trim().min(1),
-  pages: z.array(
-    z.object({
-      action: z.enum(["create", "update", "rename", "merge", "archive"]),
-      expectedRevision: z.string().optional(),
-      mergeSourceIds: z
-        .array(z.string().regex(/^pg_[a-z0-9_]{3,64}$/))
-        .optional(),
-      page: wikiPageV1Schema,
-    }),
-  ),
-  reconciliation: z.object({
-    candidatePageIds: z.array(z.string()),
-    reviewed: z.array(
-      z.object({
-        pageId: z.string(),
-        decision: z.enum(["changed", "no-change"]),
-        reason: z.string().min(1),
-      }),
-    ),
-  }),
+  pages: z.array(pageMutationV1Schema),
+  reconciliation: reconciliationReceiptV1Schema,
 });
 
 export type ChangeSetV1 = z.infer<typeof changeSetV1Schema>;

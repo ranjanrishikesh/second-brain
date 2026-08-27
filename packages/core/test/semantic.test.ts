@@ -52,14 +52,8 @@ describe("local semantic search", () => {
       "Matter spirals around a compact object.",
       "accretion-disk",
     );
-    await writeFile(
-      path.join(root, blackHole.path),
-      renderWikiPage(blackHole),
-    );
-    await writeFile(
-      path.join(root, accretion.path),
-      renderWikiPage(accretion),
-    );
+    await writeFile(path.join(root, blackHole.path), renderWikiPage(blackHole));
+    await writeFile(path.join(root, accretion.path), renderWikiPage(accretion));
 
     const results = await searchBrain(
       root,

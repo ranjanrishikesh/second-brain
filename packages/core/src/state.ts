@@ -9,7 +9,10 @@ export const setupStateV1Schema = z.object({
   status: z
     .enum(["not-started", "in-progress", "completed"])
     .default("not-started"),
-  id: z.string().regex(/^setup_[a-f0-9]{32}$/).optional(),
+  id: z
+    .string()
+    .regex(/^setup_[a-f0-9]{32}$/)
+    .optional(),
   pendingSourceIds: z.array(sourceIdV1Schema).default([]),
   completedAt: z.string().datetime().optional(),
 });
@@ -26,13 +29,11 @@ export const syncTargetV1Schema = z.object({
 export type SyncTargetV1 = z.infer<typeof syncTargetV1Schema>;
 
 export const syncStatusV1Schema = z.object({
-  status: z.enum([
-    "unconfigured",
-    "synced",
-    "pending",
-    "manual-sync-required",
-  ]),
-  commit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
+  status: z.enum(["unconfigured", "synced", "pending", "manual-sync-required"]),
+  commit: z
+    .string()
+    .regex(/^[a-f0-9]{40,64}$/)
+    .optional(),
   remote: z.string().trim().min(1).optional(),
   branch: z.string().trim().min(1).optional(),
   reason: z.string().trim().min(1).optional(),

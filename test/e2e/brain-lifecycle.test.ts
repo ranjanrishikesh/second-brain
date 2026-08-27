@@ -10,7 +10,6 @@ import {
   applyChangeSetTransaction,
   attachQueryChange,
   beginQuery,
-  buildReconciliationCandidates,
   calculateCatalogRevision,
   captureWebEvidence,
   expandQuery,
@@ -19,6 +18,7 @@ import {
   loadWikiPages,
   nextBootstrapBatch,
   nextSemanticAuditBatch,
+  planReconciliation,
   readQuerySession,
   recordSemanticAuditBatch,
   recoverBrain,
@@ -84,50 +84,39 @@ async function applyCreatedPages(
   pages: WikiPageV1[],
 ): Promise<void> {
   const current = await loadWikiPages(root);
-  const proposed = [...current, ...pages];
-  const changedPageIds = new Set(pages.map((page) => page.id));
-  const currentPageIds = new Set(current.map((page) => page.id));
-  const relatedSearchResults: Awaited<ReturnType<typeof searchBrain>> = [];
-  for (const page of pages) {
-    relatedSearchResults.push(
-      ...(await searchBrain(root, {
-        query: `${page.title} ${page.summary}`,
-        scope: "wiki",
-        limit: 20,
-      })),
-    );
-  }
-  const searchedCandidates = relatedSearchResults
-    .filter(
-      (result) =>
-        currentPageIds.has(result.id) && !changedPageIds.has(result.id),
-    )
-    .map((result) => result.id);
-  const candidates = [
-    ...new Set([
-      ...buildReconciliationCandidates(proposed, [...changedPageIds]),
-      ...searchedCandidates,
-    ]),
-  ].sort();
-  const result = await applyChangeSetTransaction(
-    root,
-    {
-      version: 1,
-      operationId,
-      catalogRevision: calculateCatalogRevision(current),
-      reason: `E2E fake-host mutation ${operationId}`,
-      pages: pages.map((page) => ({ action: "create" as const, page })),
-      reconciliation: {
-        candidatePageIds: candidates,
-        reviewed: candidates.map((pageId) => ({
-          pageId,
-          decision: "no-change" as const,
-          reason: "Read in full; the new cited claim does not alter this page.",
-        })),
-      },
-    },
-    { queryId },
+  const changeSet = {
+    version: 1 as const,
+    operationId,
+    catalogRevision: calculateCatalogRevision(current),
+    reason: `E2E fake-host mutation ${operationId}`,
+    pages: pages.map((page) => ({ action: "create" as const, page })),
+    reconciliation: { candidatePageIds: [], reviewed: [] },
+  };
+  const plan = await planReconciliation(root, changeSet);
+  const directlyRelatedPageIds = new Set(
+    pages.flatMap((page) =>
+      page.relations.map((relation) => relation.targetId),
+    ),
   );
+  changeSet.reconciliation = {
+    candidatePageIds: plan.candidates.map((candidate) => candidate.pageId),
+    plan,
+    readReceipts: plan.candidates.map((candidate) => ({
+      pageId: candidate.pageId,
+      revision: candidate.revision,
+      readAt: fixedTime,
+    })),
+    reviewed: plan.candidates.map((candidate) => ({
+      pageId: candidate.pageId,
+      decision: directlyRelatedPageIds.has(candidate.pageId)
+        ? ("changed" as const)
+        : ("no-change" as const),
+      reason: directlyRelatedPageIds.has(candidate.pageId)
+        ? "The new page adds a durable relationship to this reviewed page."
+        : "Read in full; the new cited claim does not alter this page.",
+    })),
+  };
+  const result = await applyChangeSetTransaction(root, changeSet, { queryId });
   await attachQueryChange(root, queryId, result.operationId);
 }
 

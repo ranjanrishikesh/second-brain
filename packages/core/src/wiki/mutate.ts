@@ -62,7 +62,7 @@ export function buildReconciliationCandidates(
     .sort();
 }
 
-export function applyWikiChangeSet(
+export function proposeWikiPageChanges(
   currentPages: WikiPageV1[],
   input: ChangeSetV1,
 ): WikiPageV1[] {
@@ -162,6 +162,69 @@ export function applyWikiChangeSet(
     }
     paths.set(normalizedPath, page.id);
   }
+  const originalRevisions = new Map(
+    currentPages.map((page) => [page.id, page.revision]),
+  );
+  const proposedRevisions = new Map(
+    proposedPages.map((page) => [page.id, page.revision]),
+  );
+  for (const mutation of changeSet.pages) {
+    if (
+      mutation.action !== "create" &&
+      originalRevisions.get(mutation.page.id) ===
+        proposedRevisions.get(mutation.page.id)
+    ) {
+      throw new Error(
+        `Wiki mutation makes no canonical change: ${mutation.page.id}`,
+      );
+    }
+  }
+  return proposedPages;
+}
+
+function relationFingerprint(page: WikiPageV1, targetId: string): string[] {
+  return page.relations
+    .filter((relation) => relation.targetId === targetId)
+    .map((relation) => JSON.stringify(relation))
+    .sort();
+}
+
+/**
+ * A reviewed candidate is durably changed either by changing that page itself
+ * or by adding, removing, or rewriting a relation that points to it. The
+ * latter is important because generated backlinks update automatically.
+ */
+export function isCandidateChangedByMutation(
+  currentPages: WikiPageV1[],
+  proposedPages: WikiPageV1[],
+  candidatePageId: string,
+): boolean {
+  const currentById = new Map(currentPages.map((page) => [page.id, page]));
+  const proposedCandidate = proposedPages.find(
+    (page) => page.id === candidatePageId,
+  );
+  if (
+    proposedCandidate?.revision !== currentById.get(candidatePageId)?.revision
+  ) {
+    return true;
+  }
+  for (const proposedPage of proposedPages) {
+    const currentPage = currentById.get(proposedPage.id);
+    const before = currentPage
+      ? relationFingerprint(currentPage, candidatePageId)
+      : [];
+    const after = relationFingerprint(proposedPage, candidatePageId);
+    if (JSON.stringify(before) !== JSON.stringify(after)) return true;
+  }
+  return false;
+}
+
+export function applyWikiChangeSet(
+  currentPages: WikiPageV1[],
+  input: ChangeSetV1,
+): WikiPageV1[] {
+  const changeSet = changeSetV1Schema.parse(input);
+  const proposedPages = proposeWikiPageChanges(currentPages, changeSet);
   const declaredCandidateIds = new Set(
     changeSet.reconciliation.candidatePageIds,
   );
@@ -185,30 +248,11 @@ export function applyWikiChangeSet(
       );
     }
   }
-  const originalRevisions = new Map(
-    currentPages.map((page) => [page.id, page.revision]),
-  );
-  const proposedRevisions = new Map(
-    proposedPages.map((page) => [page.id, page.revision]),
-  );
-  for (const mutation of changeSet.pages) {
-    if (
-      mutation.action !== "create" &&
-      originalRevisions.get(mutation.page.id) ===
-        proposedRevisions.get(mutation.page.id)
-    ) {
-      throw new Error(
-        `Wiki mutation makes no canonical change: ${mutation.page.id}`,
-      );
-    }
-  }
-  const mutatedPageIds = new Set(
-    proposedPages
-      .filter((page) => originalRevisions.get(page.id) !== page.revision)
-      .map((page) => page.id),
-  );
   for (const review of changeSet.reconciliation.reviewed) {
-    if (review.decision === "changed" && !mutatedPageIds.has(review.pageId)) {
+    if (
+      review.decision === "changed" &&
+      !isCandidateChangedByMutation(currentPages, proposedPages, review.pageId)
+    ) {
       throw new Error(
         `Reconciliation candidate marked changed is missing from the change set: ${review.pageId}`,
       );

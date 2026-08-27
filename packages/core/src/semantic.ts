@@ -90,11 +90,12 @@ async function semanticCorpusRevision(root: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function semanticDocuments(root: string): Promise<
-  Array<Omit<z.infer<typeof semanticDocumentV1Schema>, "vector">>
-> {
-  const documents: Array<Omit<z.infer<typeof semanticDocumentV1Schema>, "vector">> =
-    [];
+async function semanticDocuments(
+  root: string,
+): Promise<Array<Omit<z.infer<typeof semanticDocumentV1Schema>, "vector">>> {
+  const documents: Array<
+    Omit<z.infer<typeof semanticDocumentV1Schema>, "vector">
+  > = [];
   const manifest = JSON.parse(
     await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
   ) as { sources: SourceRecordV1[] };
@@ -148,7 +149,10 @@ function cosineSimilarity(
   right: readonly number[],
 ): number {
   if (left.length !== right.length || left.length === 0) return 0;
-  return left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
+  return left.reduce(
+    (sum, value, index) => sum + value * (right[index] ?? 0),
+    0,
+  );
 }
 
 function cachePath(root: string): string {
@@ -191,7 +195,9 @@ async function verifyModelArtifact(
     (filePath) => path.basename(filePath) === "model_quantized.onnx",
   );
   if (!artifact) {
-    throw new Error("Pinned semantic model artifact model_quantized.onnx is missing");
+    throw new Error(
+      "Pinned semantic model artifact model_quantized.onnx is missing",
+    );
   }
   const actualSha256 = createHash("sha256")
     .update(await readFile(artifact))
@@ -228,7 +234,8 @@ export function createLocalEmbeddingProvider(root: string): EmbeddingProvider {
           );
           return async (values, embeddingRole = "document") => {
             const prefixed = values.map(
-              (value) => `${embeddingRole === "query" ? "query" : "passage"}: ${value}`,
+              (value) =>
+                `${embeddingRole === "query" ? "query" : "passage"}: ${value}`,
             );
             const tensor = await extractor(prefixed, {
               pooling: "mean",
@@ -236,7 +243,9 @@ export function createLocalEmbeddingProvider(root: string): EmbeddingProvider {
             });
             const dimensions = tensor.dims.at(-1);
             if (!dimensions || tensor.dims[0] !== values.length) {
-              throw new Error("Pinned semantic model returned an invalid embedding shape");
+              throw new Error(
+                "Pinned semantic model returned an invalid embedding shape",
+              );
             }
             const valuesArray = Array.from(tensor.data as Float32Array);
             return values.map((_, index) =>
@@ -282,11 +291,15 @@ export async function rebuildSemanticIndex(
       )
     : [];
   if (vectors.length !== documents.length) {
-    throw new Error("Semantic provider returned the wrong number of embeddings");
+    throw new Error(
+      "Semantic provider returned the wrong number of embeddings",
+    );
   }
   const dimensions = vectors[0]?.length ?? 1;
   if (vectors.some((vector) => vector.length !== dimensions)) {
-    throw new Error("Semantic provider returned embeddings with inconsistent dimensions");
+    throw new Error(
+      "Semantic provider returned embeddings with inconsistent dimensions",
+    );
   }
   await writeSemanticIndex(root, {
     version: 1,
