@@ -385,12 +385,61 @@ function safeStagePaths(root: string, stagePaths: string[]): string[] {
     if (
       path.isAbsolute(relativePath) ||
       normalized.startsWith(":") ||
+      normalized !== relativePath ||
+      normalized === "wiki" ||
+      normalized === ".brain" ||
+      normalized === "sources" ||
       !absolutePath.startsWith(`${path.resolve(root)}${path.sep}`)
     ) {
       throw new Error(`Unsafe managed stage path: ${relativePath}`);
     }
     return normalized;
   });
+}
+
+async function privateIndexTree(
+  root: string,
+  isolatedIndexPath: string,
+): Promise<string> {
+  return git(root, ["write-tree"], isolatedIndexPath);
+}
+
+async function assertPrivateIndexTree(
+  root: string,
+  isolatedIndexPath: string,
+  expectedTree: string,
+): Promise<void> {
+  const actualTree = await privateIndexTree(root, isolatedIndexPath);
+  if (actualTree !== expectedTree) {
+    throw new Error(
+      "Private Git index changed after graph validation; refusing to commit an unvalidated tree",
+    );
+  }
+}
+
+async function assertPrivateIndexMatchesWorktree(
+  root: string,
+  isolatedIndexPath: string,
+  stagePaths: string[],
+): Promise<void> {
+  if (stagePaths.length === 0) return;
+  try {
+    await execFile(
+      "git",
+      ["diff", "--quiet", "--exit-code", "--", ...stagePaths],
+      {
+        cwd: root,
+        env: gitEnvironment(isolatedIndexPath),
+      },
+    );
+  } catch (error) {
+    if ((error as { code?: number }).code === 1) {
+      throw new Error(
+        "Managed worktree files changed after graph validation; retry the canonical write",
+      );
+    }
+    throw error;
+  }
 }
 
 function zeroDelimitedPaths(value: string): string[] {
@@ -571,37 +620,71 @@ export async function runCanonicalWrite<T>(
           "Git staged changes appeared during the canonical write; refusing to commit",
         );
       }
-      await options.testOptions?.beforeStage?.();
-      if (await hasStagedChanges(root)) {
-        throw new Error(
-          "Git staged changes appeared during the canonical write; refusing to commit",
-        );
-      }
-
       let indexLock: HeldGitIndexLock | undefined;
       try {
+        // Build the complete transaction tree before yielding to anything
+        // external. This private index is the exact, graph-validated snapshot
+        // we will later commit; the shared index is never used as staging.
+        const isolatedIndexPath = path.join(transactionPath, "git-index");
+        await git(root, ["read-tree", preHead], isolatedIndexPath);
+        await git(root, ["add", "-A", "--", ...stagePaths], isolatedIndexPath);
+        await mutation.verifyBeforeCommit?.({
+          gitRepository: true,
+          indexPath: isolatedIndexPath,
+        });
+        await assertPrivateIndexMatchesWorktree(
+          root,
+          isolatedIndexPath,
+          stagePaths,
+        );
+        const validatedTree = await privateIndexTree(root, isolatedIndexPath);
+
+        // This deterministic seam represents work that can occur after the
+        // canonical graph has been validated. It must not change the sealed
+        // private tree or introduce staged user work in the shared index.
+        await options.testOptions?.beforeStage?.();
+        if (await hasStagedChanges(root)) {
+          throw new Error(
+            "Git staged changes appeared during the canonical write; refusing to commit",
+          );
+        }
+        await mutation.verifyBeforeCommit?.({
+          gitRepository: true,
+          indexPath: isolatedIndexPath,
+        });
+        await assertPrivateIndexMatchesWorktree(
+          root,
+          isolatedIndexPath,
+          stagePaths,
+        );
+        await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
+        if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
+          throw new Error("Git HEAD changed during the canonical write");
+        }
+
         // Hold the ordinary index lock before checking it again. This closes
         // the gap where a user starts staging after the check but before we
-        // publish the transaction's index.
+        // publish the sealed private index.
         indexLock = await holdGitIndexLock(root);
         if (await hasStagedChanges(root)) {
           throw new Error(
             "Git staged changes appeared during the canonical write; refusing to commit",
           );
         }
-
-        const isolatedIndexPath = path.join(transactionPath, "git-index");
-        await git(root, ["read-tree", preHead], isolatedIndexPath);
-        await git(root, ["add", "--", ...stagePaths], isolatedIndexPath);
-        await mutation.verifyBeforeCommit?.({
-          gitRepository: true,
-          indexPath: isolatedIndexPath,
-        });
         if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
           throw new Error("Git HEAD changed during the canonical write");
         }
         await runPreCommitHook(root, isolatedIndexPath);
-        const tree = await git(root, ["write-tree"], isolatedIndexPath);
+        await mutation.verifyBeforeCommit?.({
+          gitRepository: true,
+          indexPath: isolatedIndexPath,
+        });
+        await assertPrivateIndexMatchesWorktree(
+          root,
+          isolatedIndexPath,
+          stagePaths,
+        );
+        await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
         const commitMessage =
           typeof options.commitMessage === "function"
             ? options.commitMessage(mutation.value)
@@ -614,7 +697,7 @@ export async function runCanonicalWrite<T>(
         );
         commit = await git(
           root,
-          ["commit-tree", tree, "-p", preHead, "-F", messagePath],
+          ["commit-tree", validatedTree, "-p", preHead, "-F", messagePath],
           isolatedIndexPath,
         );
         // Persist the hash before moving the branch so an interrupted CAS can
@@ -968,13 +1051,26 @@ export async function applyChangeSetTransaction(
         "utf8",
       );
       await appendOperation(root, changeSet, now, binding);
+      const generatedPaths = [
+        "wiki/index.md",
+        "wiki/map.md",
+        "wiki/log.md",
+        "wiki/reports/health.md",
+      ];
       return {
         value: {
           operationId: changeSet.operationId,
           pages: proposedPages,
           audit,
         },
-        stagePaths: ["wiki", ...trackedBrainFiles],
+        stagePaths: [
+          ...new Set([
+            ...currentPages.map((page) => page.path),
+            ...proposedPages.map((page) => page.path),
+            ...generatedPaths,
+            ...trackedBrainFiles,
+          ]),
+        ],
       };
     },
   );

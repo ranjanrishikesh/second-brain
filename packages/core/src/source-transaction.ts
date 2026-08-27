@@ -69,17 +69,37 @@ async function assertAddedSourcesAreStable(
   context: SourceVerificationContext,
 ): Promise<void> {
   for (const source of sources) {
-    let digest: SourceDigest;
     try {
-      digest = context.gitRepository
-        ? await stagedSourceDigest(root, source, context.indexPath)
-        : await digestStream(createReadStream(path.join(root, source.path)));
-    } catch {
-      throw new Error(
-        `Source changed while registering ${source.path}; retry after its bytes are stable`,
+      // The worktree is the immutable user input; checking it even for a Git
+      // transaction catches a hook (or concurrent process) that changes the
+      // file after the private index was initially sealed.
+      const workingDigest = await digestStream(
+        createReadStream(path.join(root, source.path)),
       );
-    }
-    if (digest.bytes !== source.bytes || digest.sha256 !== source.sha256) {
+      if (
+        workingDigest.bytes !== source.bytes ||
+        workingDigest.sha256 !== source.sha256
+      ) {
+        throw new Error("source bytes differ from the scanned record");
+      }
+
+      // A Git transaction must additionally prove that its private index has
+      // the same immutable bytes. Pre-commit hooks inherit GIT_INDEX_FILE and
+      // can otherwise replace staged source content after the initial check.
+      if (context.gitRepository) {
+        const stagedDigest = await stagedSourceDigest(
+          root,
+          source,
+          context.indexPath,
+        );
+        if (
+          stagedDigest.bytes !== source.bytes ||
+          stagedDigest.sha256 !== source.sha256
+        ) {
+          throw new Error("staged source bytes differ from the scanned record");
+        }
+      }
+    } catch {
       throw new Error(
         `Source changed while registering ${source.path}; retry after its bytes are stable`,
       );

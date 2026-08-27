@@ -143,6 +143,56 @@ describe("applyChangeSetTransaction", () => {
     ).rejects.toThrow();
   });
 
+  test("does not commit a wiki file created after graph validation", async () => {
+    const root = await initializedGitBrain();
+    const injectedPath = path.join(root, "wiki", "injected.md");
+
+    const result = await applyChangeSetTransaction(
+      root,
+      createSourcePageChangeSet("op_late_wiki_injection"),
+      {
+        beforeStage: async () => {
+          await writeFile(injectedPath, "# Private draft\n\nDo not publish.\n");
+        },
+      },
+    );
+
+    if (!result.commit) throw new Error("Expected a managed commit");
+    expect(
+      await git(root, ["show", "--format=", "--name-only", result.commit]),
+    ).not.toContain("wiki/injected.md");
+    expect(await readFile(injectedPath, "utf8")).toContain("Private draft");
+    expect(await git(root, ["status", "--short", "--", "wiki/injected.md"])).toBe(
+      "?? wiki/injected.md",
+    );
+  });
+
+  test("refuses a pre-commit hook that stages an unrelated file", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const hook = path.join(root, ".git", "hooks", "pre-commit");
+    await writeFile(
+      hook,
+      "#!/bin/sh\nprintf 'private hook output\\n' > hook-private.txt\ngit add -- hook-private.txt\n",
+    );
+    await chmod(hook, 0o755);
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_hook_stages_unrelated"),
+      ),
+    ).rejects.toThrow(/private Git index changed|managed transaction/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(path.join(root, "hook-private.txt"), "utf8")).toBe(
+      "private hook output\n",
+    );
+    expect(await git(root, ["status", "--short", "--", "hook-private.txt"])).toBe(
+      "?? hook-private.txt",
+    );
+  });
+
   test("restores canonical files and HEAD after whole-graph validation fails", async () => {
     const root = await initializedGitBrain();
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -101,6 +101,43 @@ describe("registered source transactions", () => {
     expect(
       await git(root, ["status", "--short", "--", "sources/facts.md"]),
     ).toBe("?? sources/facts.md");
+  });
+
+  test("rejects a pre-commit hook that re-stages changed source bytes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-hook-"));
+    await initBrain(root, { name: "Sources", description: "Hook test" });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Second Brain Test"]);
+    await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    await writeFile(
+      path.join(root, "sources", "facts.md"),
+      "# Facts\n\nOriginal source bytes.\n",
+    );
+    const hook = path.join(root, ".git", "hooks", "pre-commit");
+    await writeFile(
+      hook,
+      "#!/bin/sh\nprintf '# Facts\\n\\nHook replacement bytes.\\n' > sources/facts.md\ngit add -- sources/facts.md\n",
+    );
+    await chmod(hook, 0o755);
+
+    await expect(scanAndRegisterSources(root)).rejects.toThrow(
+      /source.*changed|private Git index changed/i,
+    );
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(await readFile(path.join(root, "sources", "facts.md"), "utf8")).toContain(
+      "Hook replacement bytes.",
+    );
   });
 
   test("registers a source larger than Git exec buffering without loading its staged bytes", async () => {
