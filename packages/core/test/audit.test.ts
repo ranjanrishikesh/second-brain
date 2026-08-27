@@ -8,7 +8,9 @@ import {
   applyChangeSetTransaction,
   calculateCatalogRevision,
   initBrain,
+  loadWikiPages,
   nextSemanticAuditBatch,
+  planReconciliation,
   recordSemanticAuditBatch,
   type WikiPageV1,
 } from "../src/index.js";
@@ -40,6 +42,68 @@ function sourcePage(id: string, title: string): WikiPageV1 {
 }
 
 describe("semantic audit checkpoints", () => {
+  test("restarts a pending audit with every active page after a new mutation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-audit-current-"));
+    await initBrain(root, { name: "Audit", description: "Audit tests" });
+    const firstPage = sourcePage("pg_current_one", "Current One");
+    const secondPage = sourcePage("pg_current_two", "Current Two");
+    await applyChangeSetTransaction(root, {
+      version: 1,
+      operationId: "op_seed_current_audit",
+      catalogRevision: calculateCatalogRevision([]),
+      reason: "Seed pages for a current semantic audit",
+      pages: [
+        { action: "create", page: firstPage },
+        { action: "create", page: secondPage },
+      ],
+      reconciliation: { candidatePageIds: [], reviewed: [] },
+    });
+    const statePath = path.join(root, ".brain", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    await writeFile(
+      statePath,
+      `${JSON.stringify({ ...state, semanticAuditDue: true }, null, 2)}\n`,
+    );
+    await recordSemanticAuditBatch(root, {
+      pageIds: [firstPage.id],
+      summary: "Reviewed the first page from the original snapshot.",
+    });
+
+    const thirdPage = sourcePage("pg_current_three", "Current Three");
+    const existing = await loadWikiPages(root);
+    const changeSet = {
+      version: 1 as const,
+      operationId: "op_add_current_page",
+      catalogRevision: calculateCatalogRevision(existing),
+      reason: "Add a page while the audit is still pending",
+      pages: [{ action: "create" as const, page: thirdPage }],
+      reconciliation: { candidatePageIds: [], reviewed: [] },
+    };
+    const plan = await planReconciliation(root, changeSet);
+    changeSet.reconciliation = {
+      candidatePageIds: plan.candidates.map((candidate) => candidate.pageId),
+      plan,
+      readReceipts: plan.candidates.map((candidate) => ({
+        pageId: candidate.pageId,
+        revision: candidate.revision,
+        readAt: "2026-08-27T01:00:00.000Z",
+      })),
+      reviewed: plan.candidates.map((candidate) => ({
+        pageId: candidate.pageId,
+        decision: "no-change" as const,
+        reason: "The new page does not change this established page.",
+      })),
+    };
+    await applyChangeSetTransaction(root, changeSet);
+
+    expect(await nextSemanticAuditBatch(root)).toMatchObject({
+      targetMutation: 2,
+      pageIds: [firstPage.id, secondPage.id, thirdPage.id].sort(),
+      reviewedPageIds: [],
+      complete: false,
+    });
+  });
+
   test("becomes due after 25 mutations and resumes from unreviewed pages", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-audit-"));
     await initBrain(root, { name: "Audit", description: "Audit tests" });

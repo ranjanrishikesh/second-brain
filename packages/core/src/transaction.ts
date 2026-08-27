@@ -701,9 +701,31 @@ export async function applyChangeSetTransaction(
         knowledgeMutations?: number;
         lastSemanticAuditMutation?: number;
         semanticAuditDue?: boolean;
+        semanticAudit?: {
+          status?: "pending" | "completed";
+          targetMutation?: number;
+          pendingPageIds?: string[];
+          reviewedPageIds?: string[];
+          startedAt?: string;
+          completedAt?: string;
+        };
       };
       const knowledgeMutations =
         (state.knowledgeMutations ?? 0) + (changeSet.pages.length ? 1 : 0);
+      const now = new Date().toISOString();
+      const semanticAudit =
+        changeSet.pages.length > 0 && state.semanticAudit?.status === "pending"
+          ? {
+              status: "pending" as const,
+              targetMutation: knowledgeMutations,
+              pendingPageIds: proposedPages
+                .filter((page) => page.status === "active")
+                .map((page) => page.id)
+                .sort(),
+              reviewedPageIds: [],
+              startedAt: now,
+            }
+          : state.semanticAudit;
       const sourceManifest = z
         .object({
           sources: z.array(z.object({ id: z.string() })),
@@ -737,16 +759,17 @@ export async function applyChangeSetTransaction(
               pendingSourceIds,
             },
             semanticAuditDue:
+              semanticAudit?.status === "pending" ||
               Boolean(state.semanticAuditDue) ||
               knowledgeMutations - (state.lastSemanticAuditMutation ?? 0) >=
                 config.graph.semanticAuditEvery,
+            ...(semanticAudit ? { semanticAudit } : {}),
           },
           null,
           2,
         )}\n`,
         "utf8",
       );
-      const now = new Date().toISOString();
       await appendOperation(root, changeSet, now, binding);
       return {
         value: {
