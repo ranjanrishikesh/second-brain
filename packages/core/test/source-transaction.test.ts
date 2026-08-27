@@ -135,9 +135,9 @@ describe("registered source transactions", () => {
 
     expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
     expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
-    expect(await readFile(path.join(root, "sources", "facts.md"), "utf8")).toContain(
-      "Hook replacement bytes.",
-    );
+    expect(
+      await readFile(path.join(root, "sources", "facts.md"), "utf8"),
+    ).toContain("Hook replacement bytes.");
   });
 
   test("registers a source larger than Git exec buffering without loading its staged bytes", async () => {
