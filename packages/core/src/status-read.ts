@@ -2,11 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "./config.js";
 import { pendingBootstrapSourceIds } from "./query.js";
-import {
-  readBrainState,
-  syncStatusV1Schema,
-  type SyncStatusV1,
-} from "./state.js";
+import { readBrainState, type SyncStatusV1 } from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import {
   sourceRecordV1Schema,
@@ -16,6 +12,7 @@ import {
 } from "./sources/types.js";
 import { loadWikiPages } from "./wiki/graph.js";
 import type { WikiPageV1 } from "./wiki/types.js";
+import { syncStatus } from "./sync.js";
 
 export interface BrainStatusV1 {
   version: 1;
@@ -73,25 +70,25 @@ async function pathExists(filePath: string): Promise<boolean> {
 }
 
 export async function statusBrain(root: string): Promise<BrainStatusV1> {
-  const [config, sources, pages, state, pendingSourceIds, recoveryRequired] =
-    await Promise.all([
-      loadBrainConfig(root),
-      sourceRecords(root),
-      loadWikiPages(root),
-      readBrainState(root),
-      pendingBootstrapSourceIds(root),
-      pathExists(path.join(root, ".brain", "runtime", "transaction.json")),
-    ]);
+  const [
+    config,
+    sources,
+    pages,
+    state,
+    pendingSourceIds,
+    recoveryRequired,
+    sync,
+  ] = await Promise.all([
+    loadBrainConfig(root),
+    sourceRecords(root),
+    loadWikiPages(root),
+    readBrainState(root),
+    pendingBootstrapSourceIds(root),
+    pathExists(path.join(root, ".brain", "runtime", "transaction.json")),
+    syncStatus(root),
+  ]);
   const extractionCount = (status: SourceRecordV1["extractionStatus"]) =>
     sources.filter((source) => source.extractionStatus === status).length;
-  const sync = state.syncTarget
-    ? syncStatusV1Schema.parse({
-        status: "pending",
-        remote: state.syncTarget.remote,
-        branch: state.syncTarget.branch,
-        reason: "Sync target is configured but has not been evaluated.",
-      })
-    : syncStatusV1Schema.parse({ status: "unconfigured" });
   return {
     version: 1,
     brain: config.brain,

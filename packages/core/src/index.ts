@@ -152,6 +152,17 @@ export type {
   WebApprovalV1,
 } from "./web-approval.js";
 export {
+  attemptManagedSync,
+  configureSyncTarget,
+  fingerprintRemoteUrl,
+  formatSyncWarning,
+  syncStatus,
+} from "./sync.js";
+export type {
+  ConfigureSyncTargetInput,
+  ConfigureSyncTargetResult,
+} from "./sync.js";
+export {
   scanAndRegisterSources,
   supersedeRegisteredSource,
 } from "./source-transaction.js";

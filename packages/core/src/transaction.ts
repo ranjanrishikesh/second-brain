@@ -13,7 +13,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { readBrainState } from "./state.js";
+import { readBrainState, type SyncStatusV1 } from "./state.js";
 import type { BrainRuntimeServices } from "./semantic.js";
 import {
   assertReconciliationPlanMatches,
@@ -70,6 +70,7 @@ export type OperationRecordV1 = z.infer<typeof operationRecordV1Schema>;
 export interface TransactionResult {
   operationId: string;
   commit?: string;
+  sync?: SyncStatusV1;
   pages: WikiPageV1[];
   audit: AuditReportV1;
 }
@@ -262,6 +263,7 @@ function safeStagePaths(root: string, stagePaths: string[]): string[] {
 export interface CanonicalWriteResult<T> {
   value: T;
   commit?: string;
+  sync?: SyncStatusV1;
 }
 
 export interface CanonicalMutationResult<T> {
@@ -391,7 +393,11 @@ export async function runCanonicalWrite<T>(
         typeof options.commitMessage === "function"
           ? options.commitMessage(mutation.value)
           : options.commitMessage;
-      await git(root, ["commit", "-m", commitMessage]);
+      await git(root, [
+        "commit",
+        "-m",
+        `${commitMessage}\n\nBrain-Managed: true\nBrain-Operation: ${options.operationId}`,
+      ]);
       commit = await git(root, ["rev-parse", "HEAD"]);
       committed = true;
       journal.commitHash = commit;
@@ -406,9 +412,20 @@ export async function runCanonicalWrite<T>(
     await rm(transactionPath, { recursive: true, force: true });
     await rm(journalPath, { force: true });
     await rm(lockPath, { force: true });
+    let sync: SyncStatusV1 | undefined;
+    if (commit) {
+      try {
+        const { attemptManagedSync } = await import("./sync.js");
+        sync = await attemptManagedSync(root);
+      } catch {
+        // Synchronization happens only after the canonical commit is durable.
+        // A sync failure must never roll back or hide that local commit.
+      }
+    }
     return {
       value: mutation.value,
       ...(commit ? { commit } : {}),
+      ...(sync ? { sync } : {}),
     };
   } catch (error) {
     if (error instanceof SimulatedTransactionCrash) {
@@ -665,6 +682,7 @@ export async function applyChangeSetTransaction(
   return {
     ...result.value,
     ...(result.commit ? { commit: result.commit } : {}),
+    ...(result.sync ? { sync: result.sync } : {}),
   };
 }
 

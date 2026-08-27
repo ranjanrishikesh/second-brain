@@ -5,9 +5,10 @@ import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { searchBrain, searchResultV1Schema } from "./search.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
-import { readBrainState } from "./state.js";
+import { readBrainState, syncStatusV1Schema } from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
+import { attemptManagedSync } from "./sync.js";
 import { recoverBrain } from "./transaction.js";
 import { assertWebApproval, webApprovalV1Schema } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
@@ -59,6 +60,7 @@ export const querySessionV1Schema = z.object({
       pendingSourceIds: z.array(z.string()),
     })
     .default({ required: false, pendingSourceIds: [] }),
+  sync: syncStatusV1Schema.default({ status: "unconfigured" }),
   webApproval: webApprovalV1Schema.optional(),
   webEvidenceSourceIds: z.array(z.string()).default([]),
   changeOperationIds: z.array(z.string()).default([]),
@@ -149,6 +151,7 @@ export async function beginQuery(
   if (!normalizedQuestion) throw new Error("Question cannot be empty");
   await recoverBrain(root);
   await scanAndRegisterSources(root);
+  const sync = await attemptManagedSync(root);
   const wikiResults = await searchBrain(root, {
     query: normalizedQuestion,
     scope: "wiki",
@@ -193,6 +196,7 @@ export async function beginQuery(
       pendingSourceIds:
         state.setup.status === "completed" ? pendingSourceIds : [],
     },
+    sync,
     webEvidenceSourceIds: [],
     changeOperationIds: [],
   });

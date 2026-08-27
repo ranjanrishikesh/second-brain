@@ -8,6 +8,8 @@ import {
   writeQuerySession,
   type QuerySessionV1,
 } from "./query.js";
+import type { SyncStatusV1 } from "./state.js";
+import { attemptManagedSync } from "./sync.js";
 import {
   operationRecordV1Schema,
   recoverBrain,
@@ -30,6 +32,7 @@ export interface FinishQueryResult {
   session: QuerySessionV1;
   operationId: string;
   commit?: string;
+  sync?: SyncStatusV1;
 }
 
 async function readOperations(root: string): Promise<OperationRecordV1[]> {
@@ -83,7 +86,7 @@ async function commitQueryOperation(
   session: QuerySessionV1,
   operation: OperationRecordV1,
   testOptions: TransactionTestOptions,
-): Promise<string | undefined> {
+): Promise<{ commit?: string; sync?: SyncStatusV1 }> {
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const logPath = path.join(root, "wiki", "log.md");
   const transaction = await runCanonicalWrite(
@@ -112,7 +115,10 @@ async function commitQueryOperation(
       };
     },
   );
-  return transaction.commit;
+  return {
+    ...(transaction.commit ? { commit: transaction.commit } : {}),
+    ...(transaction.sync ? { sync: transaction.sync } : {}),
+  };
 }
 
 export async function finishQuery(
@@ -145,10 +151,12 @@ export async function finishQuery(
     session.completedAt = existingQueryOperation.completedAt;
     session.outcome = existingOutcome;
     session.answerSummary = existingQueryOperation.summary;
+    session.sync = await attemptManagedSync(root);
     await writeQuerySession(root, session);
     return {
       session,
       operationId: existingQueryOperation.id,
+      sync: session.sync,
     };
   }
   if (session.status !== "open")
@@ -317,16 +325,18 @@ export async function finishQuery(
     tiersUsed: session.tiersUsed,
     queryId: session.id,
   };
-  const commit = await commitQueryOperation(
+  const committed = await commitQueryOperation(
     root,
     session,
     operation,
     testOptions,
   );
+  session.sync = committed.sync ?? (await attemptManagedSync(root));
   await writeQuerySession(root, session);
   return {
     session,
     operationId,
-    ...(commit ? { commit } : {}),
+    ...(committed.commit ? { commit: committed.commit } : {}),
+    sync: session.sync,
   };
 }

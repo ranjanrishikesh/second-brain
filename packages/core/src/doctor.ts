@@ -5,6 +5,7 @@ import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { brainStateV1Schema } from "./state.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
+import { syncStatus } from "./sync.js";
 import { operationRecordV1Schema } from "./transaction.js";
 import { validateWikiGraph } from "./wiki/graph.js";
 
@@ -187,6 +188,26 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
     });
   } catch {
     // No writer lock is the healthy state.
+  }
+
+  try {
+    const sync = await syncStatus(root);
+    if (sync.status === "pending" || sync.status === "manual-sync-required") {
+      issues.push({
+        code:
+          sync.status === "pending" ? "SYNC_PENDING" : "SYNC_MANUAL_REQUIRED",
+        severity: "warning",
+        message: sync.reason ?? "Brain synchronization needs attention.",
+        path: ".brain/state.json",
+      });
+    }
+  } catch (error) {
+    issues.push({
+      code: "SYNC_STATUS_UNAVAILABLE",
+      severity: "warning",
+      message: errorMessage(error),
+      path: ".brain/state.json",
+    });
   }
 
   if (manifest) {
