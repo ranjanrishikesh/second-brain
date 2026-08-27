@@ -6,6 +6,10 @@ import { z } from "zod";
 import { extractMarkdown } from "./sources/extract.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { SourceRecordV1 } from "./sources/types.js";
+import {
+  semanticSearch,
+  type BrainRuntimeServices,
+} from "./semantic.js";
 import { parseWikiPage } from "./wiki/page.js";
 
 export type SearchScope = "wiki" | "sources" | "all";
@@ -14,6 +18,7 @@ export interface SearchOptions {
   query: string;
   scope?: SearchScope;
   limit?: number;
+  ranking?: "lexical" | "hybrid";
 }
 
 export const searchResultV1Schema = z.object({
@@ -175,7 +180,7 @@ function ftsQuery(query: string): string {
   return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
 }
 
-export async function searchBrain(
+async function lexicalSearch(
   root: string,
   options: SearchOptions,
 ): Promise<SearchResult[]> {
@@ -209,4 +214,45 @@ export async function searchBrain(
   } finally {
     database.close();
   }
+}
+
+function reciprocalRankFusion(
+  resultSets: ReadonlyArray<readonly SearchResult[]>,
+  limit: number,
+): SearchResult[] {
+  const scores = new Map<string, { result: SearchResult; score: number }>();
+  for (const results of resultSets) {
+    results.forEach((result, index) => {
+      const key = `${result.kind}\u0000${result.id}\u0000${result.path}\u0000${result.locator}`;
+      const current = scores.get(key);
+      const score = (current?.score ?? 0) + 1 / (60 + index + 1);
+      scores.set(key, { result, score });
+    });
+  }
+  return [...scores.values()]
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.result.path.localeCompare(right.result.path) ||
+        left.result.locator.localeCompare(right.result.locator),
+    )
+    .slice(0, limit)
+    .map(({ result, score }) => ({ ...result, score }));
+}
+
+export async function searchBrain(
+  root: string,
+  options: SearchOptions,
+  services: BrainRuntimeServices = {},
+): Promise<SearchResult[]> {
+  const lexical = await lexicalSearch(root, options);
+  if ((options.ranking ?? "lexical") === "lexical") return lexical;
+  const semantic = await semanticSearch(
+    root,
+    options.query,
+    options.scope ?? "all",
+    options.limit ?? 10,
+    services,
+  );
+  return reciprocalRankFusion([lexical, semantic], options.limit ?? 10);
 }

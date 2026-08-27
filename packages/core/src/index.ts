@@ -38,6 +38,13 @@ export {
 } from "./search.js";
 export type { SearchOptions, SearchResult, SearchScope } from "./search.js";
 export {
+  createLocalEmbeddingProvider,
+  prepareSemanticModel,
+  rebuildSemanticIndex,
+  semanticSearch,
+} from "./semantic.js";
+export type { BrainRuntimeServices, EmbeddingProvider } from "./semantic.js";
+export {
   calculatePageRevision,
   extractCitations,
   extractHeadingAnchors,

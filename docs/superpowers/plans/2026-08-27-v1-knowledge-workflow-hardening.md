@@ -199,7 +199,7 @@ export async function semanticSearch(
 ): Promise<SearchResult[]>;
 ```
 
-Extend `searchBrain` with `ranking?: "lexical" | "hybrid"`, defaulting to `hybrid`. Fuse lexical and semantic ranks using Reciprocal Rank Fusion with deterministic tie-breaks by path and locator. Rebuild both caches from canonical bytes when metadata revision/model metadata does not match. Propagate model download/checksum failures instead of returning lexical-only results.
+Extend `searchBrain` with `ranking?: "lexical" | "hybrid"`, defaulting to `lexical` so a casual lookup does not download a model. Setup and reconciliation explicitly request `hybrid`. Fuse lexical and semantic ranks using Reciprocal Rank Fusion with deterministic tie-breaks by path and locator. Rebuild both caches from canonical bytes when metadata revision/model metadata does not match. Propagate model download/checksum failures instead of returning lexical-only results when hybrid ranking was explicitly requested.
 
 - [ ] **Step 4: Re-run tests and verify cache rebuild behavior**
 
