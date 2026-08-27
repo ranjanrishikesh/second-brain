@@ -249,7 +249,7 @@ export async function scanSources(root: string): Promise<SourceScanResult> {
                         : epub
                           ? "application/epub+zip"
                           : "application/octet-stream",
-        bytes: fileStats.size,
+        bytes: content?.byteLength ?? fileStats.size,
         discoveredAt: new Date().toISOString(),
         extractionStatus: extractionError
           ? "failed"

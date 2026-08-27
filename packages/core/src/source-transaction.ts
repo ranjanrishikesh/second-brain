@@ -1,6 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
@@ -10,6 +12,50 @@ import {
   type OperationRecordV1,
   type TransactionTestOptions,
 } from "./transaction.js";
+
+const execFile = promisify(execFileCallback);
+
+function sha256(content: Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function registeredSourceBytes(
+  root: string,
+  source: SourceRecordV1,
+  staged: boolean,
+): Promise<Uint8Array> {
+  if (!staged) return readFile(path.join(root, source.path));
+  const { stdout } = await execFile("git", ["show", `:${source.path}`], {
+    cwd: root,
+    encoding: "buffer",
+  });
+  return stdout;
+}
+
+async function assertAddedSourcesAreStable(
+  root: string,
+  sources: readonly SourceRecordV1[],
+  staged: boolean,
+): Promise<void> {
+  for (const source of sources) {
+    let content: Uint8Array;
+    try {
+      content = await registeredSourceBytes(root, source, staged);
+    } catch {
+      throw new Error(
+        `Source changed while registering ${source.path}; retry after its bytes are stable`,
+      );
+    }
+    if (
+      content.byteLength !== source.bytes ||
+      sha256(content) !== source.sha256
+    ) {
+      throw new Error(
+        `Source changed while registering ${source.path}; retry after its bytes are stable`,
+      );
+    }
+  }
+}
 
 export async function scanAndRegisterSources(
   root: string,
@@ -132,6 +178,8 @@ export async function scanAndRegisterSources(
           ...result.added.map((source) => source.path),
           ...canonicalPaths,
         ],
+        verifyBeforeCommit: async (gitRepository) =>
+          assertAddedSourcesAreStable(root, result.added, gitRepository),
       };
     },
   );

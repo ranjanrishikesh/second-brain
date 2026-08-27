@@ -69,6 +69,40 @@ describe("registered source transactions", () => {
     });
   });
 
+  test("rejects bytes changed after scanning before source staging", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-stable-"));
+    await initBrain(root, { name: "Sources", description: "Stability test" });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Second Brain Test"]);
+    await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+    const sourcePath = path.join(root, "sources", "facts.md");
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    await writeFile(sourcePath, "# Facts\n\nOriginal source bytes.\n");
+
+    await expect(
+      scanAndRegisterSources(root, {
+        beforeStage: async () => {
+          await writeFile(sourcePath, "# Facts\n\nChanged source bytes.\n");
+        },
+      }),
+    ).rejects.toThrow(/source.*changed|staged.*source/i);
+
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(await readFile(sourcePath, "utf8")).toContain(
+      "Changed source bytes.",
+    );
+    expect(
+      await git(root, ["status", "--short", "--", "sources/facts.md"]),
+    ).toBe("?? sources/facts.md");
+  });
+
   test("commits explicit supersession while retaining both immutable versions", async () => {
     const root = await mkdtemp(
       path.join(tmpdir(), "brain-source-transaction-"),

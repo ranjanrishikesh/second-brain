@@ -82,6 +82,8 @@ export interface TransactionTestOptions {
   simulateHeadMovementBeforeCommit?: boolean;
   /** Simulates a rollback failure after a canonical mutation has failed. */
   simulateRollbackFailure?: boolean;
+  /** Runs immediately before managed files are staged; used for deterministic race tests. */
+  beforeStage?: () => Promise<void> | void;
 }
 
 export interface ApplyTransactionOptions extends TransactionTestOptions {
@@ -321,6 +323,8 @@ export interface CanonicalWriteResult<T> {
 export interface CanonicalMutationResult<T> {
   value: T;
   stagePaths: string[];
+  /** Verifies immutable inputs after staging, or before completion outside Git. */
+  verifyBeforeCommit?: (gitRepository: boolean) => Promise<void>;
 }
 
 export interface CanonicalWriteOptions<T> {
@@ -442,7 +446,9 @@ export async function runCanonicalWrite<T>(
           "Git index changed during the canonical write; refusing to commit",
         );
       }
+      await options.testOptions?.beforeStage?.();
       await git(root, ["add", "--", ...stagePaths]);
+      await mutation.verifyBeforeCommit?.(true);
       if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
         throw new Error("Git HEAD changed during the canonical write");
       }
@@ -459,6 +465,8 @@ export async function runCanonicalWrite<T>(
       committed = true;
       journal.commitHash = commit;
     } else {
+      await options.testOptions?.beforeStage?.();
+      await mutation.verifyBeforeCommit?.(false);
       committed = true;
     }
     journal.canonicalCommitComplete = true;
