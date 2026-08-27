@@ -184,6 +184,29 @@ async function remoteBranchHead(
   return remoteHead;
 }
 
+const managedCommitFiles = new Set([
+  ".brain/source-manifest.json",
+  ".brain/state.json",
+  ".brain/operations.jsonl",
+]);
+
+function isManagedCommitPath(relativePath: string): boolean {
+  return (
+    relativePath.startsWith("wiki/") ||
+    relativePath.startsWith("sources/") ||
+    managedCommitFiles.has(relativePath)
+  );
+}
+
+async function commitPaths(root: string, commit: string): Promise<string[]> {
+  const { stdout } = await execFile(
+    "git",
+    ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commit],
+    { cwd: root, encoding: "buffer" },
+  );
+  return stdout.toString("utf8").split("\0").filter(Boolean);
+}
+
 async function hasOnlyManagedCommits(
   root: string,
   remoteHead: string,
@@ -200,6 +223,9 @@ async function hasOnlyManagedCommits(
       !/(?:^|\n)Brain-Managed:\s*true\s*$/im.test(message) ||
       !/(?:^|\n)Brain-Operation:\s*op_[a-z0-9_-]{3,96}\s*$/im.test(message)
     ) {
+      return false;
+    }
+    if (!(await commitPaths(root, commit)).every(isManagedCommitPath)) {
       return false;
     }
   }

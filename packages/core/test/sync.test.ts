@@ -168,6 +168,33 @@ describe("managed brain synchronization", () => {
     );
   });
 
+  test("refuses a trailer-marked commit that changes an unmanaged path", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const { configureSyncTarget, attemptManagedSync } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+    const remoteBefore = await git(remote, ["rev-parse", "refs/heads/main"]);
+    await writeFile(path.join(root, "private-draft.txt"), "must stay local\n");
+    await git(root, ["add", "private-draft.txt"]);
+    await git(root, [
+      "commit",
+      "-m",
+      "brain(apply): forged managed commit\n\nBrain-Managed: true\nBrain-Operation: op_forged_private_path",
+    ]);
+
+    const sync = await attemptManagedSync(root, {
+      beforePush: async () => undefined,
+    });
+
+    expect(sync).toMatchObject({ status: "manual-sync-required" });
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      remoteBefore,
+    );
+  });
+
   test("reports a Git-derived synced status for a confirmed target", async () => {
     const { root } = await gitBrainWithBareRemote();
     const { configureSyncTarget } = await syncApi();
