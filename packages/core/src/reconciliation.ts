@@ -1,7 +1,11 @@
 import { loadBrainConfig } from "./config.js";
 import { readBrainState } from "./state.js";
 import { searchBrain, type SearchResult } from "./search.js";
-import { semanticSearch, type BrainRuntimeServices } from "./semantic.js";
+import {
+  bindEmbeddingProvider,
+  semanticSearch,
+  type BrainRuntimeServices,
+} from "./semantic.js";
 import { calculateCatalogRevision, loadWikiPages } from "./wiki/graph.js";
 import {
   isCandidateChangedByMutation,
@@ -130,7 +134,7 @@ async function shouldUseSemanticSearch(
   root: string,
   services: BrainRuntimeServices,
 ): Promise<boolean> {
-  if (services.embeddings) return true;
+  if (services.embeddings || services.embeddingProviderFactory) return true;
   const setupStatus = (await readBrainState(root)).setup.status;
   return setupStatus === "in-progress" || setupStatus === "completed";
 }
@@ -187,6 +191,7 @@ export async function planReconciliation(
     eligiblePages.length > 0 &&
     (await shouldUseSemanticSearch(root, services))
   ) {
+    const semanticServices = bindEmbeddingProvider(root, services);
     for (const query of queries) {
       addSearchReasons(
         await semanticSearch(
@@ -194,7 +199,7 @@ export async function planReconciliation(
           query,
           "wiki",
           config.graph.relatedPageLimit,
-          services,
+          semanticServices,
         ),
         eligiblePageIds,
         "semantic",

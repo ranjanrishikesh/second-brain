@@ -27,6 +27,8 @@ export interface EmbeddingProvider {
 
 export interface BrainRuntimeServices {
   embeddings?: EmbeddingProvider;
+  /** Lets a host own a local embedding runtime without sharing it across brains. */
+  embeddingProviderFactory?: (root: string) => EmbeddingProvider;
 }
 
 const semanticDocumentV1Schema = z.object({
@@ -373,7 +375,20 @@ function resolveEmbeddingProvider(
   root: string,
   services: BrainRuntimeServices,
 ): EmbeddingProvider {
-  return services.embeddings ?? createLocalEmbeddingProvider(root);
+  return (
+    services.embeddings ??
+    services.embeddingProviderFactory?.(root) ??
+    createLocalEmbeddingProvider(root)
+  );
+}
+
+/** Binds one provider to a multi-search operation. */
+export function bindEmbeddingProvider(
+  root: string,
+  services: BrainRuntimeServices = {},
+): BrainRuntimeServices {
+  if (services.embeddings) return services;
+  return { ...services, embeddings: resolveEmbeddingProvider(root, services) };
 }
 
 export async function prepareSemanticModel(
@@ -393,6 +408,13 @@ export async function rebuildSemanticIndex(
   services: BrainRuntimeServices = {},
 ): Promise<void> {
   const provider = resolveEmbeddingProvider(root, services);
+  await rebuildSemanticIndexWithProvider(root, provider);
+}
+
+async function rebuildSemanticIndexWithProvider(
+  root: string,
+  provider: EmbeddingProvider,
+): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const corpusRevision = await semanticCorpusRevision(root);
     const documents = await semanticDocuments(root);
@@ -455,9 +477,8 @@ async function readCurrentSemanticIndex(
 
 async function loadSemanticIndex(
   root: string,
-  services: BrainRuntimeServices,
+  provider: EmbeddingProvider,
 ): Promise<SemanticIndexV1> {
-  const provider = resolveEmbeddingProvider(root, services);
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -465,7 +486,7 @@ async function loadSemanticIndex(
     } catch (error) {
       lastError = error;
       if (attempt === 2) break;
-      await rebuildSemanticIndex(root, services);
+      await rebuildSemanticIndexWithProvider(root, provider);
     }
   }
   throw lastError;
@@ -480,7 +501,7 @@ export async function semanticSearch(
 ): Promise<SearchResult[]> {
   const provider = resolveEmbeddingProvider(root, services);
   const [index, queryVector] = await Promise.all([
-    loadSemanticIndex(root, services),
+    loadSemanticIndex(root, provider),
     provider.embed([query], "query"),
   ]);
   const vector = normalizeVector(queryVector[0] ?? []);

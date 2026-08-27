@@ -10,6 +10,7 @@ import {
   scanSources,
   searchBrain,
   semanticSearch,
+  type BrainRuntimeServices,
   type WikiPageV1,
 } from "../src/index.js";
 import { streamVerifiedResponse } from "../src/semantic.js";
@@ -127,6 +128,34 @@ describe("local semantic search", () => {
     );
 
     expect(results[0]?.id).toBe("pg_black_hole");
+  });
+
+  test("resolves an embedding provider once for a semantic search", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-semantic-owner-"));
+    await initBrain(root, { name: "Semantic", description: "Semantic test" });
+    const blackHole = page(
+      "pg_semantic_owner",
+      "Black hole",
+      "An event horizon traps light around a collapsed star.",
+      "semantic-owner",
+    );
+    await writeFile(path.join(root, blackHole.path), renderWikiPage(blackHole));
+    const provider = deterministicEmbeddings({
+      "gravity well": [1, 0],
+      "event horizon": [1, 0],
+    });
+    let providerResolutions = 0;
+    const services = {} as BrainRuntimeServices;
+    Object.defineProperty(services, "embeddings", {
+      get() {
+        providerResolutions += 1;
+        return provider;
+      },
+    });
+
+    await semanticSearch(root, "gravity well", "wiki", 10, services);
+
+    expect(providerResolutions).toBe(1);
   });
 
   test("rebuilds semantic source search after the semantic cache is deleted", async () => {
