@@ -173,6 +173,55 @@
       "required": ["required", "pendingSourceIds"],
       "additionalProperties": false
     },
+    "setup": {
+      "default": {
+        "status": "not-started",
+        "required": true,
+        "pendingSourceIds": []
+      },
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["not-started", "in-progress", "completed"]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^setup_[a-f0-9]{32}$"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "pendingSourceIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["status", "required", "pendingSourceIds"],
+      "additionalProperties": false
+    },
+    "deltaBootstrap": {
+      "default": {
+        "required": false,
+        "pendingSourceIds": []
+      },
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "pendingSourceIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["required", "pendingSourceIds"],
+      "additionalProperties": false
+    },
     "webEvidenceSourceIds": {
       "default": [],
       "type": "array",
@@ -200,6 +249,8 @@
     "sourceResults",
     "tierAssessments",
     "bootstrap",
+    "setup",
+    "deltaBootstrap",
     "webEvidenceSourceIds",
     "changeOperationIds"
   ],

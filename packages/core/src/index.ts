@@ -2,6 +2,21 @@ export { brainConfigV1Schema, loadBrainConfig } from "./config.js";
 export { defaultSemanticModelV1 } from "./config.js";
 export type { BrainConfigV1 } from "./config.js";
 export {
+  beginSetup,
+  attachSetupChange,
+  finishSetup,
+  nextSetupBatch,
+  pendingReadySourceIds,
+  setupSessionV1Schema,
+} from "./setup.js";
+export type {
+  BeginSetupInput,
+  FinishSetupInput,
+  SetupBatchV1,
+  SetupSourceContextV1,
+  SetupSessionV1,
+} from "./setup.js";
+export {
   brainStateV1Schema,
   defaultBrainState,
   readBrainState,
@@ -103,6 +118,7 @@ export {
 } from "./transaction.js";
 export type {
   ApplyTransactionOptions,
+  KnowledgeMutationContext,
   OperationRecordV1,
   TransactionResult,
   TransactionTestOptions,

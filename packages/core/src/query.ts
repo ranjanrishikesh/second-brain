@@ -5,6 +5,7 @@ import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { searchBrain, searchResultV1Schema } from "./search.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
+import { readBrainState } from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
 import { recoverBrain } from "./transaction.js";
@@ -36,6 +37,27 @@ export const querySessionV1Schema = z.object({
     required: z.boolean(),
     pendingSourceIds: z.array(z.string()),
   }),
+  setup: z
+    .object({
+      status: z.enum(["not-started", "in-progress", "completed"]),
+      id: z
+        .string()
+        .regex(/^setup_[a-f0-9]{32}$/)
+        .optional(),
+      required: z.boolean(),
+      pendingSourceIds: z.array(z.string()),
+    })
+    .default({
+      status: "not-started",
+      required: true,
+      pendingSourceIds: [],
+    }),
+  deltaBootstrap: z
+    .object({
+      required: z.boolean(),
+      pendingSourceIds: z.array(z.string()),
+    })
+    .default({ required: false, pendingSourceIds: [] }),
   webEvidenceSourceIds: z.array(z.string()).default([]),
   changeOperationIds: z.array(z.string()).default([]),
 });
@@ -77,7 +99,11 @@ export async function pendingBootstrapSourceIds(
       .flatMap((page) => page.sources.map((source) => source.id)),
   );
   return manifest.sources
-    .filter((source) => !catalogedSourceIds.has(source.id))
+    .filter(
+      (source) =>
+        source.extractionStatus === "ready" &&
+        !catalogedSourceIds.has(source.id),
+    )
     .map((source) => source.id)
     .sort();
 }
@@ -86,10 +112,29 @@ export async function refreshQueryBootstrap(
   root: string,
   session: QuerySessionV1,
 ): Promise<QuerySessionV1> {
-  const pendingSourceIds = await pendingBootstrapSourceIds(root);
+  const [pendingSourceIds, state] = await Promise.all([
+    pendingBootstrapSourceIds(root),
+    readBrainState(root),
+  ]);
   session.bootstrap = {
     required: pendingSourceIds.length > 0,
     pendingSourceIds,
+  };
+  session.setup = {
+    status: state.setup.status,
+    ...(state.setup.id ? { id: state.setup.id } : {}),
+    required: state.setup.status !== "completed",
+    pendingSourceIds:
+      state.setup.status === "completed"
+        ? []
+        : [
+            ...new Set([...state.setup.pendingSourceIds, ...pendingSourceIds]),
+          ].sort(),
+  };
+  session.deltaBootstrap = {
+    required: state.setup.status === "completed" && pendingSourceIds.length > 0,
+    pendingSourceIds:
+      state.setup.status === "completed" ? pendingSourceIds : [],
   };
   return session;
 }
@@ -107,7 +152,10 @@ export async function beginQuery(
     scope: "wiki",
     limit: 10,
   });
-  const pendingSourceIds = await pendingBootstrapSourceIds(root);
+  const [pendingSourceIds, state] = await Promise.all([
+    pendingBootstrapSourceIds(root),
+    readBrainState(root),
+  ]);
   const session: QuerySessionV1 = querySessionV1Schema.parse({
     version: 1,
     id: `qry_${randomUUID().replaceAll("-", "")}`,
@@ -122,6 +170,26 @@ export async function beginQuery(
     bootstrap: {
       required: pendingSourceIds.length > 0,
       pendingSourceIds,
+    },
+    setup: {
+      status: state.setup.status,
+      ...(state.setup.id ? { id: state.setup.id } : {}),
+      required: state.setup.status !== "completed",
+      pendingSourceIds:
+        state.setup.status === "completed"
+          ? []
+          : [
+              ...new Set([
+                ...state.setup.pendingSourceIds,
+                ...pendingSourceIds,
+              ]),
+            ].sort(),
+    },
+    deltaBootstrap: {
+      required:
+        state.setup.status === "completed" && pendingSourceIds.length > 0,
+      pendingSourceIds:
+        state.setup.status === "completed" ? pendingSourceIds : [],
     },
     webEvidenceSourceIds: [],
     changeOperationIds: [],

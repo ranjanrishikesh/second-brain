@@ -9,14 +9,18 @@ import { describe, expect, test } from "vitest";
 import {
   applyChangeSetTransaction,
   attachQueryChange,
+  attachSetupChange,
+  beginSetup,
   beginQuery,
   calculateCatalogRevision,
   captureWebEvidence,
   expandQuery,
+  finishSetup,
   finishQuery,
   initBrain,
   loadWikiPages,
   nextBootstrapBatch,
+  nextSetupBatch,
   nextSemanticAuditBatch,
   planReconciliation,
   readQuerySession,
@@ -25,12 +29,24 @@ import {
   scanAndRegisterSources,
   searchBrain,
   supersedeRegisteredSource,
+  type BrainRuntimeServices,
   type BootstrapSourceContextV1,
+  type KnowledgeMutationContext,
+  type SetupSourceContextV1,
   type WikiPageV1,
 } from "@second-brain/core";
 
 const execFile = promisify(execFileCallback);
 const fixedTime = "2026-08-23T12:00:00.000Z";
+const runtimeServices: BrainRuntimeServices = {
+  embeddings: {
+    modelId: "test/e2e-deterministic-e5",
+    modelRevision: "test-revision",
+    async embed(texts) {
+      return texts.map(() => [1, 0]);
+    },
+  },
+};
 
 async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
@@ -54,7 +70,9 @@ async function createBrain(name: string): Promise<string> {
   return root;
 }
 
-function sourcePage(context: BootstrapSourceContextV1): WikiPageV1 {
+function sourcePage(
+  context: BootstrapSourceContextV1 | SetupSourceContextV1,
+): WikiPageV1 {
   const chunk = context.extracted?.chunks[0];
   if (!chunk) throw new Error(`Expected extracted source ${context.record.id}`);
   const suffix = context.record.id.slice(4, 16);
@@ -79,7 +97,7 @@ function sourcePage(context: BootstrapSourceContextV1): WikiPageV1 {
 
 async function applyCreatedPages(
   root: string,
-  queryId: string,
+  context: KnowledgeMutationContext,
   operationId: string,
   pages: WikiPageV1[],
 ): Promise<void> {
@@ -92,7 +110,7 @@ async function applyCreatedPages(
     pages: pages.map((page) => ({ action: "create" as const, page })),
     reconciliation: { candidatePageIds: [], reviewed: [] },
   };
-  const plan = await planReconciliation(root, changeSet);
+  const plan = await planReconciliation(root, changeSet, runtimeServices);
   const directlyRelatedPageIds = new Set(
     pages.flatMap((page) =>
       page.relations.map((relation) => relation.targetId),
@@ -116,8 +134,50 @@ async function applyCreatedPages(
         : "Read in full; the new cited claim does not alter this page.",
     })),
   };
-  const result = await applyChangeSetTransaction(root, changeSet, { queryId });
-  await attachQueryChange(root, queryId, result.operationId);
+  const result = await applyChangeSetTransaction(root, changeSet, {
+    context,
+    runtimeServices,
+  });
+  if (context.kind === "query") {
+    await attachQueryChange(root, context.id, result.operationId);
+  } else {
+    await attachSetupChange(root, context.id, result.operationId);
+  }
+}
+
+async function completeInitialSetup(
+  root: string,
+  purpose: string,
+): Promise<Array<BootstrapSourceContextV1 | SetupSourceContextV1>> {
+  const setup = await beginSetup(root, { purpose }, runtimeServices);
+  const sources: Array<BootstrapSourceContextV1 | SetupSourceContextV1> = [];
+  let batchNumber = 0;
+  while (true) {
+    const batch = await nextSetupBatch(root, setup.id);
+    if (batch.sources.length === 0) break;
+    sources.push(...batch.sources);
+    await applyCreatedPages(
+      root,
+      { kind: "setup", id: setup.id },
+      `op_e2e_setup_batch_${batchNumber}`,
+      batch.sources.map(sourcePage),
+    );
+    batchNumber += 1;
+  }
+
+  while (true) {
+    const audit = await nextSemanticAuditBatch(root);
+    if (audit.pageIds.length === 0) break;
+    const recorded = await recordSemanticAuditBatch(root, {
+      pageIds: audit.pageIds,
+      summary: "Reviewed the complete initial catalog and map.",
+    });
+    if (recorded.complete) break;
+  }
+  await finishSetup(root, setup.id, {
+    summary: "Initial source catalog and shallow map are complete.",
+  });
+  return sources;
 }
 
 async function writeEverySupportedFormat(root: string): Promise<void> {
@@ -186,12 +246,14 @@ describe("portable second-brain fake host", () => {
     const root = await createBrain("Astronomy Brain");
     await writeEverySupportedFormat(root);
 
-    const session = await beginQuery(root, "What is periapsis?");
-    expect(session.currentTier).toBe("wiki");
-    expect(session.bootstrap.pendingSourceIds).toHaveLength(9);
-    const batch = await nextBootstrapBatch(root, session.id);
-    expect(batch.sources).toHaveLength(9);
-    expect(new Set(batch.sources.map((item) => item.record.mediaType))).toEqual(
+    const initialSources = await completeInitialSetup(
+      root,
+      "Astronomy concepts and observations",
+    );
+    expect(initialSources).toHaveLength(9);
+    expect(
+      new Set(initialSources.map((item) => item.record.mediaType)),
+    ).toEqual(
       new Set([
         "text/markdown",
         "text/plain",
@@ -204,12 +266,10 @@ describe("portable second-brain fake host", () => {
         "application/epub+zip",
       ]),
     );
-    await applyCreatedPages(
-      root,
-      session.id,
-      "op_e2e_bootstrap_formats",
-      batch.sources.map(sourcePage),
-    );
+    const session = await beginQuery(root, "What is periapsis?");
+    expect(session.currentTier).toBe("wiki");
+    expect(session.setup.status).toBe("completed");
+    expect(session.bootstrap.pendingSourceIds).toEqual([]);
     expect(
       JSON.parse(
         await readFile(path.join(root, ".brain", "state.json"), "utf8"),
@@ -221,10 +281,10 @@ describe("portable second-brain fake host", () => {
       reason: "The initial wiki did not define periapsis.",
     });
     expect(expanded.sourceResults.length).toBeGreaterThan(0);
-    const nearest = batch.sources.find((item) =>
+    const nearest = initialSources.find((item) =>
       item.record.path.endsWith("periapsis.md"),
     );
-    const disputed = batch.sources.find((item) =>
+    const disputed = initialSources.find((item) =>
       item.record.path.endsWith("contradiction.txt"),
     );
     if (!nearest?.extracted?.chunks[0] || !disputed?.extracted?.chunks[0]) {
@@ -270,7 +330,12 @@ describe("portable second-brain fake host", () => {
       ],
       body: `# Periapsis\n\nPeriapsis is the nearest point in an orbit. [@${nearest.record.id}#${nearest.extracted.chunks[0].locator}]\n\n## Conflicts\n\nA disputed note instead calls it the farthest point; this contradiction remains unresolved. [@${disputed.record.id}#${disputed.extracted.chunks[0].locator}]`,
     };
-    await applyCreatedPages(root, session.id, "op_e2e_raw_answer", [topic]);
+    await applyCreatedPages(
+      root,
+      { kind: "query", id: session.id },
+      "op_e2e_raw_answer",
+      [topic],
+    );
     const finished = await finishQuery(root, session.id, {
       outcome: "answered",
       answerSummary:
@@ -318,6 +383,7 @@ describe("portable second-brain fake host", () => {
 
   test("captures web evidence and persists an honest unanswered gap", async () => {
     const root = await createBrain("Research Brain");
+    await completeInitialSetup(root, "Research evidence");
     const session = await beginQuery(root, "Did Project Zephyr discover life?");
     await expandQuery(root, session.id, {
       tier: "sources",
@@ -369,10 +435,12 @@ describe("portable second-brain fake host", () => {
       ],
       body: `# Did Project Zephyr discover life?\n\nThe claim is not established. A captured snippet mentions only a possible biosignature and supplies no data. [@${capture.source.id}#${locator}]\n\n## Evidence needed\n\nA primary report with methods, measurements, and independent confirmation.`,
     };
-    await applyCreatedPages(root, session.id, "op_e2e_web_gap", [
-      capturedPage,
-      gap,
-    ]);
+    await applyCreatedPages(
+      root,
+      { kind: "query", id: session.id },
+      "op_e2e_web_gap",
+      [capturedPage, gap],
+    );
     const finished = await finishQuery(root, session.id, {
       outcome: "unanswered",
       answerSummary:

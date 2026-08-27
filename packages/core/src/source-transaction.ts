@@ -51,6 +51,12 @@ export async function scanAndRegisterSources(
         unknown
       > & {
         bootstrap?: { status?: string; pendingSourceIds?: string[] };
+        setup?: {
+          status?: string;
+          initialSourceIds?: string[];
+          pendingSourceIds?: string[];
+        };
+        semanticAuditDue?: boolean;
       };
       const pendingSourceIds = [
         ...new Set([
@@ -58,12 +64,37 @@ export async function scanAndRegisterSources(
           ...result.added.map((source) => source.id),
         ]),
       ].sort();
+      const setup =
+        state.setup?.status === "in-progress"
+          ? {
+              ...state.setup,
+              initialSourceIds: [
+                ...new Set([
+                  ...(state.setup.initialSourceIds ?? []),
+                  ...result.added.map((source) => source.id),
+                ]),
+              ].sort(),
+              pendingSourceIds: [
+                ...new Set([
+                  ...(state.setup.pendingSourceIds ?? []),
+                  ...result.added
+                    .filter((source) => source.extractionStatus === "ready")
+                    .map((source) => source.id),
+                ]),
+              ].sort(),
+            }
+          : state.setup;
       await writeFile(
         statePath,
         `${JSON.stringify(
           {
             ...state,
             bootstrap: { status: "pending", pendingSourceIds },
+            ...(setup ? { setup } : {}),
+            ...(state.setup?.status === "in-progress" &&
+            result.added.some((source) => source.extractionStatus === "ready")
+              ? { semanticAuditDue: true }
+              : {}),
           },
           null,
           2,

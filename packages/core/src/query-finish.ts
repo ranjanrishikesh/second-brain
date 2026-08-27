@@ -154,9 +154,17 @@ export async function finishQuery(
     throw new Error(`Query is not open: ${queryId}`);
   await refreshQueryBootstrap(root, session);
   await writeQuerySession(root, session);
-  if (session.bootstrap.required) {
+  if (session.setup.required) {
     throw new Error(
-      `Catalog bootstrap is incomplete for ${session.bootstrap.pendingSourceIds.length} source(s)`,
+      "Initial brain setup must be complete before finishing a query",
+    );
+  }
+  if (
+    session.deltaBootstrap.required &&
+    (session.currentTier === "sources" || session.currentTier === "web")
+  ) {
+    throw new Error(
+      `Catalog delta bootstrap is incomplete for ${session.deltaBootstrap.pendingSourceIds.length} source(s)`,
     );
   }
   const maintenanceState = z

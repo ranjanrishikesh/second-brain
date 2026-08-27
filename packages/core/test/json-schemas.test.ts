@@ -16,6 +16,7 @@ const expectedSchemas = [
   "ReconciliationReceiptV1",
   "RelationV1",
   "SemanticIndexMetadataV1",
+  "SetupSessionV1",
   "SetupStateV1",
   "SourceRecordV1",
   "SyncStatusV1",

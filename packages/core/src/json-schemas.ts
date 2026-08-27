@@ -2,6 +2,7 @@ import { z } from "zod";
 import { operationRecordV1Schema } from "./transaction.js";
 import { brainConfigV1Schema } from "./config.js";
 import { querySessionV1Schema } from "./query.js";
+import { setupSessionV1Schema } from "./setup.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import {
   brainStateV1Schema,
@@ -33,6 +34,7 @@ export type PublicSchemaNameV1 =
   | "RelationV1"
   | "SourceRecordV1"
   | "SemanticIndexMetadataV1"
+  | "SetupSessionV1"
   | "SetupStateV1"
   | "SyncStatusV1"
   | "SyncTargetV1"
@@ -74,6 +76,7 @@ export const brainJsonSchemasV1: Record<
     "SemanticIndexMetadataV1",
     semanticIndexMetadataV1Schema,
   ),
+  SetupSessionV1: jsonSchema("SetupSessionV1", setupSessionV1Schema),
   SetupStateV1: jsonSchema("SetupStateV1", setupStateV1Schema),
   SyncStatusV1: jsonSchema("SyncStatusV1", syncStatusV1Schema),
   SyncTargetV1: jsonSchema("SyncTargetV1", syncTargetV1Schema),

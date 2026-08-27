@@ -13,6 +13,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
+import { readBrainState } from "./state.js";
 import type { BrainRuntimeServices } from "./semantic.js";
 import {
   assertReconciliationPlanMatches,
@@ -58,6 +59,10 @@ export const operationRecordV1Schema = z.object({
     .string()
     .regex(/^qry_[a-f0-9]{32}$/)
     .optional(),
+  setupId: z
+    .string()
+    .regex(/^setup_[a-f0-9]{32}$/)
+    .optional(),
 });
 
 export type OperationRecordV1 = z.infer<typeof operationRecordV1Schema>;
@@ -79,14 +84,28 @@ export interface TransactionTestOptions {
 export interface ApplyTransactionOptions extends TransactionTestOptions {
   /** Bind this mutation to the currently open query and its active evidence tier. */
   queryId?: string;
+  /** Preferred lifecycle binding for a canonical knowledge mutation. */
+  context?: KnowledgeMutationContext;
   /** Dependency injection for verified local semantic reconciliation. */
   runtimeServices?: BrainRuntimeServices;
 }
 
+export type KnowledgeMutationContext =
+  | { kind: "query"; id: string }
+  | { kind: "setup"; id: string };
+
 interface QueryMutationBinding {
+  kind: "query";
   queryId: string;
   tier: "wiki" | "sources" | "web";
 }
+
+interface SetupMutationBinding {
+  kind: "setup";
+  setupId: string;
+}
+
+type MutationBinding = QueryMutationBinding | SetupMutationBinding;
 
 class SimulatedTransactionCrash extends Error {
   constructor(phase: string) {
@@ -425,7 +444,7 @@ async function appendOperation(
   root: string,
   changeSet: ChangeSetV1,
   now: string,
-  binding?: QueryMutationBinding,
+  binding?: MutationBinding,
 ): Promise<void> {
   const record: OperationRecordV1 = {
     version: 1,
@@ -436,8 +455,9 @@ async function appendOperation(
     completedAt: now,
     summary: changeSet.reason,
     pageIds: changeSet.pages.map((mutation) => mutation.page.id),
-    tiersUsed: binding ? [binding.tier] : [],
-    ...(binding ? { queryId: binding.queryId } : {}),
+    tiersUsed: binding?.kind === "query" ? [binding.tier] : [],
+    ...(binding?.kind === "query" ? { queryId: binding.queryId } : {}),
+    ...(binding?.kind === "setup" ? { setupId: binding.setupId } : {}),
   };
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const existing = await readFile(operationsPath, "utf8");
@@ -476,7 +496,21 @@ async function readQueryMutationBinding(
         ),
       ),
     );
-  return { queryId: session.id, tier: session.currentTier };
+  return { kind: "query", queryId: session.id, tier: session.currentTier };
+}
+
+async function readSetupMutationBinding(
+  root: string,
+  setupId: string,
+): Promise<SetupMutationBinding> {
+  if (!/^setup_[a-f0-9]{32}$/.test(setupId)) {
+    throw new Error(`Invalid setup ID: ${setupId}`);
+  }
+  const setup = (await readBrainState(root)).setup;
+  if (setup.status !== "in-progress" || setup.id !== setupId) {
+    throw new Error(`Setup is not in progress: ${setupId}`);
+  }
+  return { kind: "setup", setupId };
 }
 
 function safeCommitText(value: string): string {
@@ -500,8 +534,16 @@ export async function applyChangeSetTransaction(
       testOptions: options,
     },
     async () => {
-      const binding = options.queryId
-        ? await readQueryMutationBinding(root, options.queryId)
+      if (options.context && options.queryId) {
+        throw new Error("Use either context or queryId, not both");
+      }
+      const context: KnowledgeMutationContext | undefined =
+        options.context ??
+        (options.queryId ? { kind: "query", id: options.queryId } : undefined);
+      const binding = context
+        ? context.kind === "query"
+          ? await readQueryMutationBinding(root, context.id)
+          : await readSetupMutationBinding(root, context.id)
         : undefined;
       const currentPages = await loadWikiPages(root);
       const expectedPlan = await planReconciliation(
@@ -562,6 +604,7 @@ export async function applyChangeSetTransaction(
       > & {
         knowledgeMutations?: number;
         lastSemanticAuditMutation?: number;
+        semanticAuditDue?: boolean;
       };
       const knowledgeMutations =
         (state.knowledgeMutations ?? 0) + (changeSet.pages.length ? 1 : 0);
@@ -598,8 +641,9 @@ export async function applyChangeSetTransaction(
               pendingSourceIds,
             },
             semanticAuditDue:
+              Boolean(state.semanticAuditDue) ||
               knowledgeMutations - (state.lastSemanticAuditMutation ?? 0) >=
-              config.graph.semanticAuditEvery,
+                config.graph.semanticAuditEvery,
           },
           null,
           2,

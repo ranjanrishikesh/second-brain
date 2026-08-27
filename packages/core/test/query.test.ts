@@ -16,12 +16,16 @@ import {
   initBrain,
   loadWikiPages,
   nextBootstrapBatch,
+  readBrainState,
   renderWikiPage,
   scanSources,
+  writeBrainState,
   type WikiPageV1,
 } from "../src/index.js";
+import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
 const execFile = promisify(execFileCallback);
+const runtimeServices = { embeddings: deterministicEmbeddings({}) };
 
 async function findFileNamed(
   directory: string,
@@ -72,6 +76,19 @@ async function queryBrain(): Promise<string> {
     body: `# Quasar source\n\nQuasars are luminous galactic nuclei. [@${sourceId}#heading=quasar-evidence]`,
   };
   await writeFile(path.join(root, page.path), renderWikiPage(page));
+  const state = await readBrainState(root);
+  await writeBrainState(root, {
+    ...state,
+    setup: {
+      status: "completed",
+      id: "setup_0123456789abcdef0123456789abcdef",
+      purpose: "Quasar evidence",
+      startedAt: "2026-08-23T00:00:00.000Z",
+      completedAt: "2026-08-23T00:01:00.000Z",
+      initialSourceIds: [sourceId],
+      pendingSourceIds: [],
+    },
+  });
   await execFile("git", ["init"], { cwd: root });
   await execFile("git", ["config", "user.name", "Second Brain Test"], {
     cwd: root,
@@ -130,7 +147,7 @@ describe("query lifecycle", () => {
           ],
           reconciliation: { candidatePageIds: [], reviewed: [] },
         },
-        { simulateCrashAfter: "files-applied" },
+        { simulateCrashAfter: "files-applied", runtimeServices },
       ),
     ).rejects.toThrow("Simulated transaction crash");
 
@@ -539,7 +556,7 @@ describe("query lifecycle", () => {
         ],
         reconciliation: { candidatePageIds: [], reviewed: [] },
       },
-      { queryId: session.id },
+      { queryId: session.id, runtimeServices },
     );
     await attachQueryChange(root, session.id, transaction.operationId);
     const finished = await finishQuery(root, session.id, {
@@ -557,24 +574,28 @@ describe("query lifecycle", () => {
     const root = await queryBrain();
     const [current] = await loadWikiPages(root);
     if (!current) throw new Error("Expected a wiki page");
-    const transaction = await applyChangeSetTransaction(root, {
-      version: 1,
-      operationId: "op_unbound_history",
-      catalogRevision: calculateCatalogRevision([current]),
-      reason: "A mutation unrelated to the later query",
-      pages: [
-        {
-          action: "update",
-          expectedRevision: current.revision,
-          page: {
-            ...current,
-            summary: "An unrelated historical summary.",
-            updatedAt: "2026-08-23T14:00:00.000Z",
+    const transaction = await applyChangeSetTransaction(
+      root,
+      {
+        version: 1,
+        operationId: "op_unbound_history",
+        catalogRevision: calculateCatalogRevision([current]),
+        reason: "A mutation unrelated to the later query",
+        pages: [
+          {
+            action: "update",
+            expectedRevision: current.revision,
+            page: {
+              ...current,
+              summary: "An unrelated historical summary.",
+              updatedAt: "2026-08-23T14:00:00.000Z",
+            },
           },
-        },
-      ],
-      reconciliation: { candidatePageIds: [], reviewed: [] },
-    });
+        ],
+        reconciliation: { candidatePageIds: [], reviewed: [] },
+      },
+      { runtimeServices },
+    );
     const session = await beginQuery(root, "What does spectroscopy reveal?");
     await expandQuery(root, session.id, {
       tier: "sources",
@@ -611,7 +632,7 @@ describe("query lifecycle", () => {
         ],
         reconciliation: { candidatePageIds: [], reviewed: [] },
       },
-      { queryId: session.id },
+      { queryId: session.id, runtimeServices },
     );
     await attachQueryChange(root, session.id, transaction.operationId);
     await expandQuery(root, session.id, {
@@ -630,17 +651,34 @@ describe("query lifecycle", () => {
   test("blocks completion while catalog bootstrap still has uncataloged sources", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-bootstrap-finish-"));
     await initBrain(root, { name: "Bootstrap", description: "Bootstrap test" });
+    const state = await readBrainState(root);
+    await writeBrainState(root, {
+      ...state,
+      setup: {
+        status: "completed",
+        id: "setup_0123456789abcdef0123456789abcdef",
+        purpose: "Prior setup",
+        startedAt: "2026-08-23T00:00:00.000Z",
+        completedAt: "2026-08-23T01:00:00.000Z",
+        initialSourceIds: [],
+        pendingSourceIds: [],
+      },
+    });
     await writeFile(
       path.join(root, "sources", "pending.md"),
       "# Pending\n\nPending knowledge.\n",
     );
     const session = await beginQuery(root, "What is pending?");
+    await expandQuery(root, session.id, {
+      tier: "sources",
+      reason: "The wiki does not answer the pending-source question.",
+    });
 
     await expect(
       finishQuery(root, session.id, {
         outcome: "answered",
         answerSummary: "Pending knowledge.",
       }),
-    ).rejects.toThrow(/bootstrap/i);
+    ).rejects.toThrow(/delta bootstrap/i);
   });
 });

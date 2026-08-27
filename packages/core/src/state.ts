@@ -13,6 +13,10 @@ export const setupStateV1Schema = z.object({
     .string()
     .regex(/^setup_[a-f0-9]{32}$/)
     .optional(),
+  purpose: z.string().trim().min(1).optional(),
+  boundaries: z.string().trim().min(1).optional(),
+  startedAt: z.string().datetime().optional(),
+  initialSourceIds: z.array(sourceIdV1Schema).default([]),
   pendingSourceIds: z.array(sourceIdV1Schema).default([]),
   completedAt: z.string().datetime().optional(),
 });
@@ -81,10 +85,11 @@ export const brainStateV1Schema = z
       status: "pending",
       pendingSourceIds: [],
     }),
-    setup: setupStateV1Schema.default({
-      status: "not-started",
+    setup: setupStateV1Schema.default(() => ({
+      status: "not-started" as const,
+      initialSourceIds: [],
       pendingSourceIds: [],
-    }),
+    })),
     semanticIndex: semanticIndexMetadataV1Schema.optional(),
     syncTarget: syncTargetV1Schema.optional(),
     semanticAuditDue: z.boolean().optional(),
