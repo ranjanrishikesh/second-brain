@@ -14,9 +14,11 @@ import {
   beginQuery,
   calculateCatalogRevision,
   captureWebEvidence,
+  configureSyncTarget,
   expandQuery,
   finishSetup,
   finishQuery,
+  formatSyncWarning,
   initBrain,
   loadWikiPages,
   nextBootstrapBatch,
@@ -628,4 +630,196 @@ describe("portable second-brain fake host", () => {
     });
     expect(complete.complete).toBe(true);
   });
+
+  test("exposes the complete host lifecycle through durable state", async () => {
+    const root = await createBrain("Host contract Brain");
+    await writeFile(
+      path.join(root, "sources", "contract.md"),
+      "# Contract evidence\n\nA raw source supports the host contract.\n",
+    );
+    const setupSources = await completeInitialSetup(
+      root,
+      "Host lifecycle contract evidence",
+    );
+    const source = setupSources[0];
+    if (!source?.extracted?.chunks[0]) {
+      throw new Error("Expected a source page from the initial setup");
+    }
+    const sourcePageId = `pg_source_${source.record.id.slice(4, 16)}`;
+
+    const wikiOnly = await beginQuery(root, "What is already known?");
+    const wikiOnlyFinished = await finishQuery(root, wikiOnly.id, {
+      outcome: "answered",
+      answerSummary: "The existing wiki can be answered without new evidence.",
+    });
+    expect(wikiOnlyFinished.session).toMatchObject({
+      tiersUsed: ["wiki"],
+      changeOperationIds: [],
+      sync: { status: "unconfigured" },
+    });
+
+    const raw = await beginQuery(
+      root,
+      "What does the raw contract source say?",
+    );
+    await expandQuery(root, raw.id, {
+      tier: "sources",
+      reason: "The shallow source catalog has no reusable answer page yet.",
+    });
+    const rawTopic: WikiPageV1 = {
+      schema: 1,
+      id: "pg_contract_raw_topic",
+      path: "wiki/pages/topics/contract-raw.md",
+      title: "Host contract evidence",
+      type: "topic",
+      status: "active",
+      summary: "A raw source supports the host contract.",
+      aliases: [],
+      tags: ["contract"],
+      createdAt: fixedTime,
+      updatedAt: fixedTime,
+      revision: "pending",
+      sources: [
+        {
+          id: source.record.id,
+          locators: [source.extracted.chunks[0].locator],
+        },
+      ],
+      relations: [
+        {
+          targetId: sourcePageId,
+          kind: "supports",
+          sourceIds: [source.record.id],
+        },
+      ],
+      body: `# Host contract evidence\n\nA raw source supports the host contract. [@${source.record.id}#${source.extracted.chunks[0].locator}]`,
+    };
+    await applyCreatedPages(
+      root,
+      { kind: "query", id: raw.id },
+      "op_e2e_host_raw",
+      [rawTopic],
+    );
+    const rawFinished = await finishQuery(root, raw.id, {
+      outcome: "answered",
+      answerSummary: "The raw source has been persisted as a cited topic.",
+    });
+    expect(rawFinished.session).toMatchObject({
+      tiersUsed: ["wiki", "sources"],
+      outcome: "answered",
+    });
+
+    const denied = await beginQuery(root, "Can the host research the web now?");
+    await expandQuery(root, denied.id, {
+      tier: "sources",
+      reason: "No local page answers the web-policy question.",
+    });
+    await requestWebApproval(root, denied.id, {
+      reason: "The local source catalog is insufficient for this question.",
+      hostSessionId: "e2e-host-contract",
+    });
+    await resolveWebApproval(root, denied.id, {
+      approved: false,
+      decidedBy: "brain-owner",
+      denialReason: "Keep this question local.",
+    });
+    await expect(
+      expandQuery(root, denied.id, {
+        tier: "web",
+        reason: "The owner denied web research.",
+      }),
+    ).rejects.toThrow(/denied|approval/i);
+    const deniedGap: WikiPageV1 = {
+      schema: 1,
+      id: "pg_contract_denied_gap",
+      path: "wiki/pages/questions/web-policy-gap.md",
+      title: "Can the host research the web now?",
+      type: "question",
+      status: "active",
+      summary: "Unresolved because the owner denied web research.",
+      aliases: [],
+      tags: ["evidence-gap"],
+      createdAt: fixedTime,
+      updatedAt: fixedTime,
+      revision: "pending",
+      sources: [],
+      relations: [
+        { targetId: sourcePageId, kind: "related-to", sourceIds: [] },
+      ],
+      body: "# Can the host research the web now?\n\nNo. The owner denied web research for this question.\n\n## Evidence needed\n\nAn approved web-research request.",
+    };
+    await applyCreatedPages(
+      root,
+      { kind: "query", id: denied.id },
+      "op_e2e_host_denied_gap",
+      [deniedGap],
+    );
+    const deniedFinished = await finishQuery(root, denied.id, {
+      outcome: "unanswered",
+      answerSummary: "The owner denied web research, so the gap remains open.",
+    });
+    expect(deniedFinished.session).toMatchObject({
+      outcome: "unanswered",
+      webApproval: { status: "denied" },
+    });
+
+    const approved = await beginQuery(
+      root,
+      "What approved web evidence exists?",
+    );
+    await expandQuery(root, approved.id, {
+      tier: "sources",
+      reason: "The local sources do not include this new evidence.",
+    });
+    await requestWebApproval(root, approved.id, {
+      reason: "The current question needs external evidence.",
+      hostSessionId: "e2e-host-contract",
+    });
+    await resolveWebApproval(root, approved.id, {
+      approved: true,
+      decidedBy: "brain-owner",
+    });
+    await expandQuery(root, approved.id, {
+      tier: "web",
+      reason: "The approved local-evidence gap remains unresolved.",
+    });
+    const captured = await captureWebEvidence(root, approved.id, {
+      url: "https://example.test/host-contract",
+      title: "Host contract evidence",
+      captureKind: "snippet",
+      content: "Captured web evidence is immutable before it supports a claim.",
+      retrievedAt: fixedTime,
+    });
+    expect(captured.session).toMatchObject({
+      currentTier: "web",
+      webApproval: { status: "approved" },
+      webEvidenceSourceIds: [captured.source.id],
+    });
+
+    const remote = await mkdtemp(path.join(tmpdir(), "brain-e2e-sync-remote-"));
+    const branch = await git(root, ["branch", "--show-current"]);
+    await git(remote, ["init", "--bare"]);
+    await git(root, ["remote", "add", "origin", remote]);
+    await git(root, ["push", "-u", "origin", branch]);
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch,
+      confirm: true,
+    });
+    const hook = path.join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const pending = await beginQuery(root, "What remains safely committed?");
+    const pendingFinished = await finishQuery(root, pending.id, {
+      outcome: "answered",
+      answerSummary:
+        "The answer is locally durable while remote sync is pending.",
+    });
+    expect(pendingFinished.sync).toMatchObject({ status: "pending" });
+    expect(
+      formatSyncWarning(pendingFinished.sync ?? { status: "unconfigured" }),
+    ).toMatch(
+      /^⚠ Sync pending — knowledge is safely committed locally at [a-f0-9]{40}, but it has not yet been pushed to origin\//,
+    );
+  }, 30_000);
 });

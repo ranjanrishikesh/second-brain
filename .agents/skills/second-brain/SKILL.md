@@ -1,59 +1,59 @@
 ---
 name: second-brain
-description: Use when answering or maintaining domain knowledge in a portable second-brain repository, including wiki lookup, raw-source fallback, web evidence, knowledge graph updates, contradictions, unanswered gaps, bootstrap, or semantic audits.
+description: Use when answering or maintaining domain knowledge in a portable second-brain repository, including questions over its wiki or sources, source ingestion, web research, graph changes, contradictions, gaps, setup, reconciliation, audits, or sync state.
 ---
 
 # Second Brain
 
 ## Core contract
 
-Treat the repository as durable memory and the `brain` CLI or `brain_*` tools as its only write boundary. Answer domain questions through a query session. Handle code, configuration, deployment, and tests as ordinary repository work; never store them in the wiki unless `BRAIN.md` explicitly includes software engineering as domain knowledge.
+The repository is durable memory. The `brain` CLI or equivalent `brain_*` host tools are its only write boundary. Treat a domain question as a query session; treat code, configuration, deployment, and test work as ordinary repository work unless `BRAIN.md` explicitly makes them domain knowledge.
 
-## Query workflow
+## Decision ladder
 
-1. Read `BRAIN.md`. Run `brain status`; run `brain recover` first when recovery is required.
-2. Run `brain query begin "<exact question>"`. It scans new sources and searches the wiki.
-3. Complete pending bootstrap in returned batches. Create shallow source pages with exact source IDs/locators and apply them through the query.
-4. Read relevant wiki results. Stop at wiki only when every material claim is supported and no relevant conflict or gap remains.
-5. If insufficient, expand to `sources` with a concrete reason, search/read exact chunks, and preserve locators. Expand to `web` only after sources are insufficient.
-6. Capture every web page or snippet before using it. Never persist or answer from an uncaptured URL, search snippet, or model recollection.
-7. Persist before answering:
-   - Wiki-only lookup: finish log-only; do not duplicate pages.
-   - Reusable wiki-only synthesis: optionally persist it.
-   - Raw/web evidence used: apply at least one cited wiki mutation.
-   - Unanswered: apply a `question` gap page stating uncertainty and evidence needed.
-   - Conflict: retain both claims in a conflicts section and connect them with `supports` or `contradicts`; never overwrite history silently.
-8. Run/complete a due semantic audit. Finish the query. Answer only after validation and the required Git commits succeed.
+| Situation | Required action |
+| --- | --- |
+| First domain question | Automatically complete the one-time shallow catalog-and-map setup, then resume the question. |
+| New dropped sources after setup | Ingest their shallow source pages during the active question before relying on them. |
+| Existing wiki is sufficient | Answer from it and finish log-only. |
+| Wiki is insufficient | Read immutable raw source chunks, then persist cited knowledge. |
+| Raw sources are insufficient | Request one approval for web research for this exact question before browsing or capturing. |
+| Evidence remains insufficient | Create or update a durable `question` gap page; never guess. |
 
-## Mutation receipt
+## Query lifecycle
 
-For every create/update/merge/archive:
+1. Read `BRAIN.md`, then run `brain status`. Complete `brain recover` before domain work if recovery is required.
+2. Run `brain query begin "<exact question>"`. It scans source changes, resumes safe synchronization, and searches the wiki. Read its `setup.required` and `deltaBootstrap.required` state; never guess which ingestion path applies.
+3. If the response says `setup.required`, derive the setup purpose and boundaries from `BRAIN.md`, then automatically run `brain setup begin`, `brain setup next` batches, and shallow cited source-page mutations through `brain apply --setup`. Reconcile each mutation, complete due semantic audit work, run `brain setup finish`, then resume the original query. If `BRAIN.md` has no usable domain purpose, ask the owner only for that missing charter.
+4. If `deltaBootstrap.required`, use `brain bootstrap next <query-id>` batches to add shallow source pages before an answer that relies on those new sources. Initial setup catalogs every ready source; later ingestion is question-triggered and deepens only where the question needs it.
+5. Read relevant wiki pages with `brain query read <query-id> <page-or-alias> [--locator <anchor>]`. Stop at the wiki tier only when every material claim is supported, relevant conflicts are represented, and no material gap remains.
+6. Otherwise run `brain query expand <query-id> --tier sources --reason "…"`, then read exact raw source chunks and locators. Raw-backed answers require a cited durable wiki mutation. For a corpus-wide question, read enough relevant raw coverage to support the whole-corpus conclusion; never call a theme “central” from a shallow page title, a small sample, or word frequency alone. Persist a reusable cited synthesis when that deeper analysis will help later questions.
+7. If raw evidence is insufficient, run `brain query request-web` with the concrete gap and the current host session. Wait for the owner's decision, record it through `brain query approve-web`, and expand to web only when the matching approval is unexpired and approved. Do not use native web/search tools, URLs, snippets, or model recollection before this approval. A general past preference for research is not approval for the active question. If the owner says not to ask follow-up questions, do not create an approval request: take the no-web path and record/answer the supported local gap. One approval covers the whole active question; a denial means answer locally or record a gap.
+8. Capture approved evidence with `brain web capture` before citing it. A web-backed answer must cite captured web evidence in its durable mutation.
 
-1. Search for title/alias duplicates, shared entities, claims, tags, and configured related-page results.
-2. Collect graph neighbors, shared-source pages, duplicate candidates, and search results.
-3. **Read every candidate page and any targeted anchor before deciding.** Metadata, unchanged tags, or unchanged links are not a review.
-4. Update affected claims, links, anchors, backlinks, conflicts, or summaries together. Record a specific `changed` or `no-change` reason for every candidate.
-5. Submit one validated change set with current catalog/page revisions and the active query ID (`brain apply --query <query-id>`). Let the core bind the evidence tier, regenerate indexes/backlinks/health, and commit exact managed paths.
+## Reconcile and persist
 
-## Evidence rules
+For every page mutation, make a change-set draft, run `brain reconcile plan`, and inspect every returned candidate—not just its title or metadata. In a query, use `brain query read` for each candidate and targeted anchor so the current revision-bound receipts are recorded. Give every candidate a specific `changed` or `no-change` reason, update related claims/links/conflicts together, then run `brain apply --query <query-id>`. During initial setup, use `brain read` for each candidate, copy its current ID/revision/anchor receipt into the draft, and apply with `--setup <setup-id>`.
 
-- Cite factual and synthesized paragraphs as `[@source-id#locator]`.
-- Declare the same source/locator in page frontmatter.
-- Separate source statements from inference; state uncertainty explicitly.
-- Use stable Obsidian wikilinks and section anchors for meaningful connections.
-- Archive, merge, or supersede pages and sources; do not destructively delete history.
+Use `[@source-id#locator]` for factual and synthesized paragraphs, declare the evidence in frontmatter, distinguish inference from source statements, retain contradictions with typed edges, and archive/merge/supersede rather than erase history.
 
-## Never bypass
+Run required semantic audit work, then `brain query finish`. Wiki-only lookups may finish without a redundant page. Raw/web answers require a query-bound cited change; an unanswered result requires a query-bound `question` gap page.
 
-- Never write `wiki/`, `.brain/source-manifest.json`, `.brain/state.json`, or `.brain/operations.jsonl` directly.
-- Never claim a candidate was reviewed without reading it.
-- Never answer after a failed apply, audit, recovery, or finish.
-- Never stage unrelated files or push automatically.
+## Synchronization and final answer
 
-## Minimal raw-fallback example
+Managed operations commit locally. Only an owner-confirmed existing target may be configured with `brain sync configure --remote … --branch … --confirm`; it can push only a normal fast-forward made entirely of managed brain commits. Never push arbitrary targets, force-push, pull, rebase, or stage unrelated files.
+
+Answer only after recovery, validation, required audit/setup, and the local managed commit succeed. If result sync is `pending` or `manual-sync-required`, answer is allowed but must copy the complete exact warning returned by `formatSyncWarning` / the CLI, beginning:
 
 ```text
-brain query begin → assess wiki insufficient → brain query expand sources
-→ brain read exact chunks → read every reconciliation candidate
-→ brain apply --query → brain query finish → answer
+⚠ Sync pending — knowledge is safely committed locally at …
 ```
+
+Never hide, paraphrase away, or claim remote availability despite that warning.
+
+## Common mistakes
+
+- Do not ask the owner to operate the CLI just because setup is long; the host completes the automatic setup and reports truthful progress.
+- Do not silently convert a general research preference, silence, or “no follow-ups” into web approval.
+- Do not mark candidate review complete from search metadata; read the candidate body and targeted anchor at its current revision.
+- Do not present local durability as remote sync; copy the full pending-sync warning when required.

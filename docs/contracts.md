@@ -10,6 +10,9 @@ The public v1 contracts are exported as Zod schemas and checked-in JSON Schema 2
 - `QuerySessionV1`
 - `OperationRecordV1`
 - `AuditReportV1`
+- `SetupSessionV1`
+- `SyncTargetV1` and `SyncStatusV1`
+- `WebApprovalRequestV1` and `WebApprovalV1`
 
 Regenerate them with `pnpm schemas:generate`; CI rejects drift.
 
@@ -38,6 +41,22 @@ Agents do not write canonical wiki/state files directly. `ChangeSetV1` carries p
 
 Query-driven changes must be submitted with `brain apply --query <query-id>`. The core records the query's active evidence tier on the operation; an unbound historical mutation or a mutation from an earlier tier cannot satisfy raw/web persistence requirements.
 
+Before query-driven apply, `brain reconcile plan` calculates the complete candidate set under the current catalog revision: graph neighbors, shared source/locator/tag/alias pages, contradictions, near duplicates, lexical results, and (after setup) semantic results. The host must use `brain query read` to record one current revision-bound read receipt for every returned candidate and every targeted anchor. It then supplies one `changed` or `no-change` decision and reason per candidate. `brain apply --query` binds the persisted receipts to the draft; manually forged or stale receipts are rejected. Initial setup follows the same plan/review rule but applies source-page mutations with `brain apply --setup <setup-id>`.
+
 The transaction validates all pages, citations, anchors, aliases, relation types, source IDs, revisions, duplicates, and the complete structural graph. It then regenerates index, map, backlinks, sources, health, state, and logs atomically.
 
 Contradictory claims remain cited in a conflicts section and use `supports` or `contradicts` edges. Pages are archived, merged, renamed, or superseded rather than destructively erased.
+
+## Setup, query, and web approval state
+
+`SetupSessionV1` is the one-time initial catalog state. It begins from a domain purpose and boundaries, returns deterministic source batches, and cannot finish until every ready initial source has a shallow source page, the structural graph is healthy, and semantic audit work is complete. The triggering query is refreshed after setup; later new sources appear as `deltaBootstrap` work in the active query instead of reopening initial setup.
+
+`QuerySessionV1` records the exact question, tiers used, source/search results, setup and delta state, read receipts, captured web source IDs, query-bound mutation IDs, and derived sync status. Runtime query records are operational and disposable; the durable evidence and operations they bind are canonical. A query that uses raw or web evidence cannot finish without a query-bound cited mutation. An unanswered query cannot finish without a query-bound `question` page.
+
+Web approval records are runtime-scoped but bound to the active query ID, its SHA-256 normalized-question hash, and host session. A request has `requested`, `approved`, `denied`, or `expired` state and a configured expiry. `brain query expand --tier web` and `brain web capture` both reject unless the same query has an unexpired approval. Captured evidence becomes an immutable registered source under `sources/web/`; the approval itself never substitutes for evidence.
+
+## Synchronization contract
+
+`SyncTargetV1` stores the owner-confirmed remote name, branch, and a credential-safe fingerprint of the remote URL. `SyncStatusV1` is derived rather than blindly trusted: `unconfigured`, `synced`, `pending`, or `manual-sync-required`.
+
+The only push path checks that the current branch and remote fingerprint still match, that the remote branch is an ancestor, and that every ahead commit is a managed brain commit. It issues only a normal `HEAD:refs/heads/<branch>` push. A rejection, inaccessible remote, divergent branch, changed target, or unrelated ahead commit preserves local canonical data and produces pending/manual state. When that state carries a locally committed change, a host may answer only with the exact `⚠ Sync pending — knowledge is safely committed locally at …` warning visible to the owner.

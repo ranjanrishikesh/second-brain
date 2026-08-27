@@ -14,14 +14,23 @@
 - `bootstrap.mode`: `catalog-map` in v1.
 - `bootstrap.batchSize`: maximum source contexts returned by `brain bootstrap next`.
 
-Bootstrap creates a shallow source catalog and relationship map. It is checkpointed by durable source pages; later questions deepen the graph only where useful.
+Bootstrap creates a shallow source catalog and relationship map. The host agent starts or resumes it automatically from the first domain question, using the purpose and boundaries in `BRAIN.md`; it is not a file watcher or background job. It is checkpointed by durable source pages and must catalog every ready initial source before setup can finish. After setup, newly dropped files are scanned on query start and cataloged in query-triggered delta batches when they are needed. Later questions deepen the graph only where useful.
 
 ## Learning and web evidence
 
 - `learning.mode`: `durable`; raw/web-backed answers must change canonical knowledge.
 - `web.capture`: `evidence`; every external claim must first be captured under `sources/web/`.
+- `web.approvalTtlHours`: the lifespan of one owner decision for one active question; default `24`. Approval is bound to the query ID, normalized question, and host session. A past general preference for research does not authorize a new query.
 
 Web captures record URL, retrieval time, originating query, capture kind, content hash, and version/supersession data. They obey the same immutable-source contract as local files.
+
+## Semantic model and hybrid retrieval
+
+- `graph.semanticModel.id`: fixed in v1 to `Xenova/multilingual-e5-small`.
+- `graph.semanticModel.revision`: fixed pinned model revision, `761b726dd34fb83930e26aab4e9ac3899aa1fa78`.
+- `graph.semanticModel.artifactSha256`: expected SHA-256 for `model_quantized.onnx`, `4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c`.
+
+The first initial setup downloads the pinned model to `.brain/cache/models/` and verifies that artifact before embedding anything. Search uses deterministic SQLite FTS5 lexical retrieval by default; reconciliation after setup also uses the local semantic index to find conceptually related pages. The semantic index is rebuilt whenever its source/wiki corpus revision or model metadata changes. Both it and the model cache are disposable. If the model is absent and the machine is offline, setup stops before completion; restore network access or a verified cache, then resume setup.
 
 ## Graph
 
@@ -35,7 +44,9 @@ You may extend page and relation types per clone without changing TypeScript.
 ## Git
 
 - `git.autoCommit`: when true, successful managed operations create local commits.
-- `git.autoPush`: fixed to false in v1.
+- `git.autoPush`: remains `false`; it never authorizes a broad automatic push.
+
+Safe remote synchronization is separate and opt-in. The owner must explicitly run `brain sync configure --remote <name> --branch <branch> --confirm` for an existing remote. With that confirmed target, the core may attempt only a normal fast-forward push whose commits are all marked as managed brain operations. A pending or manual-sync-required result never discards the local commit; hosts must visibly report the exact `⚠ Sync pending — …` warning before answering. It never force-pushes, pulls, rebases, or pushes unrelated local commits.
 
 The core refuses pre-existing staged changes and dirty managed wiki/state paths. It stages exact managed paths only; unrelated unstaged work remains untouched.
 
@@ -52,6 +63,7 @@ Tracked canonical state:
 Disposable and ignored:
 
 - `.brain/cache/` — extracted chunks and SQLite FTS5 index, rebuilt from canonical data.
-- `.brain/runtime/` — locks, query sessions, transaction journals, and recovery snapshots.
+- `.brain/cache/models/` and `.brain/cache/semantic-index.json` — the pinned local model and semantic vectors, verified/rebuilt as described above.
+- `.brain/runtime/` — locks, query sessions, query read receipts, web-approval records, transaction journals, and recovery snapshots.
 
 Runtime data is operational rather than knowledge. An active recovery journal must be completed before deleting runtime state.
