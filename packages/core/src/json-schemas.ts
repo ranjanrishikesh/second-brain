@@ -5,6 +5,10 @@ import { querySessionV1Schema } from "./query.js";
 import { setupSessionV1Schema } from "./setup.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import {
+  webApprovalRequestV1Schema,
+  webApprovalV1Schema,
+} from "./web-approval.js";
+import {
   brainStateV1Schema,
   semanticIndexMetadataV1Schema,
   setupStateV1Schema,
@@ -38,6 +42,8 @@ export type PublicSchemaNameV1 =
   | "SetupStateV1"
   | "SyncStatusV1"
   | "SyncTargetV1"
+  | "WebApprovalRequestV1"
+  | "WebApprovalV1"
   | "WikiPageV1";
 
 function jsonSchema(
@@ -80,5 +86,10 @@ export const brainJsonSchemasV1: Record<
   SetupStateV1: jsonSchema("SetupStateV1", setupStateV1Schema),
   SyncStatusV1: jsonSchema("SyncStatusV1", syncStatusV1Schema),
   SyncTargetV1: jsonSchema("SyncTargetV1", syncTargetV1Schema),
+  WebApprovalRequestV1: jsonSchema(
+    "WebApprovalRequestV1",
+    webApprovalRequestV1Schema,
+  ),
+  WebApprovalV1: jsonSchema("WebApprovalV1", webApprovalV1Schema),
   WikiPageV1: jsonSchema("WikiPageV1", wikiPageV1Schema),
 };

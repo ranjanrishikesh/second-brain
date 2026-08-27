@@ -181,7 +181,7 @@ describe("brain CLI", () => {
     });
   });
 
-  test("exposes the query tier lifecycle as typed JSON commands", async () => {
+  test("does not allow the CLI to enter web without a core approval", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-cli-query-"));
     await runCli(
       [
@@ -202,7 +202,6 @@ describe("brain CLI", () => {
     );
     const session = JSON.parse(beginOutput.join("")) as { id: string };
     const sourceOutput: string[] = [];
-    const webOutput: string[] = [];
 
     await runCli(
       [
@@ -219,29 +218,27 @@ describe("brain CLI", () => {
       ],
       { write: (value) => sourceOutput.push(value) },
     );
-    await runCli(
-      [
-        "query",
-        "expand",
-        session.id,
-        "--tier",
-        "web",
-        "--reason",
-        "The sources have no answer.",
-        "--root",
-        root,
-        "--json",
-      ],
-      { write: (value) => webOutput.push(value) },
-    );
+    await expect(
+      runCli(
+        [
+          "query",
+          "expand",
+          session.id,
+          "--tier",
+          "web",
+          "--reason",
+          "The sources have no answer.",
+          "--root",
+          root,
+          "--json",
+        ],
+        { write: () => undefined },
+      ),
+    ).rejects.toThrow(/web approval/i);
 
     expect(JSON.parse(sourceOutput.join(""))).toMatchObject({
       currentTier: "sources",
       tiersUsed: ["wiki", "sources"],
-    });
-    expect(JSON.parse(webOutput.join(""))).toMatchObject({
-      currentTier: "web",
-      tiersUsed: ["wiki", "sources", "web"],
     });
   });
 });

@@ -16,6 +16,7 @@ import {
   type TransactionTestOptions,
 } from "./transaction.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
+import { assertWebApproval } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
 
 const finishQueryOptionsSchema = z.object({
@@ -187,6 +188,9 @@ export async function finishQuery(
     throw new Error(
       "Semantic audit maintenance must be completed before finishing a query",
     );
+  }
+  if (session.currentTier === "web") {
+    await assertWebApproval(root, queryId);
   }
   if (
     session.currentTier === "web" &&

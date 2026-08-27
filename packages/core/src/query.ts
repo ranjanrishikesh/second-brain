@@ -9,6 +9,7 @@ import { readBrainState } from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
 import { recoverBrain } from "./transaction.js";
+import { assertWebApproval, webApprovalV1Schema } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
 
 export const querySessionV1Schema = z.object({
@@ -58,6 +59,7 @@ export const querySessionV1Schema = z.object({
       pendingSourceIds: z.array(z.string()),
     })
     .default({ required: false, pendingSourceIds: [] }),
+  webApproval: webApprovalV1Schema.optional(),
   webEvidenceSourceIds: z.array(z.string()).default([]),
   changeOperationIds: z.array(z.string()).default([]),
 });
@@ -231,6 +233,7 @@ export async function expandQuery(
     if (session.currentTier !== "sources") {
       throw new Error(`Cannot expand from ${session.currentTier} to web`);
     }
+    await assertWebApproval(root, queryId);
     session.tierAssessments.push({
       tier: "sources",
       status: "insufficient",

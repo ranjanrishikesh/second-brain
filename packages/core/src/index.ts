@@ -138,6 +138,20 @@ export type {
   BootstrapSourceContextV1,
 } from "./query.js";
 export {
+  assertWebApproval,
+  calculateQuestionHash,
+  requestWebApproval,
+  resolveWebApproval,
+  webApprovalRequestV1Schema,
+  webApprovalV1Schema,
+} from "./web-approval.js";
+export type {
+  RequestWebApprovalInput,
+  ResolveWebApprovalInput,
+  WebApprovalRequestV1,
+  WebApprovalV1,
+} from "./web-approval.js";
+export {
   scanAndRegisterSources,
   supersedeRegisteredSource,
 } from "./source-transaction.js";

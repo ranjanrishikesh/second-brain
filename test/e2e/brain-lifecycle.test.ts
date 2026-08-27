@@ -26,6 +26,8 @@ import {
   readQuerySession,
   recordSemanticAuditBatch,
   recoverBrain,
+  requestWebApproval,
+  resolveWebApproval,
   scanAndRegisterSources,
   searchBrain,
   supersedeRegisteredSource,
@@ -388,6 +390,14 @@ describe("portable second-brain fake host", () => {
     await expandQuery(root, session.id, {
       tier: "sources",
       reason: "No local page or source addresses Project Zephyr.",
+    });
+    await requestWebApproval(root, session.id, {
+      reason: "The local source catalog has no Project Zephyr evidence.",
+      hostSessionId: "e2e-fake-host",
+    });
+    await resolveWebApproval(root, session.id, {
+      approved: true,
+      decidedBy: "e2e-owner",
     });
     await expandQuery(root, session.id, {
       tier: "web",

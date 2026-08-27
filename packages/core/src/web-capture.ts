@@ -11,6 +11,7 @@ import {
 } from "./query.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import { assertWebApproval } from "./web-approval.js";
 
 const webCaptureInputSchema = z.object({
   url: z.url(),
@@ -131,6 +132,7 @@ export async function captureWebEvidence(
       "Web evidence can only be captured for an open query at the web tier",
     );
   }
+  await assertWebApproval(root, queryId);
 
   const evidenceDigest = createHash("sha256")
     .update(`${input.url}\0${input.content}`)

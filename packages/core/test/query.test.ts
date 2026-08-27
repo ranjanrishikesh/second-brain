@@ -18,6 +18,8 @@ import {
   nextBootstrapBatch,
   readBrainState,
   renderWikiPage,
+  requestWebApproval,
+  resolveWebApproval,
   scanSources,
   writeBrainState,
   type WikiPageV1,
@@ -26,6 +28,20 @@ import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
 const execFile = promisify(execFileCallback);
 const runtimeServices = { embeddings: deterministicEmbeddings({}) };
+
+async function approveWebForQuery(
+  root: string,
+  queryId: string,
+): Promise<void> {
+  await requestWebApproval(root, queryId, {
+    reason: "The local evidence is insufficient for this active question.",
+    hostSessionId: "query-test-host",
+  });
+  await resolveWebApproval(root, queryId, {
+    approved: true,
+    decidedBy: "query-test-owner",
+  });
+}
 
 async function findFileNamed(
   directory: string,
@@ -273,6 +289,7 @@ describe("query lifecycle", () => {
       tier: "sources",
       reason: "The local wiki does not cover the new survey.",
     });
+    await approveWebForQuery(root, session.id);
     await expandQuery(root, session.id, {
       tier: "web",
       reason: "The raw sources do not cover the new survey.",
@@ -326,6 +343,7 @@ describe("query lifecycle", () => {
       tier: "sources",
       reason: "The wiki does not mention Project Aurora.",
     });
+    await approveWebForQuery(root, session.id);
     await expandQuery(root, session.id, {
       tier: "web",
       reason: "Local sources do not mention Project Aurora.",
@@ -382,6 +400,7 @@ describe("query lifecycle", () => {
       tier: "sources",
       reason: "The wiki does not cover the concurrent survey.",
     });
+    await approveWebForQuery(root, session.id);
     await expandQuery(root, session.id, {
       tier: "web",
       reason: "Local sources do not cover the concurrent survey.",
