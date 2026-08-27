@@ -283,35 +283,64 @@ export async function rebuildSemanticIndex(
   services: BrainRuntimeServices = {},
 ): Promise<void> {
   const provider = resolveEmbeddingProvider(root, services);
-  const documents = await semanticDocuments(root);
-  const vectors = documents.length
-    ? await provider.embed(
-        documents.map((document) => document.text),
-        "document",
-      )
-    : [];
-  if (vectors.length !== documents.length) {
-    throw new Error(
-      "Semantic provider returned the wrong number of embeddings",
-    );
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const corpusRevision = await semanticCorpusRevision(root);
+    const documents = await semanticDocuments(root);
+    const vectors = documents.length
+      ? await provider.embed(
+          documents.map((document) => document.text),
+          "document",
+        )
+      : [];
+    if (vectors.length !== documents.length) {
+      throw new Error(
+        "Semantic provider returned the wrong number of embeddings",
+      );
+    }
+    const dimensions = vectors[0]?.length ?? 1;
+    if (vectors.some((vector) => vector.length !== dimensions)) {
+      throw new Error(
+        "Semantic provider returned embeddings with inconsistent dimensions",
+      );
+    }
+    if ((await semanticCorpusRevision(root)) !== corpusRevision) continue;
+    await writeSemanticIndex(root, {
+      version: 1,
+      corpusRevision,
+      modelId: provider.modelId,
+      modelRevision: provider.modelRevision,
+      dimensions,
+      documents: documents.map((document, index) => ({
+        ...document,
+        vector: normalizeVector(vectors[index] ?? []),
+      })),
+    });
+    if ((await semanticCorpusRevision(root)) === corpusRevision) return;
   }
-  const dimensions = vectors[0]?.length ?? 1;
-  if (vectors.some((vector) => vector.length !== dimensions)) {
-    throw new Error(
-      "Semantic provider returned embeddings with inconsistent dimensions",
-    );
+  throw new Error(
+    "Semantic corpus changed during index rebuild; retry when canonical writes are idle",
+  );
+}
+
+async function readCurrentSemanticIndex(
+  root: string,
+  provider: EmbeddingProvider,
+): Promise<SemanticIndexV1> {
+  const expectedCorpusRevision = await semanticCorpusRevision(root);
+  const index = semanticIndexV1Schema.parse(
+    JSON.parse(await readFile(cachePath(root), "utf8")),
+  );
+  if (
+    index.corpusRevision !== expectedCorpusRevision ||
+    index.modelId !== provider.modelId ||
+    index.modelRevision !== provider.modelRevision
+  ) {
+    throw new Error("Semantic index metadata is stale");
   }
-  await writeSemanticIndex(root, {
-    version: 1,
-    corpusRevision: await semanticCorpusRevision(root),
-    modelId: provider.modelId,
-    modelRevision: provider.modelRevision,
-    dimensions,
-    documents: documents.map((document, index) => ({
-      ...document,
-      vector: normalizeVector(vectors[index] ?? []),
-    })),
-  });
+  if ((await semanticCorpusRevision(root)) !== expectedCorpusRevision) {
+    throw new Error("Semantic corpus changed while reading the index");
+  }
+  return index;
 }
 
 async function loadSemanticIndex(
@@ -319,26 +348,17 @@ async function loadSemanticIndex(
   services: BrainRuntimeServices,
 ): Promise<SemanticIndexV1> {
   const provider = resolveEmbeddingProvider(root, services);
-  const expectedCorpusRevision = await semanticCorpusRevision(root);
-  const destination = cachePath(root);
-  try {
-    const index = semanticIndexV1Schema.parse(
-      JSON.parse(await readFile(destination, "utf8")),
-    );
-    if (
-      index.corpusRevision !== expectedCorpusRevision ||
-      index.modelId !== provider.modelId ||
-      index.modelRevision !== provider.modelRevision
-    ) {
-      throw new Error("Semantic index metadata is stale");
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await readCurrentSemanticIndex(root, provider);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+      await rebuildSemanticIndex(root, services);
     }
-    return index;
-  } catch {
-    await rebuildSemanticIndex(root, services);
-    return semanticIndexV1Schema.parse(
-      JSON.parse(await readFile(destination, "utf8")),
-    );
   }
+  throw lastError;
 }
 
 export async function semanticSearch(

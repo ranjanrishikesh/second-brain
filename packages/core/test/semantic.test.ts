@@ -7,6 +7,7 @@ import {
   renderWikiPage,
   scanSources,
   searchBrain,
+  semanticSearch,
   type WikiPageV1,
 } from "../src/index.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
@@ -103,5 +104,51 @@ describe("local semantic search", () => {
 
     expect(before[0]?.id).toBe(sourceId);
     expect(after).toEqual(before);
+  });
+
+  test("retries a semantic rebuild when the corpus changes during embedding", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-semantic-race-"));
+    await initBrain(root, { name: "Semantic", description: "Semantic test" });
+    const existing = page(
+      "pg_existing_semantic",
+      "Existing concept",
+      "A stable concept that is not a stellar nursery.",
+      "existing",
+    );
+    const addedDuringEmbedding = page(
+      "pg_added_during_embedding",
+      "Stellar nursery",
+      "A stellar nursery is a region where stars form.",
+      "stellar-nursery",
+    );
+    await writeFile(path.join(root, existing.path), renderWikiPage(existing));
+
+    let changedCorpus = false;
+    const results = await semanticSearch(root, "where stars form", "wiki", 10, {
+      embeddings: {
+        modelId: "test/race-aware",
+        modelRevision: "test-revision",
+        async embed(texts, role = "document") {
+          if (role === "document" && !changedCorpus) {
+            changedCorpus = true;
+            await writeFile(
+              path.join(root, addedDuringEmbedding.path),
+              renderWikiPage(addedDuringEmbedding),
+            );
+          }
+          return texts.map((text) =>
+            text.toLocaleLowerCase("en").includes("stellar nursery") ||
+            text.toLocaleLowerCase("en").includes("where stars form")
+              ? [1, 0]
+              : [0, 1],
+          );
+        },
+      },
+    });
+
+    expect(changedCorpus).toBe(true);
+    expect(results.map((result) => result.id)).toContain(
+      "pg_added_during_embedding",
+    );
   });
 });
