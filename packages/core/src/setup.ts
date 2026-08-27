@@ -58,6 +58,20 @@ export interface SetupBatchV1 {
   sources: SetupSourceContextV1[];
 }
 
+async function assertUsableBrainCharter(root: string): Promise<void> {
+  let charter: string;
+  try {
+    charter = await readFile(path.join(root, "BRAIN.md"), "utf8");
+  } catch {
+    throw new Error("BRAIN.md is required before initial setup can begin");
+  }
+  if (/replace\s+this\s+section\s+after\s+cloning/i.test(charter)) {
+    throw new Error(
+      "BRAIN.md still contains its placeholder charter; define the brain purpose before setup",
+    );
+  }
+}
+
 function toSession(setup: SetupStateV1): SetupSessionV1 {
   if (
     !setup.id ||
@@ -265,6 +279,7 @@ export async function beginSetup(
 ): Promise<SetupSessionV1> {
   const input = beginSetupInputSchema.parse(rawInput);
   await recoverBrain(root);
+  await assertUsableBrainCharter(root);
   await scanAndRegisterSources(root, testOptions);
   const existing = await readBrainState(root);
   if (existing.setup.status === "completed") {

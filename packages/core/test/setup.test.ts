@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -18,6 +18,40 @@ async function brainWithInitialSource(): Promise<string> {
 }
 
 describe("one-time brain setup", () => {
+  test("rejects a cloned placeholder charter before registering sources", async () => {
+    const root = await brainWithInitialSource();
+    await writeFile(
+      path.join(root, "BRAIN.md"),
+      "# Astronomy\n\n## Purpose\n\nReplace this section after cloning with the domain, questions, and outcomes this brain should support.\n",
+    );
+    const exports = (await import("../src/index.js")) as Record<
+      string,
+      unknown
+    >;
+    const beginSetup = exports.beginSetup as (
+      root: string,
+      input: { purpose: string },
+      services: typeof services,
+    ) => Promise<unknown>;
+    const readBrainState = exports.readBrainState as (root: string) => Promise<{
+      setup: { status: string };
+    }>;
+
+    await expect(
+      beginSetup(root, { purpose: "Astronomy concepts" }, services),
+    ).rejects.toThrow(/charter|replace this section/i);
+
+    expect((await readBrainState(root)).setup.status).toBe("not-started");
+    expect(
+      JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      ).sources,
+    ).toEqual([]);
+  });
+
   test("completes an empty initial setup without a semantic review batch", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-setup-empty-"));
     await initBrain(root, { name: "Empty brain", description: "Setup tests" });
