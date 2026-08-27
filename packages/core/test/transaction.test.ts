@@ -8,10 +8,12 @@ import { describe, expect, test } from "vitest";
 import {
   applyChangeSetTransaction,
   calculateCatalogRevision,
+  calculatePageRevision,
   doctorBrain,
   initBrain,
   loadWikiPages,
   recoverBrain,
+  renderWikiPage,
   type ChangeSetV1,
   type WikiPageV1,
 } from "../src/index.js";
@@ -22,17 +24,62 @@ async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
 }
 
-async function waitForPath(filePath: string, timeoutMs = 3_000): Promise<void> {
+async function waitForOwnedIndexLock(
+  filePath: string,
+  operationId: string,
+  timeoutMs = 3_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      await access(filePath);
-      return;
+      const marker = JSON.parse(await readFile(filePath, "utf8")) as {
+        operationId?: string;
+      };
+      if (marker.operationId === operationId) return;
     } catch {
+      // Git may briefly use its own lock while the worker is preparing.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for owned index lock ${filePath}`);
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
       await new Promise((resolve) => setTimeout(resolve, 25));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
     }
   }
-  throw new Error(`Timed out waiting for ${filePath}`);
+  throw new Error(`Timed out waiting for process ${pid} to exit`);
+}
+
+async function waitForIndexPublicationLock(
+  lockPath: string,
+  journalPath: string,
+  timeoutMs = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const journal = JSON.parse(await readFile(journalPath, "utf8")) as {
+        commitHash?: string;
+      };
+      const lock = await readFile(lockPath, "utf8");
+      if (journal.commitHash && !lock.trimStart().startsWith("{")) return;
+    } catch {
+      // Wait until the transaction has reached its publication seam.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for index publication at ${lockPath}`);
 }
 
 async function initializedGitBrain(): Promise<string> {
@@ -173,28 +220,83 @@ describe("applyChangeSetTransaction", () => {
     ).rejects.toThrow();
   });
 
-  test("does not commit a wiki file created after graph validation", async () => {
+  test("rejects an untracked wiki file created after graph validation", async () => {
     const root = await initializedGitBrain();
     const injectedPath = path.join(root, "wiki", "injected.md");
 
-    const result = await applyChangeSetTransaction(
-      root,
-      createSourcePageChangeSet("op_late_wiki_injection"),
-      {
-        beforeStage: async () => {
-          await writeFile(injectedPath, "# Private draft\n\nDo not publish.\n");
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_late_wiki_injection"),
+        {
+          beforeStage: async () => {
+            await writeFile(
+              injectedPath,
+              "# Private draft\n\nDo not publish.\n",
+            );
+          },
         },
-      },
-    );
+      ),
+    ).rejects.toThrow(/unexpected managed worktree|unvalidated/i);
 
-    if (!result.commit) throw new Error("Expected a managed commit");
-    expect(
-      await git(root, ["show", "--format=", "--name-only", result.commit]),
-    ).not.toContain("wiki/injected.md");
-    expect(await readFile(injectedPath, "utf8")).toContain("Private draft");
-    expect(
-      await git(root, ["status", "--short", "--", "wiki/injected.md"]),
-    ).toBe("?? wiki/injected.md");
+    await expect(readFile(injectedPath, "utf8")).rejects.toThrow();
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a valid page overwrite between graph validation and private staging", async () => {
+    const root = await initializedGitBrain();
+    const options = {
+      afterMutation: async () => {
+        const [page] = await loadWikiPages(root);
+        if (!page) throw new Error("Expected the validated source page");
+        const injected = {
+          ...page,
+          summary: "Injected page summary that was never reconciled.",
+          body: "# Orbits source\n\nInjected but structurally valid content.",
+        };
+        injected.revision = calculatePageRevision(injected);
+        await writeFile(
+          path.join(root, injected.path),
+          renderWikiPage(injected),
+        );
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_post_validation_overwrite"),
+        options,
+      ),
+    ).rejects.toThrow(/changed after graph validation|unvalidated/i);
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a generated wiki log overwrite between mutation and private staging", async () => {
+    const root = await initializedGitBrain();
+    const logPath = path.join(root, "wiki", "log.md");
+    const beforeLog = await readFile(logPath, "utf8");
+    const options = {
+      afterMutation: async () => {
+        await writeFile(
+          logPath,
+          "# Operation Log\n\nInjected operation that was never validated.\n",
+        );
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_post_mutation_log_overwrite"),
+        options,
+      ),
+    ).rejects.toThrow(/changed after graph validation|unvalidated/i);
+    expect(await readFile(logPath, "utf8")).toBe(beforeLog);
   });
 
   test("refuses a pre-commit hook that stages an unrelated file", async () => {
@@ -468,12 +570,10 @@ describe("applyChangeSetTransaction", () => {
 
     try {
       const indexLock = path.join(root, ".git", "index.lock");
-      await waitForPath(indexLock);
-      const exited = new Promise<void>((resolve) =>
-        worker.once("exit", () => resolve()),
-      );
+      await waitForOwnedIndexLock(indexLock, "op_hard_crash_index_lock");
       worker.kill("SIGKILL");
-      await exited;
+      if (!worker.pid) throw new Error("Hard-crash worker has no process ID");
+      await waitForProcessExit(worker.pid);
       await expect(access(indexLock)).resolves.toBeUndefined();
     } finally {
       if (!worker.killed) worker.kill("SIGKILL");
@@ -495,6 +595,54 @@ describe("applyChangeSetTransaction", () => {
     });
   });
 
+  test("recovers an owned binary index lock after a hard crash during publication", async () => {
+    const root = await initializedGitBrain();
+    const workerPath = path.join(root, "hard-crash-publication-worker.mts");
+    const coreEntry = new URL("../src/index.ts", import.meta.url).href;
+    const changeSet = createSourcePageChangeSet("op_hard_crash_index_publish");
+    await writeFile(
+      workerPath,
+      `import { applyChangeSetTransaction } from ${JSON.stringify(coreEntry)};\nconst root = process.argv.at(-1);\nif (!root) throw new Error("missing root");\nawait applyChangeSetTransaction(root, ${JSON.stringify(changeSet)}, { afterIndexCopy: async () => new Promise(() => {}) });\n`,
+    );
+    const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const workspaceRoot = path.resolve(testDirectory, "../../..");
+    const tsxLoader = path.join(
+      workspaceRoot,
+      "node_modules",
+      "tsx",
+      "dist",
+      "loader.mjs",
+    );
+    const worker = spawn(
+      process.execPath,
+      ["--import", tsxLoader, workerPath, root],
+      { cwd: root, stdio: "ignore" },
+    );
+    const indexLock = path.join(root, ".git", "index.lock");
+    const journalPath = path.join(
+      root,
+      ".brain",
+      "runtime",
+      "transaction.json",
+    );
+
+    try {
+      await waitForIndexPublicationLock(indexLock, journalPath);
+      worker.kill("SIGKILL");
+      if (!worker.pid) throw new Error("Hard-crash worker has no process ID");
+      await waitForProcessExit(worker.pid);
+      await expect(access(indexLock)).resolves.toBeUndefined();
+    } finally {
+      if (!worker.killed) worker.kill("SIGKILL");
+    }
+
+    expect(await recoverBrain(root)).toBe("committed");
+    await expect(access(indexLock)).rejects.toThrow();
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
   test("does not remove an index lock owned by another operation during recovery", async () => {
     const root = await initializedGitBrain();
     await expect(
@@ -511,6 +659,7 @@ describe("applyChangeSetTransaction", () => {
         version: 1,
         operationId: "op_someone_else",
         pid: process.pid,
+        token: "00000000-0000-4000-8000-000000000001",
       })}\n`,
     );
     const journalPath = path.join(

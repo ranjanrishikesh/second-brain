@@ -1,4 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   access,
   copyFile,
@@ -8,6 +10,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -91,8 +94,12 @@ export interface TransactionTestOptions {
   simulateIndexPublishFailure?: boolean;
   /** Runs immediately before managed files are staged; used for deterministic race tests. */
   beforeStage?: () => Promise<void> | void;
+  /** Runs after a mutation completes and before its private index is staged. */
+  afterMutation?: () => Promise<void> | void;
   /** Runs only after this transaction owns the ordinary Git index lock. */
   afterIndexLock?: () => Promise<void> | void;
+  /** Runs after the private index replaces the owned lock but before rename. */
+  afterIndexCopy?: () => Promise<void> | void;
 }
 
 export interface ApplyTransactionOptions extends TransactionTestOptions {
@@ -162,6 +169,15 @@ const transactionJournalSchema = z.object({
   indexPublished: z.boolean().optional(),
   /** The exact standard Git lock that this journal is authorized to recover. */
   gitIndexLockPath: z.string().min(1).optional(),
+  /** Independent identity for a lock whose contents may become binary index bytes. */
+  gitIndexLock: z
+    .object({
+      path: z.string().min(1),
+      token: z.string().uuid(),
+      device: z.string().min(1),
+      inode: z.string().min(1),
+    })
+    .optional(),
   canonicalCommitComplete: z.boolean().optional(),
 });
 
@@ -177,6 +193,7 @@ const gitIndexLockSchema = z.object({
   version: z.literal(1),
   operationId: z.string().regex(/^op_[a-z0-9_-]{3,96}$/),
   pid: z.number().int().positive(),
+  token: z.string().uuid(),
 });
 
 const trackedBrainFiles = [
@@ -227,6 +244,9 @@ interface HeldGitIndexLock {
   indexPath: string;
   lockPath: string;
   operationId: string;
+  token: string;
+  device: string;
+  inode: string;
 }
 
 async function gitIndexPath(root: string): Promise<string> {
@@ -240,11 +260,12 @@ async function holdGitIndexLock(
 ): Promise<HeldGitIndexLock> {
   const indexPath = await gitIndexPath(root);
   const lockPath = `${indexPath}.lock`;
+  const token = randomUUID();
   try {
     await mkdir(path.dirname(lockPath), { recursive: true });
     await writeFile(
       lockPath,
-      `${JSON.stringify({ version: 1, operationId, pid: process.pid })}\n`,
+      `${JSON.stringify({ version: 1, operationId, pid: process.pid, token })}\n`,
       { flag: "wx" },
     );
   } catch (error) {
@@ -255,7 +276,15 @@ async function holdGitIndexLock(
     }
     throw error;
   }
-  return { indexPath, lockPath, operationId };
+  const lockStat = await stat(lockPath);
+  return {
+    indexPath,
+    lockPath,
+    operationId,
+    token,
+    device: String(lockStat.dev),
+    inode: String(lockStat.ino),
+  };
 }
 
 async function releaseGitIndexLock(
@@ -278,14 +307,30 @@ async function releaseGitIndexLock(
       "The Git index lock belongs to another operation; recovery is required",
     );
   }
+  if (owned.token !== lock.token) {
+    throw new Error(
+      "The Git index lock token changed before it could be released; recovery is required",
+    );
+  }
+  const lockStat = await stat(lock.lockPath);
+  if (
+    String(lockStat.dev) !== lock.device ||
+    String(lockStat.ino) !== lock.inode
+  ) {
+    throw new Error(
+      "The Git index lock identity changed before it could be released; recovery is required",
+    );
+  }
   await rm(lock.lockPath);
 }
 
 async function publishHeldGitIndex(
   isolatedIndexPath: string,
   lock: HeldGitIndexLock,
+  afterCopy?: () => Promise<void> | void,
 ): Promise<void> {
   await copyFile(isolatedIndexPath, lock.lockPath);
+  await afterCopy?.();
   await rename(lock.lockPath, lock.indexPath);
 }
 
@@ -300,12 +345,27 @@ async function runPreCommitHook(
   );
 }
 
+function recordGitIndexLockOwnership(
+  journal: TransactionJournal,
+  lock: HeldGitIndexLock,
+): void {
+  journal.gitIndexLockPath = lock.lockPath;
+  journal.gitIndexLock = {
+    path: lock.lockPath,
+    token: lock.token,
+    device: lock.device,
+    inode: lock.inode,
+  };
+}
+
 async function publishRecoveredIsolatedIndex(
   root: string,
   transactionPath: string,
   preHead: string,
   commitHash: string,
   operationId: string,
+  journalPath: string,
+  journal: TransactionJournal,
 ): Promise<void> {
   const isolatedIndexPath = path.join(transactionPath, "git-index");
   if (!(await pathExists(isolatedIndexPath))) {
@@ -325,6 +385,8 @@ async function publishRecoveredIsolatedIndex(
   const validationIndexPath = path.join(transactionPath, "recovery-index");
   try {
     indexLock = await holdGitIndexLock(root, operationId);
+    recordGitIndexLockOwnership(journal, indexLock);
+    await writeJournal(journalPath, journal);
     // `write-tree` may update index extensions, so inspect a copy while the
     // shared index lock prevents a concurrent caller from changing it.
     await copyFile(indexLock.indexPath, validationIndexPath);
@@ -422,6 +484,7 @@ async function removeOwnedGitIndexLock(
   root: string,
   operationId: string,
   declaredLockPath?: string,
+  ownership?: NonNullable<TransactionJournal["gitIndexLock"]>,
 ): Promise<void> {
   const expectedLockPath = `${await gitIndexPath(root)}.lock`;
   if (
@@ -430,7 +493,26 @@ async function removeOwnedGitIndexLock(
   ) {
     throw new Error("Unsafe Git index lock path in recovery journal");
   }
+  if (
+    ownership &&
+    path.resolve(ownership.path) !== path.resolve(expectedLockPath)
+  ) {
+    throw new Error("Unsafe Git index lock ownership path in recovery journal");
+  }
   if (!(await pathExists(expectedLockPath))) return;
+  if (ownership) {
+    const lockStat = await stat(expectedLockPath);
+    if (
+      String(lockStat.dev) !== ownership.device ||
+      String(lockStat.ino) !== ownership.inode
+    ) {
+      throw new Error(
+        "Git index lock identity changed after the interrupted transaction; manual Git recovery is required",
+      );
+    }
+    await rm(expectedLockPath);
+    return;
+  }
   let marker: z.infer<typeof gitIndexLockSchema>;
   try {
     marker = gitIndexLockSchema.parse(
@@ -513,6 +595,110 @@ async function assertPrivateIndexMatchesWorktree(
   }
 }
 
+interface ManagedFileFingerprint {
+  relativePath: string;
+  exists: boolean;
+  bytes?: number;
+  sha256?: string;
+}
+
+async function fingerprintManagedFile(
+  root: string,
+  relativePath: string,
+): Promise<ManagedFileFingerprint> {
+  try {
+    const hash = createHash("sha256");
+    let bytes = 0;
+    for await (const chunk of createReadStream(path.join(root, relativePath))) {
+      bytes += chunk.byteLength;
+      hash.update(chunk);
+    }
+    return {
+      relativePath,
+      exists: true,
+      bytes,
+      sha256: hash.digest("hex"),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { relativePath, exists: false };
+    }
+    throw error;
+  }
+}
+
+async function fingerprintManagedFiles(
+  root: string,
+  stagePaths: string[],
+): Promise<ManagedFileFingerprint[]> {
+  return Promise.all(
+    [...stagePaths]
+      .sort()
+      .map((relativePath) => fingerprintManagedFile(root, relativePath)),
+  );
+}
+
+async function assertManagedFilesAreSealed(
+  root: string,
+  sealedFiles: ManagedFileFingerprint[],
+): Promise<void> {
+  const actual = await fingerprintManagedFiles(
+    root,
+    sealedFiles.map((file) => file.relativePath),
+  );
+  if (JSON.stringify(actual) !== JSON.stringify(sealedFiles)) {
+    throw new Error(
+      "Managed canonical files changed after graph validation; refusing to commit an unvalidated tree",
+    );
+  }
+}
+
+async function changedCanonicalWorktreePaths(root: string): Promise<string[]> {
+  const { stdout } = await execFile(
+    "git",
+    [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--",
+      "wiki",
+      ...trackedBrainFiles,
+    ],
+    { cwd: root, encoding: "buffer" },
+  );
+  const records = stdout.toString("utf8").split("\0");
+  const paths = new Set<string>();
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+    const status = record.slice(0, 2);
+    const relativePath = record.slice(3);
+    if (relativePath) paths.add(relativePath);
+    if (status.includes("R") || status.includes("C")) {
+      const originalPath = records[index + 1];
+      if (originalPath) paths.add(originalPath);
+      index += 1;
+    }
+  }
+  return [...paths].sort();
+}
+
+async function assertNoUnexpectedCanonicalWorktreeChanges(
+  root: string,
+  stagePaths: string[],
+): Promise<void> {
+  const allowedPaths = new Set(stagePaths);
+  const unexpected = (await changedCanonicalWorktreePaths(root)).filter(
+    (relativePath) => !allowedPaths.has(relativePath),
+  );
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Unexpected managed worktree path after graph validation: ${unexpected.join(", ")}`,
+    );
+  }
+}
+
 function zeroDelimitedPaths(value: string): string[] {
   return value.split("\0").filter(Boolean);
 }
@@ -570,6 +756,8 @@ export interface CanonicalMutationResult<T> {
     /** The transaction's private index when Git is enabled. */
     indexPath?: string;
   }) => Promise<void>;
+  /** Re-checks mutation-specific expected canonical data after private staging. */
+  verifySealedState?: () => Promise<void>;
 }
 
 export interface CanonicalWriteOptions<T> {
@@ -664,6 +852,11 @@ export async function runCanonicalWrite<T>(
 
     const mutation = await mutate();
     stagePaths = safeStagePaths(root, mutation.stagePaths);
+    // Capture every file produced by the mutation before any external seam.
+    // This protects generated Markdown, state, and logs as well as page data.
+    const sealedFiles = await fingerprintManagedFiles(root, stagePaths);
+    await options.testOptions?.afterMutation?.();
+    await assertManagedFilesAreSealed(root, sealedFiles);
     journal.stagePaths = stagePaths;
     // New transactions never write the caller's Git index. Older journals use
     // preexistingIndexPaths during recovery and remain backward-compatible.
@@ -691,6 +884,8 @@ export async function runCanonicalWrite<T>(
           "Git staged changes appeared during the canonical write; refusing to commit",
         );
       }
+      await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
+      await assertManagedFilesAreSealed(root, sealedFiles);
       let indexLock: HeldGitIndexLock | undefined;
       try {
         // Build the complete transaction tree before yielding to anything
@@ -708,6 +903,16 @@ export async function runCanonicalWrite<T>(
           isolatedIndexPath,
           stagePaths,
         );
+        await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
+        await assertManagedFilesAreSealed(root, sealedFiles);
+        await mutation.verifySealedState?.();
+        await assertPrivateIndexMatchesWorktree(
+          root,
+          isolatedIndexPath,
+          stagePaths,
+        );
+        await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
+        await assertManagedFilesAreSealed(root, sealedFiles);
         const validatedTree = await privateIndexTree(root, isolatedIndexPath);
 
         // This deterministic seam represents work that can occur after the
@@ -719,15 +924,20 @@ export async function runCanonicalWrite<T>(
             "Git staged changes appeared during the canonical write; refusing to commit",
           );
         }
+        await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
         await mutation.verifyBeforeCommit?.({
           gitRepository: true,
           indexPath: isolatedIndexPath,
         });
+        await assertManagedFilesAreSealed(root, sealedFiles);
         await assertPrivateIndexMatchesWorktree(
           root,
           isolatedIndexPath,
           stagePaths,
         );
+        await mutation.verifySealedState?.();
+        await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
+        await assertManagedFilesAreSealed(root, sealedFiles);
         await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
         if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
           throw new Error("Git HEAD changed during the canonical write");
@@ -739,6 +949,8 @@ export async function runCanonicalWrite<T>(
         journal.gitIndexLockPath = `${await gitIndexPath(root)}.lock`;
         await writeJournal(journalPath, journal);
         indexLock = await holdGitIndexLock(root, options.operationId);
+        recordGitIndexLockOwnership(journal, indexLock);
+        await writeJournal(journalPath, journal);
         await options.testOptions?.afterIndexLock?.();
         if (await hasStagedChanges(root)) {
           throw new Error(
@@ -758,6 +970,9 @@ export async function runCanonicalWrite<T>(
           isolatedIndexPath,
           stagePaths,
         );
+        await mutation.verifySealedState?.();
+        await assertNoUnexpectedCanonicalWorktreeChanges(root, stagePaths);
+        await assertManagedFilesAreSealed(root, sealedFiles);
         await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
         const commitMessage =
           typeof options.commitMessage === "function"
@@ -790,7 +1005,11 @@ export async function runCanonicalWrite<T>(
         if (options.testOptions?.simulateIndexPublishFailure) {
           throw new Error("Simulated private Git index publication failure");
         }
-        await publishHeldGitIndex(isolatedIndexPath, indexLock);
+        await publishHeldGitIndex(
+          isolatedIndexPath,
+          indexLock,
+          options.testOptions?.afterIndexCopy,
+        );
         indexLock = undefined;
         journal.indexPublished = true;
         await writeJournal(journalPath, journal);
@@ -801,6 +1020,8 @@ export async function runCanonicalWrite<T>(
     } else {
       await options.testOptions?.beforeStage?.();
       await mutation.verifyBeforeCommit?.({ gitRepository: false });
+      await mutation.verifySealedState?.();
+      await assertManagedFilesAreSealed(root, sealedFiles);
       committed = true;
     }
     journal.canonicalCommitComplete = true;
@@ -1146,6 +1367,14 @@ export async function applyChangeSetTransaction(
             ...trackedBrainFiles,
           ]),
         ],
+        verifySealedState: async () => {
+          const sealedPages = await loadWikiPages(root);
+          if (JSON.stringify(sealedPages) !== JSON.stringify(proposedPages)) {
+            throw new Error(
+              "Canonical wiki pages changed after graph validation; refusing an unvalidated mutation",
+            );
+          }
+        },
       };
     },
   );
@@ -1221,11 +1450,12 @@ export async function recoverBrain(
   }
   safeStagePaths(root, journal.stagePaths ?? []);
   const gitRepository = journal.gitRepository ?? true;
-  if (gitRepository && journal.gitIndexLockPath) {
+  if (gitRepository && (journal.gitIndexLockPath || journal.gitIndexLock)) {
     await removeOwnedGitIndexLock(
       root,
       journal.operationId,
       journal.gitIndexLockPath,
+      journal.gitIndexLock,
     );
   }
   const head = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
@@ -1273,6 +1503,8 @@ export async function recoverBrain(
       journal.preHead,
       journal.commitHash,
       journal.operationId,
+      journalPath,
+      journal,
     );
     journal.indexPublished = true;
     await writeJournal(journalPath, journal);
