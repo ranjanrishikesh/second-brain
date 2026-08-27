@@ -1,8 +1,8 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
@@ -13,43 +13,73 @@ import {
   type TransactionTestOptions,
 } from "./transaction.js";
 
-const execFile = promisify(execFileCallback);
-
-function sha256(content: Uint8Array): string {
-  return createHash("sha256").update(content).digest("hex");
+interface SourceDigest {
+  bytes: number;
+  sha256: string;
 }
 
-async function registeredSourceBytes(
+interface SourceVerificationContext {
+  gitRepository: boolean;
+  indexPath?: string;
+}
+
+async function digestStream(
+  content: AsyncIterable<Uint8Array>,
+): Promise<SourceDigest> {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of content) {
+    bytes += chunk.byteLength;
+    hash.update(chunk);
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
+
+async function stagedSourceDigest(
   root: string,
   source: SourceRecordV1,
-  staged: boolean,
-): Promise<Uint8Array> {
-  if (!staged) return readFile(path.join(root, source.path));
-  const { stdout } = await execFile("git", ["show", `:${source.path}`], {
+  indexPath: string | undefined,
+): Promise<SourceDigest> {
+  const child = spawn("git", ["show", `:${source.path}`], {
     cwd: root,
-    encoding: "buffer",
+    ...(indexPath
+      ? { env: { ...process.env, GIT_INDEX_FILE: indexPath } }
+      : {}),
   });
-  return stdout;
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-4_096);
+  });
+  const digest = digestStream(child.stdout);
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  const result = await digest;
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || "Git could not read the staged source");
+  }
+  return result;
 }
 
 async function assertAddedSourcesAreStable(
   root: string,
   sources: readonly SourceRecordV1[],
-  staged: boolean,
+  context: SourceVerificationContext,
 ): Promise<void> {
   for (const source of sources) {
-    let content: Uint8Array;
+    let digest: SourceDigest;
     try {
-      content = await registeredSourceBytes(root, source, staged);
+      digest = context.gitRepository
+        ? await stagedSourceDigest(root, source, context.indexPath)
+        : await digestStream(createReadStream(path.join(root, source.path)));
     } catch {
       throw new Error(
         `Source changed while registering ${source.path}; retry after its bytes are stable`,
       );
     }
-    if (
-      content.byteLength !== source.bytes ||
-      sha256(content) !== source.sha256
-    ) {
+    if (digest.bytes !== source.bytes || digest.sha256 !== source.sha256) {
       throw new Error(
         `Source changed while registering ${source.path}; retry after its bytes are stable`,
       );
@@ -178,8 +208,8 @@ export async function scanAndRegisterSources(
           ...result.added.map((source) => source.path),
           ...canonicalPaths,
         ],
-        verifyBeforeCommit: async (gitRepository) =>
-          assertAddedSourcesAreStable(root, result.added, gitRepository),
+        verifyBeforeCommit: async (context) =>
+          assertAddedSourcesAreStable(root, result.added, context),
       };
     },
   );

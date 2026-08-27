@@ -117,6 +117,32 @@ describe("applyChangeSetTransaction", () => {
     );
   });
 
+  test("refuses staging that appears while preparing a managed commit", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    await writeFile(path.join(root, "private-draft.txt"), "do not commit\n");
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_concurrent_user_stage"),
+        {
+          beforeStage: async () => {
+            await git(root, ["add", "private-draft.txt"]);
+          },
+        },
+      ),
+    ).rejects.toThrow(/staged changes/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(
+      await git(root, ["status", "--short", "--", "private-draft.txt"]),
+    ).toBe("A  private-draft.txt");
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+  });
+
   test("restores canonical files and HEAD after whole-graph validation fails", async () => {
     const root = await initializedGitBrain();
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);
@@ -307,6 +333,32 @@ describe("applyChangeSetTransaction", () => {
     );
   });
 
+  test("recovers a commit whose private index was not published", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_index_publish_failure"),
+        { simulateIndexPublishFailure: true },
+      ),
+    ).rejects.toThrow(/commit completed.*recovery/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).not.toBe(beforeHead);
+    await expect(
+      readFile(
+        path.join(root, ".brain", "runtime", "transaction.json"),
+        "utf8",
+      ),
+    ).resolves.toContain("op_index_publish_failure");
+
+    await expect(recoverBrain(root)).resolves.toBe("committed");
+    expect(await git(root, ["status", "--short", "--", "wiki", ".brain"])).toBe(
+      "",
+    );
+  });
+
   test("preserves recovery material when rollback itself fails", async () => {
     const root = await initializedGitBrain();
     const invalid = sourcePage();
@@ -388,6 +440,15 @@ describe("applyChangeSetTransaction", () => {
         ),
       ).rejects.toThrow("Simulated transaction crash");
 
+      expect(await git(root, ["diff", "--cached", "--name-only"])).toBe("");
+      if (phase === "files-applied") {
+        await expect(
+          readFile(
+            path.join(root, ".brain", "runtime", "transaction.json"),
+            "utf8",
+          ),
+        ).resolves.toContain('"isolatedIndex": true');
+      }
       expect(await recoverBrain(root)).toBe("restored");
       expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
       expect(

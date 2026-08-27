@@ -1,6 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import {
   access,
+  copyFile,
   cp,
   mkdir,
   readFile,
@@ -82,6 +83,8 @@ export interface TransactionTestOptions {
   simulateHeadMovementBeforeCommit?: boolean;
   /** Simulates a rollback failure after a canonical mutation has failed. */
   simulateRollbackFailure?: boolean;
+  /** Simulates a failure after the commit ref moves but before its index is published. */
+  simulateIndexPublishFailure?: boolean;
   /** Runs immediately before managed files are staged; used for deterministic race tests. */
   beforeStage?: () => Promise<void> | void;
 }
@@ -147,6 +150,10 @@ const transactionJournalSchema = z.object({
   gitRepository: z.boolean().optional(),
   stagePaths: z.array(z.string()).optional(),
   preexistingIndexPaths: z.array(z.string()).optional(),
+  /** New transactions build a private Git index and never mutate the shared one. */
+  isolatedIndex: z.boolean().optional(),
+  /** The private index has been atomically published as the repository index. */
+  indexPublished: z.boolean().optional(),
   canonicalCommitComplete: z.boolean().optional(),
 });
 
@@ -164,8 +171,21 @@ const trackedBrainFiles = [
   ".brain/operations.jsonl",
 ] as const;
 
-async function git(root: string, args: string[]): Promise<string> {
-  return (await execFile("git", args, { cwd: root })).stdout.trim();
+function gitEnvironment(indexPath?: string): NodeJS.ProcessEnv | undefined {
+  return indexPath ? { ...process.env, GIT_INDEX_FILE: indexPath } : undefined;
+}
+
+async function git(
+  root: string,
+  args: string[],
+  indexPath?: string,
+): Promise<string> {
+  return (
+    await execFile("git", args, {
+      cwd: root,
+      ...(indexPath ? { env: gitEnvironment(indexPath) } : {}),
+    })
+  ).stdout.trim();
 }
 
 async function isGitRepository(root: string): Promise<boolean> {
@@ -186,6 +206,107 @@ async function hasStagedChanges(root: string): Promise<boolean> {
   } catch (error) {
     if ((error as { code?: number }).code === 1) return true;
     throw error;
+  }
+}
+
+interface HeldGitIndexLock {
+  indexPath: string;
+  lockPath: string;
+}
+
+async function gitIndexPath(root: string): Promise<string> {
+  const configuredPath = await git(root, ["rev-parse", "--git-path", "index"]);
+  return path.resolve(root, configuredPath);
+}
+
+async function holdGitIndexLock(root: string): Promise<HeldGitIndexLock> {
+  const indexPath = await gitIndexPath(root);
+  const lockPath = `${indexPath}.lock`;
+  try {
+    await mkdir(path.dirname(lockPath), { recursive: true });
+    await writeFile(lockPath, "", { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(
+        "Git index is busy; retry the canonical write after the other Git operation finishes",
+      );
+    }
+    throw error;
+  }
+  return { indexPath, lockPath };
+}
+
+async function releaseGitIndexLock(
+  lock: HeldGitIndexLock | undefined,
+): Promise<void> {
+  if (lock) await rm(lock.lockPath, { force: true });
+}
+
+async function publishHeldGitIndex(
+  isolatedIndexPath: string,
+  lock: HeldGitIndexLock,
+): Promise<void> {
+  await copyFile(isolatedIndexPath, lock.lockPath);
+  await rename(lock.lockPath, lock.indexPath);
+}
+
+async function runPreCommitHook(
+  root: string,
+  isolatedIndexPath: string,
+): Promise<void> {
+  await git(
+    root,
+    ["hook", "run", "--ignore-missing", "pre-commit"],
+    isolatedIndexPath,
+  );
+}
+
+async function publishRecoveredIsolatedIndex(
+  root: string,
+  transactionPath: string,
+  preHead: string,
+  commitHash: string,
+): Promise<void> {
+  const isolatedIndexPath = path.join(transactionPath, "git-index");
+  if (!(await pathExists(isolatedIndexPath))) {
+    throw new Error(
+      "The private Git index needed to finish recovery is missing; manual Git recovery is required",
+    );
+  }
+  const expectedTransactionPath = path.resolve(transactionPath);
+  if (
+    path.resolve(isolatedIndexPath) !==
+    path.join(expectedTransactionPath, "git-index")
+  ) {
+    throw new Error("Unsafe private Git index path in recovery");
+  }
+
+  let indexLock: HeldGitIndexLock | undefined;
+  const validationIndexPath = path.join(transactionPath, "recovery-index");
+  try {
+    indexLock = await holdGitIndexLock(root);
+    // `write-tree` may update index extensions, so inspect a copy while the
+    // shared index lock prevents a concurrent caller from changing it.
+    await copyFile(indexLock.indexPath, validationIndexPath);
+    const currentTree = await git(root, ["write-tree"], validationIndexPath);
+    const preHeadTree = await git(root, ["rev-parse", `${preHead}^{tree}`]);
+    const commitTree = await git(root, ["rev-parse", `${commitHash}^{tree}`]);
+    if (currentTree === commitTree) return;
+    if (currentTree !== preHeadTree) {
+      throw new Error(
+        "Git staged changes appeared before recovery could publish its private index",
+      );
+    }
+    if ((await git(root, ["write-tree"], isolatedIndexPath)) !== commitTree) {
+      throw new Error(
+        "The private Git index does not match the committed transaction tree",
+      );
+    }
+    await publishHeldGitIndex(isolatedIndexPath, indexLock);
+    indexLock = undefined;
+  } finally {
+    await releaseGitIndexLock(indexLock);
+    await rm(validationIndexPath, { force: true });
   }
 }
 
@@ -324,7 +445,11 @@ export interface CanonicalMutationResult<T> {
   value: T;
   stagePaths: string[];
   /** Verifies immutable inputs after staging, or before completion outside Git. */
-  verifyBeforeCommit?: (gitRepository: boolean) => Promise<void>;
+  verifyBeforeCommit?: (context: {
+    gitRepository: boolean;
+    /** The transaction's private index when Git is enabled. */
+    indexPath?: string;
+  }) => Promise<void>;
 }
 
 export interface CanonicalWriteOptions<T> {
@@ -390,9 +515,10 @@ export async function runCanonicalWrite<T>(
     { flag: "wx" },
   );
   let committed = false;
+  let headUpdated = false;
   let stagePaths: string[] = [];
-  let preexistingIndexPaths: string[] = [];
   let snapshotPrepared = false;
+  let journal: TransactionJournal | undefined;
   try {
     const preHead = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
     await mkdir(transactionRoot, { recursive: true });
@@ -404,7 +530,7 @@ export async function runCanonicalWrite<T>(
     await mkdir(transactionPath);
     await copyBrainSnapshot(root, backupPath);
     snapshotPrepared = true;
-    const journal: TransactionJournal = {
+    journal = {
       version: 1,
       operationId: options.operationId,
       phase: "prepared",
@@ -419,10 +545,9 @@ export async function runCanonicalWrite<T>(
     const mutation = await mutate();
     stagePaths = safeStagePaths(root, mutation.stagePaths);
     journal.stagePaths = stagePaths;
-    preexistingIndexPaths = gitRepository
-      ? await indexedPaths(root, stagePaths)
-      : [];
-    journal.preexistingIndexPaths = preexistingIndexPaths;
+    // New transactions never write the caller's Git index. Older journals use
+    // preexistingIndexPaths during recovery and remain backward-compatible.
+    journal.isolatedIndex = gitRepository;
     journal.phase = "files-applied";
     await writeJournal(journalPath, journal);
     simulateCrash(options.testOptions ?? {}, "files-applied");
@@ -443,30 +568,82 @@ export async function runCanonicalWrite<T>(
       }
       if (await hasStagedChanges(root)) {
         throw new Error(
-          "Git index changed during the canonical write; refusing to commit",
+          "Git staged changes appeared during the canonical write; refusing to commit",
         );
       }
       await options.testOptions?.beforeStage?.();
-      await git(root, ["add", "--", ...stagePaths]);
-      await mutation.verifyBeforeCommit?.(true);
-      if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
-        throw new Error("Git HEAD changed during the canonical write");
+      if (await hasStagedChanges(root)) {
+        throw new Error(
+          "Git staged changes appeared during the canonical write; refusing to commit",
+        );
       }
-      const commitMessage =
-        typeof options.commitMessage === "function"
-          ? options.commitMessage(mutation.value)
-          : options.commitMessage;
-      await git(root, [
-        "commit",
-        "-m",
-        `${commitMessage}\n\nBrain-Managed: true\nBrain-Operation: ${options.operationId}`,
-      ]);
-      commit = await git(root, ["rev-parse", "HEAD"]);
-      committed = true;
-      journal.commitHash = commit;
+
+      let indexLock: HeldGitIndexLock | undefined;
+      try {
+        // Hold the ordinary index lock before checking it again. This closes
+        // the gap where a user starts staging after the check but before we
+        // publish the transaction's index.
+        indexLock = await holdGitIndexLock(root);
+        if (await hasStagedChanges(root)) {
+          throw new Error(
+            "Git staged changes appeared during the canonical write; refusing to commit",
+          );
+        }
+
+        const isolatedIndexPath = path.join(transactionPath, "git-index");
+        await git(root, ["read-tree", preHead], isolatedIndexPath);
+        await git(root, ["add", "--", ...stagePaths], isolatedIndexPath);
+        await mutation.verifyBeforeCommit?.({
+          gitRepository: true,
+          indexPath: isolatedIndexPath,
+        });
+        if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
+          throw new Error("Git HEAD changed during the canonical write");
+        }
+        await runPreCommitHook(root, isolatedIndexPath);
+        const tree = await git(root, ["write-tree"], isolatedIndexPath);
+        const commitMessage =
+          typeof options.commitMessage === "function"
+            ? options.commitMessage(mutation.value)
+            : options.commitMessage;
+        const messagePath = path.join(transactionPath, "commit-message.txt");
+        await writeFile(
+          messagePath,
+          `${commitMessage}\n\nBrain-Managed: true\nBrain-Operation: ${options.operationId}\n`,
+          "utf8",
+        );
+        commit = await git(
+          root,
+          ["commit-tree", tree, "-p", preHead, "-F", messagePath],
+          isolatedIndexPath,
+        );
+        // Persist the hash before moving the branch so an interrupted CAS can
+        // always identify and finish (or reject) its private-index recovery.
+        journal.commitHash = commit;
+        await writeJournal(journalPath, journal);
+        const headRef = await git(root, ["symbolic-ref", "--quiet", "HEAD"]);
+        await git(root, ["update-ref", headRef, commit, preHead]);
+        headUpdated = true;
+
+        // The shared index was clean when its lock was acquired, so replacing
+        // it with the private transaction index is safe and leaves the worktree
+        // clean against the newly published commit. A concurrent `git add`
+        // either completed before the final check (and was refused) or cannot
+        // write while this lock exists.
+        if (options.testOptions?.simulateIndexPublishFailure) {
+          throw new Error("Simulated private Git index publication failure");
+        }
+        await publishHeldGitIndex(isolatedIndexPath, indexLock);
+        indexLock = undefined;
+        journal.indexPublished = true;
+        await writeJournal(journalPath, journal);
+        committed = true;
+      } finally {
+        await releaseGitIndexLock(indexLock);
+      }
     } else {
       await options.testOptions?.beforeStage?.();
-      await mutation.verifyBeforeCommit?.(false);
+      await mutation.verifyBeforeCommit?.({ gitRepository: false });
       committed = true;
     }
     journal.canonicalCommitComplete = true;
@@ -505,14 +682,34 @@ export async function runCanonicalWrite<T>(
       ).catch(() => undefined);
       throw error;
     }
+    if (headUpdated && snapshotPrepared) {
+      await writeFile(
+        lockPath,
+        `${JSON.stringify({
+          pid: process.pid,
+          operationId: options.operationId,
+          recoverable: true,
+        })}\n`,
+        "utf8",
+      ).catch(() => undefined);
+      throw new Error(
+        `Canonical commit completed but recovery is required for ${options.operationId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     if (!committed && snapshotPrepared) {
       try {
         if (options.testOptions?.simulateRollbackFailure) {
           throw new Error("Simulated rollback failure");
         }
         await restoreBrainSnapshot(root, backupPath);
-        if (gitRepository && stagePaths.length > 0) {
-          await restoreStagedIndex(root, stagePaths, preexistingIndexPaths);
+        if (gitRepository && stagePaths.length > 0 && !journal?.isolatedIndex) {
+          await restoreStagedIndex(
+            root,
+            stagePaths,
+            journal?.preexistingIndexPaths ?? [],
+          );
         }
       } catch (rollbackError) {
         await writeFile(
@@ -877,9 +1074,34 @@ export async function recoverBrain(
     transactionCommitExists = matchingCommits.length > 0;
   }
   const outcome = transactionCommitExists ? "committed" : "restored";
+  if (
+    outcome === "committed" &&
+    gitRepository &&
+    journal.isolatedIndex &&
+    !journal.indexPublished &&
+    journal.commitHash
+  ) {
+    if (head !== journal.commitHash) {
+      throw new Error(
+        "Git HEAD advanced before recovery could publish its private index; manual Git recovery is required",
+      );
+    }
+    await publishRecoveredIsolatedIndex(
+      root,
+      path.dirname(journal.backupPath),
+      journal.preHead,
+      journal.commitHash,
+    );
+    journal.indexPublished = true;
+    await writeJournal(journalPath, journal);
+  }
   if (outcome === "restored") {
     await restoreBrainSnapshot(root, journal.backupPath);
-    if (gitRepository && (journal.stagePaths?.length ?? 0) > 0) {
+    if (
+      gitRepository &&
+      (journal.stagePaths?.length ?? 0) > 0 &&
+      !journal.isolatedIndex
+    ) {
       await restoreStagedIndex(
         root,
         journal.stagePaths ?? [],

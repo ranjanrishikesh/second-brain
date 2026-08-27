@@ -103,6 +103,31 @@ describe("registered source transactions", () => {
     ).toBe("?? sources/facts.md");
   });
 
+  test("registers a source larger than Git exec buffering without loading its staged bytes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-large-"));
+    await initBrain(root, { name: "Sources", description: "Large source" });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init"]);
+    await git(root, ["config", "user.name", "Second Brain Test"]);
+    await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+
+    const bytes = Buffer.alloc(2 * 1024 * 1024, 0x61);
+    await writeFile(path.join(root, "sources", "large.txt"), bytes);
+
+    const result = await scanAndRegisterSources(root);
+
+    expect(result.added).toHaveLength(1);
+    expect(result.added[0]?.bytes).toBe(bytes.byteLength);
+    expect(
+      await git(root, ["status", "--short", "--", "sources/large.txt"]),
+    ).toBe("");
+  });
+
   test("commits explicit supersession while retaining both immutable versions", async () => {
     const root = await mkdtemp(
       path.join(tmpdir(), "brain-source-transaction-"),
