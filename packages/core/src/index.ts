@@ -1,5 +1,23 @@
 export { brainConfigV1Schema, loadBrainConfig } from "./config.js";
+export { defaultSemanticModelV1 } from "./config.js";
 export type { BrainConfigV1 } from "./config.js";
+export {
+  brainStateV1Schema,
+  defaultBrainState,
+  readBrainState,
+  semanticIndexMetadataV1Schema,
+  setupStateV1Schema,
+  syncStatusV1Schema,
+  syncTargetV1Schema,
+  writeBrainState,
+} from "./state.js";
+export type {
+  BrainStateV1,
+  SemanticIndexMetadataV1,
+  SetupStateV1,
+  SyncStatusV1,
+  SyncTargetV1,
+} from "./state.js";
 export { initBrain } from "./init.js";
 export type { InitBrainOptions } from "./init.js";
 export { doctorBrain } from "./doctor.js";

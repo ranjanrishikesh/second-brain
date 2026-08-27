@@ -2,6 +2,29 @@ import { describe, expect, test } from "vitest";
 import { auditReportV1Schema, operationRecordV1Schema } from "../src/index.js";
 
 describe("versioned public schemas", () => {
+  test("exports state contracts that default omitted v1 fields safely", async () => {
+    const exports = (await import("../src/index.js")) as Record<
+      string,
+      unknown
+    >;
+
+    expect(exports).toHaveProperty("brainStateV1Schema");
+    const stateSchema = exports.brainStateV1Schema as {
+      parse(value: unknown): unknown;
+    };
+    expect(
+      stateSchema.parse({
+        version: 1,
+        catalogRevision: "empty",
+        knowledgeMutations: 0,
+        lastSemanticAuditMutation: 0,
+        bootstrap: { status: "pending", pendingSourceIds: [] },
+      }),
+    ).toMatchObject({
+      setup: { status: "not-started", pendingSourceIds: [] },
+    });
+  });
+
   test("validates operation and audit records at the package boundary", () => {
     expect(
       operationRecordV1Schema.parse({

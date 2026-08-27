@@ -91,7 +91,8 @@
     },
     "web": {
       "default": {
-        "capture": "evidence"
+        "capture": "evidence",
+        "approvalTtlHours": 24
       },
       "type": "object",
       "properties": {
@@ -99,15 +100,26 @@
           "default": "evidence",
           "type": "string",
           "const": "evidence"
+        },
+        "approvalTtlHours": {
+          "default": 24,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
         }
       },
-      "required": ["capture"],
+      "required": ["capture", "approvalTtlHours"],
       "additionalProperties": false
     },
     "graph": {
       "default": {
         "semanticAuditEvery": 25,
         "relatedPageLimit": 20,
+        "semanticModel": {
+          "id": "Xenova/multilingual-e5-small",
+          "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+          "artifactSha256": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c"
+        },
         "pageTypes": [
           "source",
           "topic",
@@ -142,6 +154,33 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
+        },
+        "semanticModel": {
+          "default": {
+            "id": "Xenova/multilingual-e5-small",
+            "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+            "artifactSha256": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c"
+          },
+          "type": "object",
+          "properties": {
+            "id": {
+              "default": "Xenova/multilingual-e5-small",
+              "type": "string",
+              "const": "Xenova/multilingual-e5-small"
+            },
+            "revision": {
+              "default": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+              "type": "string",
+              "const": "761b726dd34fb83930e26aab4e9ac3899aa1fa78"
+            },
+            "artifactSha256": {
+              "default": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c",
+              "type": "string",
+              "const": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c"
+            }
+          },
+          "required": ["id", "revision", "artifactSha256"],
+          "additionalProperties": false
         },
         "pageTypes": {
           "default": [
@@ -181,6 +220,7 @@
       "required": [
         "semanticAuditEvery",
         "relatedPageLimit",
+        "semanticModel",
         "pageTypes",
         "relationTypes"
       ],
@@ -199,8 +239,7 @@
         },
         "autoPush": {
           "default": false,
-          "type": "boolean",
-          "const": false
+          "type": "boolean"
         }
       },
       "required": ["autoCommit", "autoPush"],

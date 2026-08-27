@@ -12,6 +12,26 @@ import {
 } from "../src/index.js";
 
 describe("brain status and reading", () => {
+  test("defaults legacy state to an unconfigured setup and sync status", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-status-legacy-"));
+    await initBrain(root, { name: "Legacy", description: "Legacy state" });
+    await writeFile(
+      path.join(root, ".brain", "state.json"),
+      `${JSON.stringify({
+        version: 1,
+        catalogRevision: "empty",
+        knowledgeMutations: 0,
+        lastSemanticAuditMutation: 0,
+        bootstrap: { status: "pending", pendingSourceIds: [] },
+      })}\n`,
+    );
+
+    expect(await statusBrain(root)).toMatchObject({
+      setup: { status: "not-started", required: true },
+      sync: { status: "unconfigured" },
+    });
+  });
+
   test("reports canonical counts and reads page or source records by stable ID", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-status-"));
     await initBrain(root, { name: "Status", description: "Status tests" });

@@ -7,11 +7,16 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const expectedSchemas = [
   "AuditReportV1",
   "BrainConfigV1",
+  "BrainStateV1",
   "ChangeSetV1",
   "OperationRecordV1",
   "QuerySessionV1",
   "RelationV1",
+  "SemanticIndexMetadataV1",
+  "SetupStateV1",
   "SourceRecordV1",
+  "SyncStatusV1",
+  "SyncTargetV1",
   "WikiPageV1",
 ] as const;
 

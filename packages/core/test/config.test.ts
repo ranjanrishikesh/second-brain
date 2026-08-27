@@ -28,6 +28,16 @@ describe("loadBrainConfig", () => {
     expect(config.version).toBe(1);
     expect(config.brain.name).toBe("Astronomy");
     expect(config.bootstrap.mode).toBe("catalog-map");
+    expect(config).toMatchObject({
+      web: { approvalTtlHours: 24 },
+      graph: {
+        semanticModel: {
+          id: "Xenova/multilingual-e5-small",
+          revision: "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+        },
+      },
+      git: { autoPush: false },
+    });
   });
 });
 

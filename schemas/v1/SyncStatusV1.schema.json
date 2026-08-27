@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["unconfigured", "synced", "pending", "manual-sync-required"]
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40,64}$"
+    },
+    "remote": {
+      "type": "string",
+      "minLength": 1
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": ["status"],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/SyncStatusV1.schema.json",
+  "title": "SyncStatusV1"
+}

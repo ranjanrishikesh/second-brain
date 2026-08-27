@@ -2,6 +2,11 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "./config.js";
 import { pendingBootstrapSourceIds } from "./query.js";
+import {
+  readBrainState,
+  syncStatusV1Schema,
+  type SyncStatusV1,
+} from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import {
   sourceRecordV1Schema,
@@ -11,19 +16,6 @@ import {
 } from "./sources/types.js";
 import { loadWikiPages } from "./wiki/graph.js";
 import type { WikiPageV1 } from "./wiki/types.js";
-
-interface StateSummaryV1 {
-  version: 1;
-  catalogRevision: string;
-  knowledgeMutations: number;
-  lastSemanticAuditMutation: number;
-  semanticAuditDue?: boolean;
-  semanticAudit?: {
-    status: "pending" | "completed";
-    pendingPageIds: string[];
-    reviewedPageIds: string[];
-  };
-}
 
 export interface BrainStatusV1 {
   version: 1;
@@ -37,6 +29,12 @@ export interface BrainStatusV1 {
   };
   wiki: { pages: number; active: number; relations: number };
   bootstrap: { required: boolean; pendingSourceIds: string[] };
+  setup: {
+    status: "not-started" | "in-progress" | "completed";
+    required: boolean;
+    pendingSourceIds: string[];
+  };
+  sync: SyncStatusV1;
   semanticAudit: {
     due: boolean;
     knowledgeMutations: number;
@@ -80,14 +78,20 @@ export async function statusBrain(root: string): Promise<BrainStatusV1> {
       loadBrainConfig(root),
       sourceRecords(root),
       loadWikiPages(root),
-      readFile(path.join(root, ".brain", "state.json"), "utf8").then(
-        (value) => JSON.parse(value) as StateSummaryV1,
-      ),
+      readBrainState(root),
       pendingBootstrapSourceIds(root),
       pathExists(path.join(root, ".brain", "runtime", "transaction.json")),
     ]);
   const extractionCount = (status: SourceRecordV1["extractionStatus"]) =>
     sources.filter((source) => source.extractionStatus === status).length;
+  const sync = state.syncTarget
+    ? syncStatusV1Schema.parse({
+        status: "pending",
+        remote: state.syncTarget.remote,
+        branch: state.syncTarget.branch,
+        reason: "Sync target is configured but has not been evaluated.",
+      })
+    : syncStatusV1Schema.parse({ status: "unconfigured" });
   return {
     version: 1,
     brain: config.brain,
@@ -107,6 +111,12 @@ export async function statusBrain(root: string): Promise<BrainStatusV1> {
       required: pendingSourceIds.length > 0,
       pendingSourceIds,
     },
+    setup: {
+      status: state.setup.status,
+      required: state.setup.status !== "completed",
+      pendingSourceIds: state.setup.pendingSourceIds,
+    },
+    sync,
     semanticAudit: {
       due: state.semanticAuditDue ?? false,
       knowledgeMutations: state.knowledgeMutations,

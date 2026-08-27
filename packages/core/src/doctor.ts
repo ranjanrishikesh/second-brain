@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
+import { brainStateV1Schema } from "./state.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import { operationRecordV1Schema } from "./transaction.js";
 import { validateWikiGraph } from "./wiki/graph.js";
@@ -38,30 +39,6 @@ const sourceManifestV1Schema = z.object({
   version: z.literal(1),
   sources: z.array(sourceRecordV1Schema),
 });
-
-const brainStateV1Schema = z
-  .object({
-    version: z.literal(1),
-    catalogRevision: z.string().min(1),
-    knowledgeMutations: z.number().int().nonnegative(),
-    lastSemanticAuditMutation: z.number().int().nonnegative(),
-    bootstrap: z.object({
-      status: z.enum(["pending", "completed"]),
-      pendingSourceIds: z.array(z.string()),
-    }),
-    semanticAuditDue: z.boolean().optional(),
-    semanticAudit: z
-      .object({
-        status: z.enum(["pending", "completed"]),
-        targetMutation: z.number().int().nonnegative(),
-        pendingPageIds: z.array(z.string()),
-        reviewedPageIds: z.array(z.string()),
-        startedAt: z.string().datetime(),
-        completedAt: z.string().datetime().optional(),
-      })
-      .optional(),
-  })
-  .passthrough();
 
 function errorMessage(error: unknown): string {
   if (error instanceof ZodError) {

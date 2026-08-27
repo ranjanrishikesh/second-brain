@@ -10,6 +10,7 @@ import {
 import path from "node:path";
 import { parse, stringify } from "yaml";
 import { brainConfigV1Schema } from "./config.js";
+import { defaultBrainState } from "./state.js";
 
 export interface InitBrainOptions {
   name: string;
@@ -195,17 +196,7 @@ export async function initBrain(
   );
   await writeIfMissing(
     path.join(root, ".brain", "state.json"),
-    `${JSON.stringify(
-      {
-        version: 1,
-        catalogRevision: "empty",
-        knowledgeMutations: 0,
-        lastSemanticAuditMutation: 0,
-        bootstrap: { status: "pending", pendingSourceIds: [] },
-      },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify(defaultBrainState(), null, 2)}\n`,
   );
   await writeIfMissing(path.join(root, ".brain", "operations.jsonl"), "");
   await writeIfMissing(
