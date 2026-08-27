@@ -12,7 +12,7 @@ import {
   semanticSearch,
   type WikiPageV1,
 } from "../src/index.js";
-import * as semantic from "../src/semantic.js";
+import { streamVerifiedResponse } from "../src/semantic.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
 function page(
@@ -60,18 +60,6 @@ describe("local semantic search", () => {
         throw new Error("The downloader must stream rather than buffer models");
       },
     });
-    const streamVerifiedResponse = (
-      semantic as unknown as {
-        streamVerifiedResponse?: (
-          filePath: string,
-          response: Response,
-          expectedHash: string,
-        ) => Promise<void>;
-      }
-    ).streamVerifiedResponse;
-
-    expect(streamVerifiedResponse).toBeTypeOf("function");
-    if (!streamVerifiedResponse) return;
     await streamVerifiedResponse(destination, response, expectedSha256);
 
     expect(await readFile(destination, "utf8")).toBe("streamed model artifact");
