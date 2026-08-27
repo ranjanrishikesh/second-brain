@@ -34,6 +34,7 @@ interface ReadySync {
   kind: "ready";
   target: SyncTargetV1;
   head: string;
+  pushUrl: string;
 }
 
 interface SettledSync {
@@ -42,6 +43,13 @@ interface SettledSync {
 }
 
 type SyncEvaluation = ReadySync | SettledSync;
+
+interface VerifiedPushTarget {
+  kind: "verified";
+  pushUrl: string;
+}
+
+type TargetVerification = VerifiedPushTarget | SettledSync;
 
 export interface AttemptManagedSyncOptions {
   /** Internal deterministic hook for exercising the pre-push race in tests. */
@@ -109,11 +117,26 @@ async function currentHead(root: string): Promise<string> {
   return git(root, ["rev-parse", "HEAD"]);
 }
 
+async function solePushUrl(root: string, remote: string): Promise<string> {
+  const urls = (
+    await git(root, ["remote", "get-url", "--push", "--all", remote])
+  )
+    .split(/\r?\n/)
+    .map((url) => url.trim())
+    .filter(Boolean);
+  if (urls.length !== 1) {
+    throw new Error(
+      "The configured remote must have exactly one push URL before it can be confirmed",
+    );
+  }
+  return urls[0] as string;
+}
+
 async function verifyTarget(
   root: string,
   target: SyncTargetV1,
   head: string,
-): Promise<SettledSync | undefined> {
+): Promise<TargetVerification> {
   let branch: string;
   try {
     branch = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -139,48 +162,49 @@ async function verifyTarget(
       ),
     };
   }
-  let remoteUrl: string;
+  let pushUrl: string;
   try {
-    remoteUrl = await git(root, ["remote", "get-url", target.remote]);
-  } catch {
+    pushUrl = await solePushUrl(root, target.remote);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "";
     return {
       kind: "settled",
       status: targetStatus(
         target,
         "manual-sync-required",
         head,
-        "The configured Git remote is unavailable.",
+        reason.includes("exactly one push URL")
+          ? reason
+          : "The configured Git remote is unavailable.",
       ),
     };
   }
-  if (fingerprintRemoteUrl(remoteUrl) !== target.urlFingerprint) {
+  const expectedFingerprint =
+    target.pushUrlFingerprint ?? target.urlFingerprint;
+  if (fingerprintRemoteUrl(pushUrl) !== expectedFingerprint) {
     return {
       kind: "settled",
       status: targetStatus(
         target,
         "manual-sync-required",
         head,
-        "The configured remote URL no longer matches the confirmed target.",
+        "The configured push URL no longer matches the confirmed target.",
       ),
     };
   }
-  return undefined;
+  return { kind: "verified", pushUrl };
 }
 
 async function remoteBranchHead(
   root: string,
   target: SyncTargetV1,
+  pushUrl: string,
 ): Promise<string | undefined> {
   const ref = `refs/heads/${target.branch}`;
-  const remoteRefs = await git(root, [
-    "ls-remote",
-    "--heads",
-    target.remote,
-    ref,
-  ]);
+  const remoteRefs = await git(root, ["ls-remote", "--heads", pushUrl, ref]);
   const remoteHead = remoteRefs.split(/\s+/)[0];
   if (!remoteHead) return undefined;
-  await git(root, ["fetch", "--no-tags", "--quiet", target.remote, ref]);
+  await git(root, ["fetch", "--no-tags", "--quiet", pushUrl, ref]);
   return remoteHead;
 }
 
@@ -218,6 +242,13 @@ async function hasOnlyManagedCommits(
     .split("\n")
     .filter(Boolean);
   for (const commit of commits) {
+    const parents = (await git(root, ["show", "-s", "--format=%P", commit]))
+      .split(/\s+/)
+      .filter(Boolean);
+    // Every auto-synced managed commit is created with exactly one parent.
+    // Reject merges rather than trying to infer which merge-result paths were
+    // reviewed: `diff-tree` without parent expansion can otherwise hide them.
+    if (parents.length !== 1) return false;
     const message = await git(root, ["show", "-s", "--format=%B", commit]);
     if (
       !/(?:^|\n)Brain-Managed:\s*true\s*$/im.test(message) ||
@@ -254,11 +285,15 @@ async function evaluateSync(root: string): Promise<SyncEvaluation> {
       ),
     };
   }
-  const invalidTarget = await verifyTarget(root, target, head);
-  if (invalidTarget) return invalidTarget;
+  const targetVerification = await verifyTarget(root, target, head);
+  if (targetVerification.kind === "settled") return targetVerification;
   let remoteHead: string | undefined;
   try {
-    remoteHead = await remoteBranchHead(root, target);
+    remoteHead = await remoteBranchHead(
+      root,
+      target,
+      targetVerification.pushUrl,
+    );
   } catch (error) {
     return {
       kind: "settled",
@@ -316,7 +351,7 @@ async function evaluateSync(root: string): Promise<SyncEvaluation> {
       ),
     };
   }
-  return { kind: "ready", target, head };
+  return { kind: "ready", target, head, pushUrl: targetVerification.pushUrl };
 }
 
 /** Returns the current derived sync status without pushing. */
@@ -342,7 +377,7 @@ export async function attemptManagedSync(
     await options.beforePush?.();
     await git(root, [
       "push",
-      evaluation.target.remote,
+      evaluation.pushUrl,
       `${evaluation.head}:refs/heads/${evaluation.target.branch}`,
     ]);
     return syncStatus(root);
@@ -365,10 +400,12 @@ export async function configureSyncTarget(
   await git(root, ["rev-parse", "--is-inside-work-tree"]);
   await git(root, ["check-ref-format", "--branch", input.branch]);
   const remoteUrl = await git(root, ["remote", "get-url", input.remote]);
+  const pushUrl = await solePushUrl(root, input.remote);
   const target = syncTargetV1Schema.parse({
     remote: input.remote,
     branch: input.branch,
     urlFingerprint: fingerprintRemoteUrl(remoteUrl),
+    pushUrlFingerprint: fingerprintRemoteUrl(pushUrl),
     confirmedAt: new Date().toISOString(),
   });
   const operationId = `op_sync_${randomUUID().replaceAll("-", "")}`;

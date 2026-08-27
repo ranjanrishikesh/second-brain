@@ -26,7 +26,13 @@ export type SetupStateV1 = z.infer<typeof setupStateV1Schema>;
 export const syncTargetV1Schema = z.object({
   remote: z.string().trim().min(1),
   branch: z.string().trim().min(1),
+  /** Legacy remote/fetch fingerprint retained for existing brain states. */
   urlFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  /** The sole explicit destination that the user confirmed for automatic push. */
+  pushUrlFingerprint: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
   confirmedAt: z.string().datetime(),
 });
 

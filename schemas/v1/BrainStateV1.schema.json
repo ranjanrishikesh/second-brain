@@ -162,6 +162,10 @@
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
         },
+        "pushUrlFingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
         "confirmedAt": {
           "type": "string",
           "format": "date-time",

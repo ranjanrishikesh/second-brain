@@ -168,6 +168,125 @@ describe("managed brain synchronization", () => {
     );
   });
 
+  test("refuses a push URL that differs from the confirmed destination", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const replacement = await mkdtemp(
+      path.join(tmpdir(), "brain-sync-pushurl-replacement-"),
+    );
+    await git(replacement, ["init", "--bare"]);
+    const { configureSyncTarget } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+    const originalHead = await git(remote, ["rev-parse", "refs/heads/main"]);
+    await git(root, ["config", "remote.origin.pushurl", replacement]);
+
+    const result = await applyChangeSetTransaction(
+      root,
+      changeSet("op_sync_changed_pushurl"),
+    );
+
+    expect(result).toMatchObject({
+      sync: {
+        status: "manual-sync-required",
+        remote: "origin",
+        branch: "main",
+      },
+    });
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      originalHead,
+    );
+    await expect(
+      git(replacement, ["rev-parse", "refs/heads/main"]),
+    ).rejects.toThrow();
+  });
+
+  test("uses a pre-existing distinct push URL as the confirmed destination", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const pushRemote = await mkdtemp(
+      path.join(tmpdir(), "brain-sync-confirmed-pushurl-"),
+    );
+    await git(pushRemote, ["init", "--bare"]);
+    await git(root, ["push", pushRemote, "main"]);
+    const fetchHead = await git(remote, ["rev-parse", "refs/heads/main"]);
+    await git(root, ["config", "remote.origin.pushurl", pushRemote]);
+    const { configureSyncTarget } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+
+    const result = await applyChangeSetTransaction(
+      root,
+      changeSet("op_sync_preexisting_pushurl"),
+    );
+
+    expect(result.commit).toMatch(/^[a-f0-9]{40}$/);
+    expect(await git(pushRemote, ["rev-parse", "refs/heads/main"])).toBe(
+      result.commit,
+    );
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(fetchHead);
+  });
+
+  test("pushes to the exact confirmed URL when remote push configuration changes mid-sync", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const replacement = await mkdtemp(
+      path.join(tmpdir(), "brain-sync-before-push-replacement-"),
+    );
+    await git(replacement, ["init", "--bare"]);
+    const { configureSyncTarget, attemptManagedSync } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+    const hook = path.join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const mutation = await applyChangeSetTransaction(
+      root,
+      changeSet("op_sync_exact_push_url"),
+    );
+    if (!mutation.commit) throw new Error("Expected a local managed commit");
+    await writeFile(hook, "#!/bin/sh\nexit 0\n");
+
+    const sync = await attemptManagedSync(root, {
+      beforePush: async () => {
+        await git(root, ["config", "remote.origin.pushurl", replacement]);
+      },
+    });
+
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      mutation.commit,
+    );
+    await expect(
+      git(replacement, ["rev-parse", "refs/heads/main"]),
+    ).rejects.toThrow();
+    expect(sync).toMatchObject({ status: "manual-sync-required" });
+  });
+
+  test("refuses a remote with more than one push URL", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const second = await mkdtemp(
+      path.join(tmpdir(), "brain-sync-pushurl-second-"),
+    );
+    await git(second, ["init", "--bare"]);
+    await git(root, ["config", "--add", "remote.origin.pushurl", remote]);
+    await git(root, ["config", "--add", "remote.origin.pushurl", second]);
+    const { configureSyncTarget } = await syncApi();
+
+    await expect(
+      configureSyncTarget(root, {
+        remote: "origin",
+        branch: "main",
+        confirm: true,
+      }),
+    ).rejects.toThrow(/exactly one.*push URL|multiple.*push URL/i);
+  });
+
   test("refuses a trailer-marked commit that changes an unmanaged path", async () => {
     const { root, remote } = await gitBrainWithBareRemote();
     const { configureSyncTarget, attemptManagedSync } = await syncApi();
@@ -183,6 +302,53 @@ describe("managed brain synchronization", () => {
       "commit",
       "-m",
       "brain(apply): forged managed commit\n\nBrain-Managed: true\nBrain-Operation: op_forged_private_path",
+    ]);
+
+    const sync = await attemptManagedSync(root, {
+      beforePush: async () => undefined,
+    });
+
+    expect(sync).toMatchObject({ status: "manual-sync-required" });
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      remoteBefore,
+    );
+  });
+
+  test("refuses a trailer-marked merge commit even when its files look managed", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const { configureSyncTarget, attemptManagedSync } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+    const remoteBefore = await git(remote, ["rev-parse", "refs/heads/main"]);
+    await git(root, ["checkout", "-b", "sync-side"]);
+    await writeFile(path.join(root, "wiki", "side.md"), "side branch\n");
+    await git(root, ["add", "wiki/side.md"]);
+    await git(root, [
+      "commit",
+      "-m",
+      "brain(apply): side history\n\nBrain-Managed: true\nBrain-Operation: op_sync_merge_side",
+    ]);
+    await git(root, ["checkout", "main"]);
+    await writeFile(path.join(root, "wiki", "main.md"), "main branch\n");
+    await git(root, ["add", "wiki/main.md"]);
+    await git(root, [
+      "commit",
+      "-m",
+      "brain(apply): main history\n\nBrain-Managed: true\nBrain-Operation: op_sync_merge_main",
+    ]);
+    await git(root, ["merge", "--no-ff", "--no-commit", "sync-side"]);
+    await writeFile(
+      path.join(root, "private-merge-resolution.txt"),
+      "must not push\n",
+    );
+    await git(root, ["add", "private-merge-resolution.txt"]);
+    await git(root, [
+      "commit",
+      "-m",
+      "brain(apply): forged merge\n\nBrain-Managed: true\nBrain-Operation: op_sync_forged_merge",
     ]);
 
     const sync = await attemptManagedSync(root, {
