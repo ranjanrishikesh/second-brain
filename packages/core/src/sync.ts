@@ -43,6 +43,11 @@ interface SettledSync {
 
 type SyncEvaluation = ReadySync | SettledSync;
 
+export interface AttemptManagedSyncOptions {
+  /** Internal deterministic hook for exercising the pre-push race in tests. */
+  beforePush?: () => Promise<void> | void;
+}
+
 async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
 }
@@ -182,9 +187,10 @@ async function remoteBranchHead(
 async function hasOnlyManagedCommits(
   root: string,
   remoteHead: string,
+  head: string,
 ): Promise<boolean> {
   const commits = (
-    await git(root, ["rev-list", "--reverse", `${remoteHead}..HEAD`])
+    await git(root, ["rev-list", "--reverse", `${remoteHead}..${head}`])
   )
     .split("\n")
     .filter(Boolean);
@@ -273,7 +279,7 @@ async function evaluateSync(root: string): Promise<SyncEvaluation> {
       status: targetStatus(target, "synced", head),
     };
   }
-  if (!(await hasOnlyManagedCommits(root, remoteHead))) {
+  if (!(await hasOnlyManagedCommits(root, remoteHead, head))) {
     return {
       kind: "settled",
       status: targetStatus(
@@ -300,16 +306,20 @@ export async function syncStatus(root: string): Promise<SyncStatusV1> {
 }
 
 /** Pushes only confirmed, fast-forward, entirely managed brain history. */
-export async function attemptManagedSync(root: string): Promise<SyncStatusV1> {
+export async function attemptManagedSync(
+  root: string,
+  options: AttemptManagedSyncOptions = {},
+): Promise<SyncStatusV1> {
   const evaluation = await evaluateSync(root);
   if (evaluation.kind === "settled") return evaluation.status;
   try {
+    await options.beforePush?.();
     await git(root, [
       "push",
       evaluation.target.remote,
-      `HEAD:refs/heads/${evaluation.target.branch}`,
+      `${evaluation.head}:refs/heads/${evaluation.target.branch}`,
     ]);
-    return targetStatus(evaluation.target, "synced", evaluation.head);
+    return syncStatus(root);
   } catch (error) {
     return targetStatus(
       evaluation.target,

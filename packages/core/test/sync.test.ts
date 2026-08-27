@@ -97,14 +97,23 @@ async function syncApi(): Promise<{
     root: string,
     input: { remote: string; branch: string; confirm: boolean },
   ) => Promise<unknown>;
+  attemptManagedSync: (
+    root: string,
+    options: { beforePush: () => Promise<void> },
+  ) => Promise<{ status: string; commit?: string }>;
 }> {
   const exports = (await import("../src/index.js")) as Record<string, unknown>;
   expect(exports).toHaveProperty("configureSyncTarget");
+  expect(exports).toHaveProperty("attemptManagedSync");
   return {
     configureSyncTarget: exports.configureSyncTarget as (
       root: string,
       input: { remote: string; branch: string; confirm: boolean },
     ) => Promise<unknown>,
+    attemptManagedSync: exports.attemptManagedSync as (
+      root: string,
+      options: { beforePush: () => Promise<void> },
+    ) => Promise<{ status: string; commit?: string }>,
   };
 }
 
@@ -268,6 +277,48 @@ describe("managed brain synchronization", () => {
     expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
       mutation.commit,
     );
+  });
+
+  test("pushes the reviewed managed commit when HEAD moves before the push", async () => {
+    const { root, remote } = await gitBrainWithBareRemote();
+    const { configureSyncTarget, attemptManagedSync } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+    const hook = path.join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const mutation = await applyChangeSetTransaction(
+      root,
+      changeSet("op_sync_exact_commit"),
+    );
+    if (!mutation.commit) throw new Error("Expected a local managed commit");
+    await writeFile(hook, "#!/bin/sh\nexit 0\n");
+
+    let concurrentCommit = "";
+    const sync = await attemptManagedSync(root, {
+      beforePush: async () => {
+        await git(root, [
+          "commit",
+          "--allow-empty",
+          "-m",
+          "user: concurrent local work",
+        ]);
+        concurrentCommit = await git(root, ["rev-parse", "HEAD"]);
+      },
+    });
+
+    expect(concurrentCommit).toMatch(/^[a-f0-9]{40}$/);
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      mutation.commit,
+    );
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(concurrentCommit);
+    expect(sync).toMatchObject({
+      status: "manual-sync-required",
+      commit: concurrentCommit,
+    });
   });
 
   test("returns a pending sync warning state after the final query commit is rejected", async () => {
