@@ -2,6 +2,7 @@ import {
   applyChangeSetTransaction,
   attemptManagedSync,
   attachQueryChange,
+  attachSetupChange,
   auditBrain,
   beginSetup,
   beginQuery,
@@ -518,13 +519,22 @@ export async function runCli(
   program
     .command("apply <change-set-file>")
     .option("--query <query-id>", "attach the committed mutation to a query")
+    .option("--setup <setup-id>", "attach the committed mutation to setup")
     .option("--root <path>", "brain repository root", process.cwd())
     .option("--json", "emit machine-readable JSON")
     .action(
       async (
         changeSetFile: string,
-        options: { query?: string; root: string; json?: boolean },
+        options: {
+          query?: string;
+          setup?: string;
+          root: string;
+          json?: boolean;
+        },
       ) => {
+        if (options.query && options.setup) {
+          throw new Error("Use either --query or --setup, not both");
+        }
         const changeSet = changeSetV1Schema.parse(
           JSON.parse(await readFile(changeSetFile, "utf8")),
         );
@@ -545,15 +555,36 @@ export async function runCli(
               },
             }
           : changeSet;
+        const runtimeServicesOption = runtimeOptions.runtimeServices
+          ? { runtimeServices: runtimeOptions.runtimeServices }
+          : {};
+        const transactionOptions = options.query
+          ? {
+              queryId: options.query,
+              ...runtimeServicesOption,
+            }
+          : options.setup
+            ? {
+                context: { kind: "setup" as const, id: options.setup },
+                ...runtimeServicesOption,
+              }
+            : runtimeServicesOption;
         const result = await applyChangeSetTransaction(
           options.root,
           reconciledChangeSet,
-          options.query ? { queryId: options.query } : {},
+          transactionOptions,
         );
         if (options.query) {
           await attachQueryChange(
             options.root,
             options.query,
+            result.operationId,
+          );
+        }
+        if (options.setup) {
+          await attachSetupChange(
+            options.root,
+            options.setup,
             result.operationId,
           );
         }

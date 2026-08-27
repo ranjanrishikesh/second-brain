@@ -201,6 +201,122 @@ describe("brain CLI", () => {
     });
   });
 
+  test("binds a source-page apply to the active setup checkpoint", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-setup-apply-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Setup apply",
+        "--description",
+        "Setup apply CLI test",
+      ],
+      { write: () => undefined },
+    );
+    await writeFile(
+      path.join(root, "sources", "foundation.md"),
+      "# Foundation\n\nA source page must be checkpointed.\n",
+    );
+    const beginOutput: string[] = [];
+    await runCli(
+      [
+        "setup",
+        "begin",
+        "--purpose",
+        "Create the initial source catalog.",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: (value) => beginOutput.push(value) },
+      {
+        runtimeServices: {
+          embeddings: {
+            modelId: "test/cli",
+            modelRevision: "test-revision",
+            embed: async (texts: readonly string[]) => texts.map(() => [0, 1]),
+          },
+        },
+      },
+    );
+    const setup = JSON.parse(beginOutput.join("")) as { id: string };
+    const batchOutput: string[] = [];
+    await runCli(["setup", "next", setup.id, "--root", root, "--json"], {
+      write: (value) => batchOutput.push(value),
+    });
+    const batch = JSON.parse(batchOutput.join("")) as {
+      sources: Array<{
+        record: { id: string; title: string };
+        extracted: { chunks: Array<{ locator: string; text: string }> };
+      }>;
+    };
+    const source = batch.sources[0];
+    if (!source?.extracted.chunks[0]) {
+      throw new Error("Expected a setup source context");
+    }
+    const chunk = source.extracted.chunks[0];
+    const changeSetPath = path.join(root, "setup-change-set.json");
+    await writeFile(
+      changeSetPath,
+      `${JSON.stringify({
+        version: 1,
+        operationId: "op_cli_setup_attach",
+        catalogRevision: calculateCatalogRevision([]),
+        reason: "Create the initial source page.",
+        pages: [
+          {
+            action: "create",
+            page: {
+              schema: 1,
+              id: `pg_setup_${source.record.id.slice(4)}`,
+              path: "wiki/pages/sources/foundation.md",
+              title: `Source: ${source.record.title}`,
+              type: "source",
+              status: "active",
+              summary: "Catalog entry for the initial foundation source.",
+              aliases: [],
+              tags: [],
+              createdAt: "2026-08-27T00:00:00.000Z",
+              updatedAt: "2026-08-27T00:00:00.000Z",
+              revision: "pending",
+              sources: [
+                {
+                  id: source.record.id,
+                  locators: [chunk.locator],
+                },
+              ],
+              relations: [],
+              body: `# ${source.record.title}\n\n${chunk.text} [@${source.record.id}#${chunk.locator}]`,
+            },
+          },
+        ],
+        reconciliation: { candidatePageIds: [], reviewed: [] },
+      })}\n`,
+      "utf8",
+    );
+    const applyOutput: string[] = [];
+
+    const applyExitCode = await runCli(
+      ["apply", changeSetPath, "--setup", setup.id, "--root", root, "--json"],
+      { write: (value) => applyOutput.push(value) },
+    );
+
+    expect(applyExitCode).toBe(0);
+    expect(JSON.parse(applyOutput.join(""))).toMatchObject({
+      operationId: "op_cli_setup_attach",
+    });
+
+    const nextOutput: string[] = [];
+    await runCli(["setup", "next", setup.id, "--root", root, "--json"], {
+      write: (value) => nextOutput.push(value),
+    });
+    expect(JSON.parse(nextOutput.join(""))).toMatchObject({
+      sourceIds: [],
+    });
+  });
+
   test("plans reconciliation from a change-set draft through the CLI", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-cli-reconcile-"));
     await runCli(
