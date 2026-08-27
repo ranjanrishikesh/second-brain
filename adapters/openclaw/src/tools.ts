@@ -10,6 +10,7 @@ import {
   expandQuery,
   finishQuery,
   finishSetup,
+  formatSyncWarning,
   nextBootstrapBatch,
   nextSetupBatch,
   planReconciliation,
@@ -23,6 +24,7 @@ import {
   statusBrain,
   type ChangeSetV1,
   type SearchScope,
+  type SyncStatusV1,
 } from "@second-brain/core";
 
 export const brainToolNames = [
@@ -67,13 +69,34 @@ function assertActiveQuery(
   }
 }
 
+function withSyncWarning<T extends { sync?: SyncStatusV1 }>(
+  result: T,
+): T & {
+  syncWarning?: string;
+} {
+  const warning = result.sync ? formatSyncWarning(result.sync) : undefined;
+  return warning ? { ...result, syncWarning: warning } : result;
+}
+
+function withDirectSyncWarning<T extends SyncStatusV1>(
+  sync: T,
+): T & {
+  syncWarning?: string;
+} {
+  const warning = formatSyncWarning(sync);
+  return warning ? { ...sync, syncWarning: warning } : sync;
+}
+
 export function createBrainToolHandlers(
   root: string,
   options: BrainToolHandlerOptions = {},
 ) {
   const hostSessionId = options.hostSessionId ?? "openclaw:unbound";
   return {
-    brain_status: async (_input: Record<string, never>) => statusBrain(root),
+    brain_status: async (_input: Record<string, never>) => {
+      const status = await statusBrain(root);
+      return withSyncWarning(status);
+    },
     brain_begin_setup: async (input: {
       purpose: string;
       boundaries?: string;
@@ -83,7 +106,7 @@ export function createBrainToolHandlers(
     brain_finish_setup: async (input: { setupId: string; summary: string }) =>
       finishSetup(root, input.setupId, { summary: input.summary }),
     brain_begin_query: async (input: { question: string }) => {
-      const session = await beginQuery(root, input.question);
+      const session = withSyncWarning(await beginQuery(root, input.question));
       options.onQueryBegin?.(session.id);
       return session;
     },
@@ -198,7 +221,7 @@ export function createBrainToolHandlers(
       if (input.setupId) {
         await attachSetupChange(root, input.setupId, result.operationId);
       }
-      return result;
+      return withSyncWarning(result);
     },
     brain_finish_query: async (input: {
       queryId: string;
@@ -210,7 +233,9 @@ export function createBrainToolHandlers(
       for (const operationId of input.operationIds ?? []) {
         await attachQueryChange(root, input.queryId, operationId);
       }
-      const result = await finishQuery(root, input.queryId, input);
+      const result = withSyncWarning(
+        await finishQuery(root, input.queryId, input),
+      );
       options.onQueryFinish?.(input.queryId);
       return result;
     },
@@ -230,7 +255,7 @@ export function createBrainToolHandlers(
       return auditBrain(root);
     },
     brain_sync: async (_input: Record<string, never>) =>
-      attemptManagedSync(root),
+      withDirectSyncWarning(await attemptManagedSync(root)),
   };
 }
 

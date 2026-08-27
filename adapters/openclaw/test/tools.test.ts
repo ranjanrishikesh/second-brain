@@ -1,13 +1,87 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
-import { initBrain } from "@second-brain/core";
+import {
+  configureSyncTarget,
+  initBrain,
+  readBrainState,
+  writeBrainState,
+} from "@second-brain/core";
 import { OpenClawSchema } from "openclaw/plugin-sdk/config-schema";
 import plugin from "../src/index.js";
 import { brainToolNames, createBrainToolHandlers } from "../src/tools.js";
 
+const execFile = promisify(execFileCallback);
+
+async function git(root: string, args: string[]): Promise<string> {
+  return (await execFile("git", args, { cwd: root })).stdout.trim();
+}
+
+async function hostedGitBrain(): Promise<{ root: string; remote: string }> {
+  const root = await mkdtemp(path.join(tmpdir(), "brain-openclaw-sync-"));
+  const remote = await mkdtemp(
+    path.join(tmpdir(), "brain-openclaw-sync-remote-"),
+  );
+  await initBrain(root, { name: "Hosted", description: "OpenClaw adapter" });
+  const state = await readBrainState(root);
+  await writeBrainState(root, {
+    ...state,
+    setup: {
+      status: "completed",
+      id: "setup_0123456789abcdef0123456789abcdef",
+      purpose: "Hosted sync test",
+      startedAt: "2026-08-27T00:00:00.000Z",
+      completedAt: "2026-08-27T00:00:00.000Z",
+      initialSourceIds: [],
+      pendingSourceIds: [],
+    },
+  });
+  await writeFile(
+    path.join(root, ".gitignore"),
+    ".brain/cache/\n.brain/runtime/\n",
+  );
+  await git(root, ["init", "-b", "main"]);
+  await git(root, ["config", "user.name", "Second Brain Test"]);
+  await git(root, ["config", "user.email", "brain-test@example.invalid"]);
+  await git(root, ["add", "."]);
+  await git(root, ["commit", "-m", "initial brain"]);
+  await git(remote, ["init", "--bare"]);
+  await git(root, ["remote", "add", "origin", remote]);
+  await git(root, ["push", "-u", "origin", "main"]);
+  await configureSyncTarget(root, {
+    remote: "origin",
+    branch: "main",
+    confirm: true,
+  });
+  return { root, remote };
+}
+
 describe("OpenClaw brain tools", () => {
+  test("returns the exact pending-sync warning when a hosted query finishes locally", async () => {
+    const { root, remote } = await hostedGitBrain();
+    const tools = createBrainToolHandlers(root);
+    const session = await tools.brain_begin_query({
+      question: "What remains available locally?",
+    });
+    const hook = path.join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+
+    const result = (await tools.brain_finish_query({
+      queryId: session.id,
+      outcome: "answered",
+      answerSummary: "The existing wiki required no additional mutation.",
+    })) as { commit?: string; syncWarning?: string };
+
+    if (!result.commit) throw new Error("Expected a local query commit");
+    expect(result.syncWarning).toBe(
+      `⚠ Sync pending — knowledge is safely committed locally at ${result.commit}, but it has not yet been pushed to origin/main: The remote rejected the push.`,
+    );
+  });
+
   test("exposes setup, reconciliation, approval, and sync handlers", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-openclaw-tools-"));
     await initBrain(root, { name: "Hosted", description: "OpenClaw adapter" });
@@ -228,6 +302,42 @@ describe("OpenClaw brain tools", () => {
         { toolName: "web_search", sessionKey: "host-session-2" },
       ),
     ).resolves.toBeUndefined();
+  });
+
+  test("retries an eligible pending sync when the hosted gateway starts", async () => {
+    const { root, remote } = await hostedGitBrain();
+    const tools = createBrainToolHandlers(root);
+    const session = await tools.brain_begin_query({
+      question: "What remains available locally?",
+    });
+    const hook = path.join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const local = await tools.brain_finish_query({
+      queryId: session.id,
+      outcome: "answered",
+      answerSummary: "The existing wiki required no additional mutation.",
+    });
+    if (!local.commit) throw new Error("Expected a local query commit");
+    await writeFile(hook, "#!/bin/sh\nexit 0\n");
+
+    const hooks = new Map<string, (...args: never[]) => unknown>();
+    plugin.register({
+      pluginConfig: { brainRoot: root },
+      registerTool() {},
+      on(name: string, handler: (...args: never[]) => unknown) {
+        hooks.set(name, handler);
+      },
+      logger: { warn() {} },
+    } as never);
+
+    const startup = hooks.get("gateway_start");
+    expect(startup).toBeDefined();
+    await startup?.({ port: 4312 }, {});
+
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      local.commit,
+    );
   });
 
   test("injects setup and sync status into the hosted prompt context", async () => {

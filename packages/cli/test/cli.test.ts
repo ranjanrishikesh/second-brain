@@ -8,7 +8,9 @@ import {
   calculateCatalogRevision,
   parseWikiPage,
   planReconciliation,
+  readBrainState,
   renderWikiPage,
+  writeBrainState,
   type ChangeSetV1,
   type WikiPageV1,
 } from "@second-brain/core";
@@ -805,6 +807,103 @@ describe("brain CLI", () => {
     const exitCode = await runCli(["apply", changeSetPath, "--root", root], {
       write: (value) => output.push(value),
     });
+
+    const commit = await git(root, ["rev-parse", "HEAD"]);
+    expect(exitCode).toBe(0);
+    expect(output.join("")).toBe(
+      `⚠ Sync pending — knowledge is safely committed locally at ${commit}, but it has not yet been pushed to origin/main: The remote rejected the push.\n`,
+    );
+  });
+
+  test("shows the protected local commit when a human-readable query finish cannot push", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-query-sync-"));
+    const remote = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-query-sync-remote-"),
+    );
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Query sync warning",
+        "--description",
+        "Query finish sync warning CLI test",
+      ],
+      { write: () => undefined },
+    );
+    const state = await readBrainState(root);
+    await writeBrainState(root, {
+      ...state,
+      setup: {
+        status: "completed",
+        id: "setup_0123456789abcdef0123456789abcdef",
+        purpose: "CLI query synchronization test",
+        startedAt: "2026-08-27T00:00:00.000Z",
+        completedAt: "2026-08-27T00:00:00.000Z",
+        initialSourceIds: [],
+        pendingSourceIds: [],
+      },
+    });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain CLI Test"]);
+    await git(root, ["config", "user.email", "brain-cli@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial brain"]);
+    await git(remote, ["init", "--bare"]);
+    await git(root, ["remote", "add", "origin", remote]);
+    await git(root, ["push", "-u", "origin", "main"]);
+    await runCli(
+      [
+        "sync",
+        "configure",
+        "--remote",
+        "origin",
+        "--branch",
+        "main",
+        "--confirm",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: () => undefined },
+    );
+    const beginOutput: string[] = [];
+    await runCli(
+      [
+        "query",
+        "begin",
+        "What was committed locally?",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: (value) => beginOutput.push(value) },
+    );
+    const session = JSON.parse(beginOutput.join("")) as { id: string };
+    const hook = path.join(remote, "hooks", "pre-receive");
+    await writeFile(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const output: string[] = [];
+
+    const exitCode = await runCli(
+      [
+        "query",
+        "finish",
+        session.id,
+        "--outcome",
+        "answered",
+        "--summary",
+        "The existing wiki required no additional mutation.",
+        "--root",
+        root,
+      ],
+      { write: (value) => output.push(value) },
+    );
 
     const commit = await git(root, ["rev-parse", "HEAD"]);
     expect(exitCode).toBe(0);

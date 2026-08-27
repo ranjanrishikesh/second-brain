@@ -380,6 +380,7 @@ export async function runCli(
           summary: string;
           operation?: string[];
           root: string;
+          json?: boolean;
         },
       ) => {
         if (
@@ -392,12 +393,20 @@ export async function runCli(
         for (const operationId of options.operation ?? []) {
           await attachQueryChange(options.root, queryId, operationId);
         }
-        json(
-          await finishQuery(options.root, queryId, {
-            outcome: options.outcome,
-            answerSummary: options.summary,
-          }),
-        );
+        const result = await finishQuery(options.root, queryId, {
+          outcome: options.outcome,
+          answerSummary: options.summary,
+        });
+        if (options.json) {
+          json(result);
+        } else {
+          const warning = result.sync
+            ? formatSyncWarning(result.sync)
+            : undefined;
+          output.write(
+            warning ? `${warning}\n` : `Finished query ${queryId}.\n`,
+          );
+        }
       },
     );
 

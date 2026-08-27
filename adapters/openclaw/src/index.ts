@@ -1,5 +1,7 @@
 import {
   assertWebApproval,
+  attemptManagedSync,
+  formatSyncWarning,
   resolveWebApproval,
   statusBrain,
 } from "@second-brain/core";
@@ -565,6 +567,18 @@ const plugin: OpenClawPluginDefinition = definePluginEntry({
         ? pluginConfig.brainRoot
         : process.env.BRAIN_ROOT || "/brain";
     const activeQueries = new Map<string, string>();
+
+    api.on("gateway_start", async () => {
+      try {
+        const sync = await attemptManagedSync(root);
+        const warning = formatSyncWarning(sync);
+        if (warning) api.logger.warn(warning);
+      } catch (error) {
+        api.logger.warn(
+          `Second-brain startup synchronization failed: ${String(error)}`,
+        );
+      }
+    });
 
     api.registerTool((context) => {
       const sessionKey = hostedSessionKey(context);
