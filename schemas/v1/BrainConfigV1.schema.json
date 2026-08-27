@@ -118,7 +118,7 @@
         "semanticModel": {
           "id": "Xenova/multilingual-e5-small",
           "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
-          "artifactSha256": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c"
+          "artifactSha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
         },
         "pageTypes": [
           "source",
@@ -159,7 +159,7 @@
           "default": {
             "id": "Xenova/multilingual-e5-small",
             "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
-            "artifactSha256": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c"
+            "artifactSha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
           },
           "type": "object",
           "properties": {
@@ -174,9 +174,9 @@
               "const": "761b726dd34fb83930e26aab4e9ac3899aa1fa78"
             },
             "artifactSha256": {
-              "default": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c",
+              "default": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
               "type": "string",
-              "const": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c"
+              "const": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
             }
           },
           "required": ["id", "revision", "artifactSha256"],

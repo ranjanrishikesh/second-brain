@@ -1,15 +1,18 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   initBrain,
+  createLocalEmbeddingProvider,
   renderWikiPage,
   scanSources,
   searchBrain,
   semanticSearch,
   type WikiPageV1,
 } from "../src/index.js";
+import * as semantic from "../src/semantic.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
 function page(
@@ -38,6 +41,73 @@ function page(
 }
 
 describe("local semantic search", () => {
+  test("streams a verified model download without retaining its response body", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-semantic-stream-"));
+    const destination = path.join(root, "model", "artifact.bin");
+    const bytes = new TextEncoder().encode("streamed model artifact");
+    const expectedSha256 = createHash("sha256").update(bytes).digest("hex");
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, 8));
+          controller.enqueue(bytes.slice(8));
+          controller.close();
+        },
+      }),
+    );
+    Object.defineProperty(response, "arrayBuffer", {
+      value: async () => {
+        throw new Error("The downloader must stream rather than buffer models");
+      },
+    });
+    const streamVerifiedResponse = (
+      semantic as unknown as {
+        streamVerifiedResponse?: (
+          filePath: string,
+          response: Response,
+          expectedHash: string,
+        ) => Promise<void>;
+      }
+    ).streamVerifiedResponse;
+
+    expect(streamVerifiedResponse).toBeTypeOf("function");
+    if (!streamVerifiedResponse) return;
+    await streamVerifiedResponse(destination, response, expectedSha256);
+
+    expect(await readFile(destination, "utf8")).toBe("streamed model artifact");
+  });
+
+  test("rejects a corrupt pinned artifact before initializing the model", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-semantic-model-"));
+    await initBrain(root, { name: "Semantic", description: "Semantic test" });
+    const artifact = path.join(
+      root,
+      ".brain",
+      "cache",
+      "models",
+      "Xenova",
+      "multilingual-e5-small",
+      "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+      "onnx",
+      "model_quantized.onnx",
+    );
+    await mkdir(path.dirname(artifact), { recursive: true });
+    await writeFile(artifact, "corrupt model bytes", "utf8");
+
+    const { env } = await import("@huggingface/transformers");
+    const allowRemoteModels = env.allowRemoteModels;
+    env.allowRemoteModels = false;
+    try {
+      await expect(
+        createLocalEmbeddingProvider(root).embed(["semantic probe"]),
+      ).rejects.toThrow(
+        /Pinned semantic model checksum mismatch: expected f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193/,
+      );
+    } finally {
+      env.allowRemoteModels = allowRemoteModels;
+    }
+  });
+
   test("finds a wiki page when lexical terms do not overlap", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-semantic-wiki-"));
     await initBrain(root, { name: "Semantic", description: "Semantic test" });

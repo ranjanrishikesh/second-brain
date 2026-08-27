@@ -7,7 +7,7 @@ export const defaultSemanticModelV1 = {
   id: "Xenova/multilingual-e5-small",
   revision: "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
   artifactSha256:
-    "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c",
+    "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
 } as const;
 
 const semanticModelV1Schema = z.object({

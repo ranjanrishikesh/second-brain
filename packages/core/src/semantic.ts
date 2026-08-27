@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
-  access,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -55,15 +55,6 @@ const semanticIndexRelativePath = path.join(
   "cache",
   "semantic-index.json",
 );
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function markdownFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -174,39 +165,159 @@ async function writeSemanticIndex(
   }
 }
 
-async function filesRecursively(directory: string): Promise<string[]> {
-  if (!(await pathExists(directory))) return [];
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const absolute = path.join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...(await filesRecursively(absolute)));
-    if (entry.isFile()) files.push(absolute);
+const pinnedSemanticModelSupportFiles = [
+  {
+    path: "config.json",
+    sha256: "cb99455288675345e1a4f411438d5d0adbba5fbd3a67ea4fb03c015433b996c1",
+  },
+  {
+    path: "tokenizer.json",
+    sha256: "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+  },
+  {
+    path: "tokenizer_config.json",
+    sha256: "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
+  },
+  {
+    path: "sentencepiece.bpe.model",
+    sha256: "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
+  },
+  {
+    path: "special_tokens_map.json",
+    sha256: "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",
+  },
+  {
+    path: "quant_config.json",
+    sha256: "59d175f15264115f18c698d76e443b5d49fc6c8c599911c421405ef4f236e87d",
+  },
+] as const;
+
+function pinnedModelDirectory(
+  root: string,
+  model: { id: string; revision: string },
+): string {
+  const modelPath = model.id.split("/");
+  if (
+    modelPath.length !== 2 ||
+    modelPath.some((segment) => !/^[A-Za-z0-9._-]+$/.test(segment)) ||
+    !/^[a-f0-9]{40}$/.test(model.revision)
+  ) {
+    throw new Error("Pinned semantic model identity is invalid");
   }
-  return files;
+  return path.join(
+    root,
+    ".brain",
+    "cache",
+    "models",
+    ...modelPath,
+    model.revision,
+  );
 }
 
-async function verifyModelArtifact(
-  root: string,
+function assertModelArtifactChecksum(
+  bytes: Uint8Array,
   expectedSha256: string,
-): Promise<void> {
-  const modelDirectory = path.join(root, ".brain", "cache", "models");
-  const artifact = (await filesRecursively(modelDirectory)).find(
-    (filePath) => path.basename(filePath) === "model_quantized.onnx",
-  );
-  if (!artifact) {
-    throw new Error(
-      "Pinned semantic model artifact model_quantized.onnx is missing",
-    );
-  }
-  const actualSha256 = createHash("sha256")
-    .update(await readFile(artifact))
-    .digest("hex");
+): void {
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
   if (actualSha256 !== expectedSha256) {
     throw new Error(
       `Pinned semantic model checksum mismatch: expected ${expectedSha256}, received ${actualSha256}`,
     );
   }
+}
+
+/** Writes a response atomically while validating its bytes without buffering it. */
+export async function streamVerifiedResponse(
+  filePath: string,
+  response: Response,
+  expectedSha256: string,
+): Promise<void> {
+  if (!response.ok) {
+    throw new Error(
+      `Pinned semantic model artifact download failed with HTTP ${response.status}`,
+    );
+  }
+  if (!response.body) {
+    throw new Error(
+      "Pinned semantic model artifact download has no response body",
+    );
+  }
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  const hash = createHash("sha256");
+  try {
+    const handle = await open(temporary, "wx");
+    try {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        hash.update(value);
+        await handle.write(value);
+      }
+    } finally {
+      await handle.close();
+    }
+    const actualSha256 = hash.digest("hex");
+    if (actualSha256 !== expectedSha256) {
+      throw new Error(
+        `Pinned semantic model checksum mismatch: expected ${expectedSha256}, received ${actualSha256}`,
+      );
+    }
+    await rename(temporary, filePath);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+function pinnedModelFilePath(directory: string, relativePath: string): string {
+  const parts = relativePath.split("/");
+  if (
+    parts.length === 0 ||
+    parts.some((part) => !/^[A-Za-z0-9._-]+$/.test(part))
+  ) {
+    throw new Error("Pinned semantic model file path is invalid");
+  }
+  return path.join(directory, ...parts);
+}
+
+async function ensurePinnedModelFile(
+  directory: string,
+  model: { id: string; revision: string },
+  relativePath: string,
+  expectedSha256: string,
+): Promise<void> {
+  const destination = pinnedModelFilePath(directory, relativePath);
+  try {
+    assertModelArtifactChecksum(await readFile(destination), expectedSha256);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const response = await globalThis.fetch(
+    `https://huggingface.co/${model.id}/resolve/${model.revision}/${relativePath}`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Pinned semantic model file ${relativePath} download failed with HTTP ${response.status}`,
+    );
+  }
+  await streamVerifiedResponse(destination, response, expectedSha256);
+}
+
+async function ensurePinnedModelFiles(
+  root: string,
+  model: { id: string; revision: string; artifactSha256: string },
+): Promise<string> {
+  const directory = pinnedModelDirectory(root, model);
+  const files = [
+    { path: "onnx/model_quantized.onnx", sha256: model.artifactSha256 },
+    ...pinnedSemanticModelSupportFiles,
+  ];
+  for (const file of files) {
+    await ensurePinnedModelFile(directory, model, file.path, file.sha256);
+  }
+  return directory;
 }
 
 export function createLocalEmbeddingProvider(root: string): EmbeddingProvider {
@@ -218,19 +329,18 @@ export function createLocalEmbeddingProvider(root: string): EmbeddingProvider {
       const config = await loadBrainConfig(root);
       if (!pipelinePromise) {
         pipelinePromise = (async () => {
+          const modelDirectory = await ensurePinnedModelFiles(
+            root,
+            config.graph.semanticModel,
+          );
           const { pipeline } = await import("@huggingface/transformers");
           const extractor = await pipeline(
             "feature-extraction",
-            config.graph.semanticModel.id,
+            modelDirectory,
             {
-              cache_dir: path.join(root, ".brain", "cache", "models"),
-              revision: config.graph.semanticModel.revision,
               dtype: "q8",
+              local_files_only: true,
             },
-          );
-          await verifyModelArtifact(
-            root,
-            config.graph.semanticModel.artifactSha256,
           );
           return async (values, embeddingRole = "document") => {
             const prefixed = values.map(

@@ -131,7 +131,8 @@ async function shouldUseSemanticSearch(
   services: BrainRuntimeServices,
 ): Promise<boolean> {
   if (services.embeddings) return true;
-  return (await readBrainState(root)).setup.status === "completed";
+  const setupStatus = (await readBrainState(root)).setup.status;
+  return setupStatus === "in-progress" || setupStatus === "completed";
 }
 
 /**
@@ -181,7 +182,11 @@ export async function planReconciliation(
       candidateReasons,
     );
   }
-  if (queries.length > 0 && (await shouldUseSemanticSearch(root, services))) {
+  if (
+    queries.length > 0 &&
+    eligiblePages.length > 0 &&
+    (await shouldUseSemanticSearch(root, services))
+  ) {
     for (const query of queries) {
       addSearchReasons(
         await semanticSearch(

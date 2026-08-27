@@ -28,9 +28,9 @@ Web captures record URL, retrieval time, originating query, capture kind, conten
 
 - `graph.semanticModel.id`: fixed in v1 to `Xenova/multilingual-e5-small`.
 - `graph.semanticModel.revision`: fixed pinned model revision, `761b726dd34fb83930e26aab4e9ac3899aa1fa78`.
-- `graph.semanticModel.artifactSha256`: expected SHA-256 for `model_quantized.onnx`, `4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c`.
+- `graph.semanticModel.artifactSha256`: expected SHA-256 for `model_quantized.onnx`, `f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193`.
 
-The first initial setup downloads the pinned model to `.brain/cache/models/` and verifies that artifact before embedding anything. Search uses deterministic SQLite FTS5 lexical retrieval by default; reconciliation after setup also uses the local semantic index to find conceptually related pages. The semantic index is rebuilt whenever its source/wiki corpus revision or model metadata changes. Both it and the model cache are disposable. If the model is absent and the machine is offline, setup stops before completion; restore network access or a verified cache, then resume setup.
+The first initial setup downloads the pinned model to `.brain/cache/models/` under its exact revision. It verifies the quantized model artifact and its required configuration/tokenizer files before embedding anything, then loads that local directory with network fallback disabled. Search uses deterministic SQLite FTS5 lexical retrieval by default; reconciliation during and after setup also uses the local semantic index to find conceptually related pages. The semantic index is rebuilt whenever its source/wiki corpus revision or model metadata changes. Both it and the model cache are disposable. If the model is absent and the machine is offline, setup stops before completion; restore network access or a verified cache, then resume setup.
 
 ## Graph
 

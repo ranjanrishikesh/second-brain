@@ -16,7 +16,7 @@
 - Keep `sources/`, `wiki/`, `.brain/source-manifest.json`, `.brain/state.json`, and `.brain/operations.jsonl` canonical and write them only through managed core transactions.
 - Keep `.brain/cache/` and `.brain/runtime/` disposable; cache deletion must never alter canonical knowledge.
 - Use schema version `1` and backwards-compatible defaults for newly optional serialized fields; do not introduce a version `2` schema.
-- Pin the local embedding model revision and artifact SHA-256 `4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c`; never silently fall back to lexical-only reconciliation.
+- Pin the local embedding model revision and artifact SHA-256 `f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193`; never silently fall back to lexical-only reconciliation.
 - Require a per-query web approval before a query can enter the web tier; approval expires after 24 hours if the query remains open.
 - Auto-commit managed knowledge changes. Push only to an explicitly confirmed target, only as a normal fast-forward, never by force, pull, merge, rebase, remote rewrite, or conflict resolution.
 - Preserve unrelated unstaged work. Refuse managed writes with staged changes or dirty managed paths.
