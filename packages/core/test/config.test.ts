@@ -255,6 +255,162 @@ describe("initBrain", () => {
     expect((await loadBrainConfig(root)).brain.name).toBe("Simple Physics");
   });
 
+  test("routes explicit non-Git initialization through the managed operation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-non-git-"));
+
+    const result = await initBrain(root, {
+      name: "Local Physics",
+      description: "A local source-backed physics brain.",
+    });
+
+    expect(result).toMatchObject({
+      mode: "template-replaced",
+      operationId: expect.stringMatching(/^op_identity_/),
+    });
+    expect(result).not.toHaveProperty("commit");
+    expect(
+      (await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toContainEqual(expect.objectContaining({ kind: "identity" }));
+  });
+
+  test("creates the first managed identity commit in an unborn Git repository", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-unborn-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+
+    const result = await initBrain(root, {
+      name: "New Astronomy",
+      description: "A new source-backed astronomy brain.",
+    });
+
+    expect(result).toMatchObject({
+      mode: "template-replaced",
+      operationId: expect.stringMatching(/^op_identity_/),
+      commit: expect.stringMatching(/^[a-f0-9]{40}$/),
+    });
+    expect(await git(root, ["log", "-1", "--format=%B"])).toContain(
+      "Brain-Managed: true",
+    );
+    expect(await git(root, ["status", "--short"])).toBe("");
+  });
+
+  test("adds a managed identity commit to an existing uninitialized repository", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-existing-git-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+    await writeFile(path.join(root, "README.md"), "Owner repository.\n");
+    await git(root, ["add", "README.md"]);
+    await git(root, ["commit", "-m", "owner: initial repository"]);
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    const result = await initBrain(root, {
+      name: "Existing Repository Brain",
+      description: "Knowledge in an existing repository.",
+    });
+
+    expect(result).toMatchObject({
+      operationId: expect.stringMatching(/^op_identity_/),
+      commit: expect.stringMatching(/^[a-f0-9]{40}$/),
+    });
+    expect(await readFile(path.join(root, "README.md"), "utf8")).toBe(
+      "Owner repository.\n",
+    );
+    expect(await git(root, ["rev-parse", "HEAD^1"])).toBe(beforeHead);
+    expect(await git(root, ["status", "--short"])).toBe("");
+  });
+
+  test("refuses staged owner work before scaffolding an uninitialized Git repository", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-staged-new-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+    await writeFile(path.join(root, "owner-notes.md"), "Keep staged work.\n");
+    await git(root, ["add", "owner-notes.md"]);
+
+    await expect(
+      initBrain(root, {
+        name: "Unsafe Initialization",
+        description: "This must not be written.",
+      }),
+    ).rejects.toThrow(/staged changes/i);
+
+    await expect(
+      access(path.join(root, "brain.config.yaml")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await git(root, ["status", "--short", "--", "owner-notes.md"])).toBe(
+      "A  owner-notes.md",
+    );
+  });
+
+  test("recovers an interrupted explicit initialization before the first Git commit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-unborn-crash-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+
+    await expect(
+      initBrain(
+        root,
+        {
+          name: "Recoverable New Brain",
+          description: "A recoverable first initialization.",
+        },
+        { simulateCrashAfter: "files-applied" },
+      ),
+    ).rejects.toThrow(/simulated transaction crash/i);
+    await expect(recoverBrain(root)).resolves.toBe("restored");
+    await expect(
+      git(root, ["rev-parse", "--verify", "HEAD"]),
+    ).rejects.toThrow();
+    expect((await loadBrainConfig(root)).brain.name).toBe(
+      "Portable Second Brain",
+    );
+
+    await expect(
+      initBrain(root, {
+        name: "Recoverable New Brain",
+        description: "A recoverable first initialization.",
+      }),
+    ).resolves.toMatchObject({
+      operationId: expect.stringMatching(/^op_identity_/),
+      commit: expect.stringMatching(/^[a-f0-9]{40}$/),
+    });
+  });
+
+  test("publishes the first managed index after a post-commit initialization failure", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-init-unborn-index-recovery-"),
+    );
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+
+    await expect(
+      initBrain(
+        root,
+        {
+          name: "Committed New Brain",
+          description: "A committed initialization awaiting index recovery.",
+        },
+        { simulateIndexPublishFailure: true },
+      ),
+    ).rejects.toThrow(/recovery is required/i);
+
+    await expect(recoverBrain(root)).resolves.toBe("committed");
+    expect(await git(root, ["status", "--short"])).toBe("");
+    expect(await git(root, ["log", "-1", "--format=%B"])).toContain(
+      "Brain-Managed: true",
+    );
+    expect((await loadBrainConfig(root)).brain.name).toBe(
+      "Committed New Brain",
+    );
+  });
+
   test("keeps explicit identity overrides and clean reruns idempotent", async () => {
     const root = await templateGitRepository();
     const first = await initBrain(root, {

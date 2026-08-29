@@ -1,5 +1,7 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  access,
   mkdir,
   readFile,
   readdir,
@@ -8,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { brainConfigV1Schema, type BrainConfigV1 } from "./config.js";
@@ -22,6 +25,8 @@ import {
   type OperationRecordV1,
   type TransactionTestOptions,
 } from "./transaction.js";
+
+const execFile = promisify(execFileCallback);
 
 export interface InitBrainOptions {
   name?: string;
@@ -47,6 +52,27 @@ const pageDirectories = [
   "questions",
 ] as const;
 
+const initialScaffoldStagePaths = [
+  "BRAIN.md",
+  "brain.config.yaml",
+  "wiki/home.md",
+  "wiki/index.md",
+  "wiki/map.md",
+  "wiki/log.md",
+  "wiki/reports/health.md",
+  ".brain/source-manifest.json",
+  ".brain/state.json",
+  ".brain/operations.jsonl",
+] as const;
+
+const unchangedInitialScaffoldPaths = [
+  "wiki/index.md",
+  "wiki/map.md",
+  "wiki/reports/health.md",
+  ".brain/source-manifest.json",
+  ".brain/state.json",
+] as const;
+
 const templateCharter = `# ${TEMPLATE_BRAIN_NAME}
 
 ${TEMPLATE_BRAIN_DESCRIPTION}
@@ -63,6 +89,24 @@ Document what belongs in this brain and what should remain outside it.
 
 Add domain-specific terminology, entity types, relationship types, and evidence preferences here.
 `;
+
+function renderLegacyCharter(identity: {
+  name: string;
+  description: string;
+}): string {
+  return `# ${identity.name}
+
+${identity.description}
+
+## Purpose
+
+${identity.description}
+
+## Boundaries
+
+Include source material relevant to ${identity.name}.
+`;
+}
 
 async function writeIfMissing(
   filePath: string,
@@ -84,6 +128,61 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
   } finally {
     await rm(temporaryPath, { force: true });
   }
+}
+
+async function assertNoStagedOwnerWork(root: string): Promise<void> {
+  try {
+    await execFile("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: root,
+    });
+  } catch {
+    return;
+  }
+  try {
+    await execFile("git", ["diff", "--cached", "--quiet", "--exit-code"], {
+      cwd: root,
+    });
+  } catch (error) {
+    if ((error as { code?: number }).code === 1) {
+      throw new Error(
+        "Refusing brain initialization while Git has staged changes",
+      );
+    }
+    throw error;
+  }
+}
+
+async function isUnbornGitRepository(root: string): Promise<boolean> {
+  try {
+    await execFile("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: root,
+    });
+  } catch {
+    return false;
+  }
+  try {
+    await execFile("git", ["rev-parse", "--verify", "HEAD"], { cwd: root });
+    return false;
+  } catch (error) {
+    if ((error as { code?: number }).code === 128) return true;
+    throw error;
+  }
+}
+
+async function missingPaths(
+  root: string,
+  relativePaths: readonly string[],
+): Promise<string[]> {
+  const missing: string[] = [];
+  for (const relativePath of relativePaths) {
+    try {
+      await access(path.join(root, relativePath));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      missing.push(relativePath);
+    }
+  }
+  return missing;
 }
 
 async function pristineTemplateState(root: string): Promise<boolean> {
@@ -187,9 +286,7 @@ async function ensureScaffold(
   );
   await writeIfMissing(
     path.join(root, "BRAIN.md"),
-    initialIdentity
-      ? `# ${initialIdentity.name}\n\n${initialIdentity.description}\n\n## Purpose\n\n${initialIdentity.description}\n\n## Boundaries\n\nInclude source material relevant to ${initialIdentity.name}.\n`
-      : templateCharter,
+    initialIdentity ? renderLegacyCharter(initialIdentity) : templateCharter,
   );
   await writeIfMissing(
     path.join(root, ".brain", "source-manifest.json"),
@@ -266,15 +363,21 @@ export async function initBrain(
           description: configuredIdentity.brain.description,
         }
       : requestedIdentity(options, suggestedName);
-  const explicitNewIdentity =
-    !hadConfiguration &&
-    options?.name !== undefined &&
-    options.description !== undefined &&
-    (identity.name !== TEMPLATE_BRAIN_NAME ||
-      identity.description !== TEMPLATE_BRAIN_DESCRIPTION)
-      ? identity
-      : undefined;
-  await ensureScaffold(root, explicitNewIdentity);
+  if (!hadConfiguration) await assertNoStagedOwnerWork(root);
+  const adoptExistingUnbornScaffold =
+    hadConfiguration &&
+    configuredIdentity?.brain.name === TEMPLATE_BRAIN_NAME &&
+    configuredIdentity.brain.description === TEMPLATE_BRAIN_DESCRIPTION &&
+    (await pristineTemplateState(root)) &&
+    (await isUnbornGitRepository(root));
+  const includeInitialScaffold =
+    !hadConfiguration || adoptExistingUnbornScaffold;
+  const adoptableScaffoldPaths = !hadConfiguration
+    ? await missingPaths(root, initialScaffoldStagePaths)
+    : adoptExistingUnbornScaffold
+      ? [...initialScaffoldStagePaths]
+      : [];
+  await ensureScaffold(root);
   const existing = brainConfigV1Schema.parse(
     parse(await readFile(path.join(root, "brain.config.yaml"), "utf8")),
   );
@@ -311,12 +414,12 @@ export async function initBrain(
     options.description !== undefined &&
     (identity.name !== TEMPLATE_BRAIN_NAME ||
       identity.description !== TEMPLATE_BRAIN_DESCRIPTION);
-  const nextCharter = explicitLegacyCharter
-    ? identityCharter.replace(
-        /Replace this section after cloning[^\n]*/i,
-        identity.description,
-      )
-    : identityCharter;
+  const nextCharter =
+    explicitLegacyCharter &&
+    (/replace\s+this\s+section\s+after\s+cloning/i.test(identityCharter) ||
+      /document\s+what\s+belongs\s+in\s+this\s+brain/i.test(identityCharter))
+      ? renderLegacyCharter(identity)
+      : identityCharter;
   const nextHome = updateHomeIdentity(currentHome, identity.name);
   if (
     sameIdentity &&
@@ -337,6 +440,7 @@ export async function initBrain(
       operationId,
       commitMessage: `brain(identity): initialize ${identity.name} [op:${operationId}]`,
       managedRootPaths: ["BRAIN.md", "brain.config.yaml"],
+      allowUntrackedPaths: adoptableScaffoldPaths,
       testOptions,
     },
     async (writer) => {
@@ -367,6 +471,14 @@ export async function initBrain(
         "wiki/log.md",
         `${existingLog.trimEnd()}\n\n## [${now}] identity | Initialized ${identity.name}\n\n- Operation: \`${operationId}\`\n`,
       );
+      if (includeInitialScaffold) {
+        for (const relativePath of unchangedInitialScaffoldPaths) {
+          await writer.writeText(
+            relativePath,
+            await readFile(path.join(root, relativePath), "utf8"),
+          );
+        }
+      }
       return {
         value: { version: 1 as const, mode, ...identity, operationId },
         stagePaths: [
@@ -375,6 +487,7 @@ export async function initBrain(
           "wiki/home.md",
           "wiki/log.md",
           ".brain/operations.jsonl",
+          ...(includeInitialScaffold ? unchangedInitialScaffoldPaths : []),
         ],
       };
     },

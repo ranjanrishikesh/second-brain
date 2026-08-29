@@ -252,6 +252,15 @@ async function isGitRepository(root: string): Promise<boolean> {
   }
 }
 
+async function currentGitHead(root: string): Promise<string> {
+  try {
+    return await git(root, ["rev-parse", "--verify", "HEAD"]);
+  } catch (error) {
+    if ((error as { code?: number }).code === 128) return "";
+    throw error;
+  }
+}
+
 async function hasStagedChanges(root: string): Promise<boolean> {
   try {
     await execFile("git", ["diff", "--cached", "--quiet", "--exit-code"], {
@@ -408,6 +417,7 @@ async function publishRecoveredIsolatedIndex(
 
   let indexLock: HeldGitIndexLock | undefined;
   const validationIndexPath = path.join(transactionPath, "recovery-index");
+  const emptyIndexPath = path.join(transactionPath, "empty-index");
   try {
     indexLock = await holdGitIndexLock(root, operationId);
     await testOptions.afterIndexLock?.();
@@ -415,9 +425,19 @@ async function publishRecoveredIsolatedIndex(
     await writeJournal(journalPath, journal);
     // `write-tree` may update index extensions, so inspect a copy while the
     // shared index lock prevents a concurrent caller from changing it.
-    await copyFile(indexLock.indexPath, validationIndexPath);
+    if (await pathExists(indexLock.indexPath)) {
+      await copyFile(indexLock.indexPath, validationIndexPath);
+    } else {
+      await git(root, ["read-tree", "--empty"], validationIndexPath);
+    }
     const currentTree = await git(root, ["write-tree"], validationIndexPath);
-    const preHeadTree = await git(root, ["rev-parse", `${preHead}^{tree}`]);
+    let preHeadTree: string;
+    if (preHead) {
+      preHeadTree = await git(root, ["rev-parse", `${preHead}^{tree}`]);
+    } else {
+      await git(root, ["read-tree", "--empty"], emptyIndexPath);
+      preHeadTree = await git(root, ["write-tree"], emptyIndexPath);
+    }
     const commitTree = await git(root, ["rev-parse", `${commitHash}^{tree}`]);
     if (currentTree === commitTree) return;
     if (currentTree !== preHeadTree) {
@@ -435,6 +455,7 @@ async function publishRecoveredIsolatedIndex(
   } finally {
     await releaseGitIndexLock(indexLock);
     await rm(validationIndexPath, { force: true });
+    await rm(emptyIndexPath, { force: true });
   }
 }
 
@@ -939,10 +960,15 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
   }
 }
 
-async function changedCanonicalWorktreePaths(
+interface CanonicalWorktreeChange {
+  status: string;
+  path: string;
+}
+
+async function changedCanonicalWorktreeEntries(
   root: string,
   managedRootPaths: readonly string[] = [],
-): Promise<string[]> {
+): Promise<CanonicalWorktreeChange[]> {
   const { stdout } = await execFile(
     "git",
     [
@@ -958,20 +984,32 @@ async function changedCanonicalWorktreePaths(
     { cwd: root, encoding: "buffer" },
   );
   const records = stdout.toString("utf8").split("\0");
-  const paths = new Set<string>();
+  const changes = new Map<string, CanonicalWorktreeChange>();
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (!record) continue;
     const status = record.slice(0, 2);
     const relativePath = record.slice(3);
-    if (relativePath) paths.add(relativePath);
+    if (relativePath) changes.set(relativePath, { status, path: relativePath });
     if (status.includes("R") || status.includes("C")) {
       const originalPath = records[index + 1];
-      if (originalPath) paths.add(originalPath);
+      if (originalPath)
+        changes.set(originalPath, { status, path: originalPath });
       index += 1;
     }
   }
-  return [...paths].sort();
+  return [...changes.values()].sort((left, right) =>
+    left.path.localeCompare(right.path),
+  );
+}
+
+async function changedCanonicalWorktreePaths(
+  root: string,
+  managedRootPaths: readonly string[] = [],
+): Promise<string[]> {
+  return (await changedCanonicalWorktreeEntries(root, managedRootPaths)).map(
+    (change) => change.path,
+  );
 }
 
 async function assertNoUnexpectedCanonicalWorktreeChanges(
@@ -1057,6 +1095,8 @@ export interface CanonicalWriteOptions<T> {
   testOptions?: TransactionTestOptions;
   /** Exact root files this operation may snapshot, write, stage, and restore. */
   managedRootPaths?: string[];
+  /** Exact missing scaffold files that this operation may adopt as untracked. */
+  allowUntrackedPaths?: string[];
 }
 
 export async function runCanonicalWrite<T>(
@@ -1070,6 +1110,13 @@ export async function runCanonicalWrite<T>(
     throw new Error(`Invalid operationId: ${options.operationId}`);
   }
   const managedRootPaths = safeManagedRootPaths(options.managedRootPaths);
+  const managedRootPathSet = new Set(managedRootPaths);
+  const allowUntrackedPaths = new Set(
+    safeStagePaths(root, options.allowUntrackedPaths ?? []),
+  );
+  for (const relativePath of allowUntrackedPaths) {
+    canonicalManagedPath(root, relativePath, managedRootPathSet);
+  }
   const runtimePath = path.join(root, ".brain", "runtime");
   const journalPath = path.join(runtimePath, "transaction.json");
   if (await pathExists(journalPath)) {
@@ -1086,18 +1133,17 @@ export async function runCanonicalWrite<T>(
     if (await hasStagedChanges(root)) {
       throw new Error("Refusing canonical write while Git has staged changes");
     }
-    const dirtyManaged = await git(root, [
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-      "--",
-      "wiki",
-      ...trackedBrainFiles,
-      ...managedRootPaths,
-    ]);
-    if (dirtyManaged) {
+    const dirtyManaged = (
+      await changedCanonicalWorktreeEntries(root, managedRootPaths)
+    ).filter(
+      (change) =>
+        change.status !== "??" || !allowUntrackedPaths.has(change.path),
+    );
+    if (dirtyManaged.length > 0) {
       throw new Error(
-        `Refusing canonical write with dirty managed files:\n${dirtyManaged}`,
+        `Refusing canonical write with dirty managed files:\n${dirtyManaged
+          .map((change) => `${change.status} ${change.path}`)
+          .join("\n")}`,
       );
     }
   }
@@ -1125,7 +1171,7 @@ export async function runCanonicalWrite<T>(
   let snapshotPrepared = false;
   let journal: TransactionJournal | undefined;
   try {
-    const preHead = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
+    const preHead = gitRepository ? await currentGitHead(root) : "";
     await mkdir(transactionRoot, { recursive: true });
     const realRuntime = await realpath(runtimePath);
     const realTransactionRoot = await realpath(transactionRoot);
@@ -1178,7 +1224,7 @@ export async function runCanonicalWrite<T>(
           "test: concurrent HEAD movement",
         ]);
       }
-      if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
+      if ((await currentGitHead(root)) !== preHead) {
         throw new Error("Git HEAD changed during the canonical write");
       }
       if (await hasStagedChanges(root)) {
@@ -1198,7 +1244,11 @@ export async function runCanonicalWrite<T>(
         // external. This private index is the exact, graph-validated snapshot
         // we will later commit; the shared index is never used as staging.
         const isolatedIndexPath = path.join(transactionPath, "git-index");
-        await git(root, ["read-tree", preHead], isolatedIndexPath);
+        await git(
+          root,
+          preHead ? ["read-tree", preHead] : ["read-tree", "--empty"],
+          isolatedIndexPath,
+        );
         await git(root, ["add", "-A", "--", ...stagePaths], isolatedIndexPath);
         await mutation.verifyBeforeCommit?.({
           gitRepository: true,
@@ -1264,7 +1314,7 @@ export async function runCanonicalWrite<T>(
         await writer.assertWorktree();
         await writer.assertPrivateIndex(isolatedIndexPath);
         await assertPrivateIndexTree(root, isolatedIndexPath, validatedTree);
-        if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
+        if ((await currentGitHead(root)) !== preHead) {
           throw new Error("Git HEAD changed during the canonical write");
         }
 
@@ -1282,7 +1332,7 @@ export async function runCanonicalWrite<T>(
             "Git staged changes appeared during the canonical write; refusing to commit",
           );
         }
-        if ((await git(root, ["rev-parse", "HEAD"])) !== preHead) {
+        if ((await currentGitHead(root)) !== preHead) {
           throw new Error("Git HEAD changed during the canonical write");
         }
         await runPreCommitHook(root, isolatedIndexPath);
@@ -1316,7 +1366,13 @@ export async function runCanonicalWrite<T>(
         );
         commit = await git(
           root,
-          ["commit-tree", validatedTree, "-p", preHead, "-F", messagePath],
+          [
+            "commit-tree",
+            validatedTree,
+            ...(preHead ? ["-p", preHead] : []),
+            "-F",
+            messagePath,
+          ],
           isolatedIndexPath,
         );
         // Persist the hash before moving the branch so an interrupted CAS can
@@ -1324,7 +1380,12 @@ export async function runCanonicalWrite<T>(
         journal.commitHash = commit;
         await writeJournal(journalPath, journal);
         const headRef = await git(root, ["symbolic-ref", "--quiet", "HEAD"]);
-        await git(root, ["update-ref", headRef, commit, preHead]);
+        await git(root, [
+          "update-ref",
+          headRef,
+          commit,
+          preHead || "0000000000000000000000000000000000000000",
+        ]);
         headUpdated = true;
 
         // The shared index was clean when its lock was acquired, so replacing
@@ -1794,7 +1855,7 @@ export async function recoverBrain(
     delete journal.gitIndexLock;
     await writeJournal(journalPath, journal);
   }
-  const head = gitRepository ? await git(root, ["rev-parse", "HEAD"]) : "";
+  const head = gitRepository ? await currentGitHead(root) : "";
   let transactionCommitExists = false;
   if (journal.phase === "committed" && journal.commitHash) {
     transactionCommitExists = await execFile(
@@ -1816,7 +1877,7 @@ export async function recoverBrain(
       "--format=%H",
       "--fixed-strings",
       `--grep=[op:${journal.operationId}]`,
-      `${journal.preHead}..${head}`,
+      ...(journal.preHead ? [`${journal.preHead}..${head}`] : [head]),
     ]).catch(() => "");
     transactionCommitExists = matchingCommits.length > 0;
   }
