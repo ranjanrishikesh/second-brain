@@ -45,6 +45,37 @@
         "error": {
           "type": "string"
         },
+        "docxOutputPolicy": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "semanticBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "convertedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "extractedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "version",
+            "semanticBytes",
+            "convertedBytes",
+            "extractedBytes"
+          ],
+          "additionalProperties": false
+        },
         "supersedes": {
           "type": "string"
         },
@@ -146,6 +177,37 @@
         },
         "error": {
           "type": "string"
+        },
+        "docxOutputPolicy": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "semanticBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "convertedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "extractedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "version",
+            "semanticBytes",
+            "convertedBytes",
+            "extractedBytes"
+          ],
+          "additionalProperties": false
         },
         "supersedes": {
           "type": "string"

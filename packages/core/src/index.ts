@@ -39,8 +39,12 @@ export { doctorBrain } from "./doctor.js";
 export type { DoctorIssue, DoctorReport } from "./doctor.js";
 export { scanSources } from "./sources/scan.js";
 export { supersedeSource } from "./sources/supersede.js";
-export { sourceRecordV1Schema } from "./sources/types.js";
+export {
+  docxOutputPolicyV1Schema,
+  sourceRecordV1Schema,
+} from "./sources/types.js";
 export type {
+  DocxOutputPolicyV1,
   ExtractedSourceV1,
   SourceChunkV1,
   SourceRecordV1,

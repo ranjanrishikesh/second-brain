@@ -7,7 +7,7 @@ import { loadBrainConfig } from "../config.js";
 import { calculateExtractedSourceSha256 } from "./cache-integrity.js";
 import {
   extractCsv,
-  extractDocx,
+  extractDocxWithPolicy,
   extractEpub,
   extractHtml,
   extractJson,
@@ -18,6 +18,7 @@ import {
 } from "./extract.js";
 import {
   sourceRecordV1Schema,
+  type DocxOutputPolicyV1,
   type ExtractedSourceV1,
   type SourceRecordV1,
   type SourceScanResult,
@@ -180,49 +181,61 @@ export async function scanSources(
       const docx = extension === ".docx";
       const epub = extension === ".epub";
       let extracted: ExtractedSourceV1 | undefined;
+      let docxOutputPolicy: DocxOutputPolicyV1 | undefined;
       let extractionError = exceedsSizeLimit
         ? `Source exceeds configured maximum of ${config.sources.maxFileBytes} bytes`
         : undefined;
       try {
-        extracted = exceedsSizeLimit
-          ? undefined
-          : markdown
-            ? extractMarkdown(id, relativePath, content?.toString("utf8") ?? "")
-            : plainText
-              ? extractText(id, relativePath, content?.toString("utf8") ?? "")
-              : html
-                ? extractHtml(id, relativePath, content?.toString("utf8") ?? "")
-                : json
-                  ? extractJson(
+        if (!exceedsSizeLimit && docx) {
+          const docxResult = await extractDocxWithPolicy(
+            id,
+            relativePath,
+            new Uint8Array(content ?? []),
+            config.sources.maxFileBytes,
+          );
+          extracted = docxResult.extracted;
+          docxOutputPolicy = docxResult.outputPolicy;
+        } else {
+          extracted = exceedsSizeLimit
+            ? undefined
+            : markdown
+              ? extractMarkdown(
+                  id,
+                  relativePath,
+                  content?.toString("utf8") ?? "",
+                )
+              : plainText
+                ? extractText(id, relativePath, content?.toString("utf8") ?? "")
+                : html
+                  ? extractHtml(
                       id,
                       relativePath,
                       content?.toString("utf8") ?? "",
                     )
-                  : jsonLines
-                    ? extractJsonLines(
+                  : json
+                    ? extractJson(
                         id,
                         relativePath,
                         content?.toString("utf8") ?? "",
                       )
-                    : csv || tsv
-                      ? extractCsv(
+                    : jsonLines
+                      ? extractJsonLines(
                           id,
                           relativePath,
                           content?.toString("utf8") ?? "",
-                          tsv ? "\t" : ",",
                         )
-                      : pdf
-                        ? await extractPdf(
+                      : csv || tsv
+                        ? extractCsv(
                             id,
                             relativePath,
-                            new Uint8Array(content ?? []),
+                            content?.toString("utf8") ?? "",
+                            tsv ? "\t" : ",",
                           )
-                        : docx
-                          ? await extractDocx(
+                        : pdf
+                          ? await extractPdf(
                               id,
                               relativePath,
                               new Uint8Array(content ?? []),
-                              config.sources.maxFileBytes,
                             )
                           : epub
                             ? await extractEpub(
@@ -231,6 +244,7 @@ export async function scanSources(
                                 new Uint8Array(content ?? []),
                               )
                             : undefined;
+        }
       } catch (error) {
         extractionError =
           error instanceof Error
@@ -298,6 +312,7 @@ export async function scanSources(
         ...(extracted
           ? { extractedSha256: calculateExtractedSourceSha256(extracted) }
           : {}),
+        ...(docxOutputPolicy ? { docxOutputPolicy } : {}),
         provenance: webCapture
           ? {
               kind: "web",

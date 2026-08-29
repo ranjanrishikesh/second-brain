@@ -2,6 +2,15 @@ import { z } from "zod";
 
 const extractedSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
+export const docxOutputPolicyV1Schema = z.object({
+  version: z.literal(1),
+  semanticBytes: z.number().int().nonnegative(),
+  convertedBytes: z.number().int().nonnegative(),
+  extractedBytes: z.number().int().nonnegative(),
+});
+
+export type DocxOutputPolicyV1 = z.infer<typeof docxOutputPolicyV1Schema>;
+
 const sourceRecordBaseV1Schema = z.object({
   version: z.literal(1),
   id: z.string().regex(/^src_[a-f0-9]{16}$/),
@@ -13,6 +22,7 @@ const sourceRecordBaseV1Schema = z.object({
   discoveredAt: z.string().datetime(),
   extractor: z.string().min(1),
   error: z.string().optional(),
+  docxOutputPolicy: docxOutputPolicyV1Schema.optional(),
   supersedes: z.string().optional(),
   provenance: z
     .object({

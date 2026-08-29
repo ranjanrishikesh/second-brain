@@ -1,3 +1,5 @@
+import type { DocxOutputPolicyV1 } from "./types.js";
+
 interface OutputBudget {
   maxBytes: number;
   usedBytes: number;
@@ -71,6 +73,7 @@ function measureReferencedBody(
 export function assertDocxSemanticOutputBudget(
   document: unknown,
   maxBytes: number,
+  recordMeasuredBytes?: (bytes: number) => void,
 ): unknown {
   const root = asRecord(document);
   if (!root) throw new Error("DOCX converter returned an invalid document");
@@ -96,11 +99,29 @@ export function assertDocxSemanticOutputBudget(
     measureTree(commentsById.get(reference.commentId)?.body, budget);
   }
 
+  recordMeasuredBytes?.(budget.usedBytes);
   return document;
 }
 
-export function assertDocxOutputSize(value: string, maxBytes: number): void {
-  if (Buffer.byteLength(value, "utf8") > maxBytes) {
+export function assertDocxOutputSize(value: string, maxBytes: number): number {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes > maxBytes) {
+    throw outputLimitError(maxBytes);
+  }
+  return bytes;
+}
+
+export function assertDocxOutputPolicy(
+  policy: DocxOutputPolicyV1,
+  maxBytes: number,
+): void {
+  if (
+    Math.max(
+      policy.semanticBytes,
+      policy.convertedBytes,
+      policy.extractedBytes,
+    ) > maxBytes
+  ) {
     throw outputLimitError(maxBytes);
   }
 }

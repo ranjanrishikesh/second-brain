@@ -70,6 +70,24 @@ async function createRepeatedFootnoteDocx(): Promise<Uint8Array> {
   });
 }
 
+async function createStructurallyAmplifiedFootnoteDocx(): Promise<Uint8Array> {
+  const references = Array.from(
+    { length: 200 },
+    () => '<w:r><w:footnoteReference w:id="1"/></w:r>',
+  ).join("");
+  const emptyStructure = Array.from(
+    { length: 100 },
+    () => "<w:p><w:r><w:t></w:t></w:r></w:p>",
+  ).join("");
+  return await createDocx(`<w:p>${references}</w:p>`, {
+    "word/footnotes.xml":
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:footnote w:id="1">${emptyStructure}</w:footnote>` +
+      "</w:footnotes>",
+  });
+}
+
 interface CentralDirectoryEntryLocation {
   centralOffset: number;
   centralSize: number;
@@ -744,6 +762,9 @@ describe("scanSources", () => {
     expect(source).toMatchObject({
       extractionStatus: "ready",
       extractor: "docx-v1",
+      docxOutputPolicy: {
+        version: 1,
+      },
     });
     if (!source) throw new Error("Expected the DOCX source to be registered");
 
@@ -786,6 +807,52 @@ describe("scanSources", () => {
     await writeFile(configPath, stringify(config));
     const expectedError = /converted docx content exceeds.*1000000 bytes/i;
 
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
+    await rm(
+      path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+    );
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
+  });
+
+  test("enforces structural DOCX semantic cost equally with and without cache", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-docx-cache-structure-policy-"),
+    );
+    await initBrain(root, {
+      name: "Test",
+      description: "DOCX cache structural policy test",
+    });
+    await writeFile(
+      path.join(root, "sources", "structural-amplification.docx"),
+      await createStructurallyAmplifiedFootnoteDocx(),
+    );
+    const scan = await scanSources(root);
+    const source = scan.added[0];
+    expect(source).toMatchObject({
+      extractionStatus: "ready",
+      extractor: "docx-v1",
+      docxOutputPolicy: {
+        version: 1,
+      },
+    });
+    if (!source) throw new Error("Expected the DOCX source to be registered");
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 1_000_000;
+    await writeFile(configPath, stringify(config));
+    const expectedError = /converted docx content exceeds.*1000000 bytes/i;
+
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const legacyManifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      sources: Array<Record<string, unknown>>;
+    };
+    delete legacyManifest.sources[0]?.docxOutputPolicy;
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify(legacyManifest, null, 2)}\n`,
+    );
     await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
     await rm(
       path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),

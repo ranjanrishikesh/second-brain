@@ -3,7 +3,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "../config.js";
 import { validateDocxArchive } from "./docx-archive.js";
-import { assertDocxOutputSize } from "./docx-output-budget.js";
+import {
+  assertDocxOutputPolicy,
+  assertDocxOutputSize,
+} from "./docx-output-budget.js";
 import {
   extractCsv,
   extractDocx,
@@ -122,10 +125,24 @@ export async function loadExtractedSourceCache(
       readCanonicalSourceContent(root, source),
       loadBrainConfig(root),
     ]);
-    await validateDocxArchive(
-      new Uint8Array(content),
-      config.sources.maxFileBytes,
-    );
+    if (source.docxOutputPolicy) {
+      await validateDocxArchive(
+        new Uint8Array(content),
+        config.sources.maxFileBytes,
+      );
+      assertDocxOutputPolicy(
+        source.docxOutputPolicy,
+        config.sources.maxFileBytes,
+      );
+    } else {
+      const revalidated = await extractDocx(
+        source.id,
+        source.path,
+        new Uint8Array(content),
+        config.sources.maxFileBytes,
+      );
+      assertCanonicalExtractedSource(revalidated, source);
+    }
     assertDocxOutputSize(cached.text, config.sources.maxFileBytes);
   }
   return cached;

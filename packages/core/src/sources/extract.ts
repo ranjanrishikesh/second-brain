@@ -9,7 +9,7 @@ import {
   assertDocxOutputSize,
   assertDocxSemanticOutputBudget,
 } from "./docx-output-budget.js";
-import type { ExtractedSourceV1 } from "./types.js";
+import type { DocxOutputPolicyV1, ExtractedSourceV1 } from "./types.js";
 
 function titleFromMarkdown(text: string, filePath: string): string {
   const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
@@ -286,8 +286,23 @@ export async function extractDocx(
   bytes: Uint8Array,
   maxExpandedBytes: number,
 ): Promise<ExtractedSourceV1> {
+  return (
+    await extractDocxWithPolicy(sourceId, filePath, bytes, maxExpandedBytes)
+  ).extracted;
+}
+
+export async function extractDocxWithPolicy(
+  sourceId: string,
+  filePath: string,
+  bytes: Uint8Array,
+  maxExpandedBytes: number,
+): Promise<{
+  extracted: ExtractedSourceV1;
+  outputPolicy: DocxOutputPolicyV1;
+}> {
   await validateDocxArchive(bytes, maxExpandedBytes);
   const { default: mammoth } = await import("mammoth");
+  let semanticBytes: number | undefined;
   const converted = await mammoth.convertToHtml(
     { buffer: Buffer.from(bytes) },
     {
@@ -295,18 +310,41 @@ export async function extractDocx(
       includeEmbeddedStyleMap: false,
       convertImage: mammoth.images.imgElement(async () => ({ src: "" })),
       transformDocument: (document: unknown) =>
-        assertDocxSemanticOutputBudget(document, maxExpandedBytes),
+        assertDocxSemanticOutputBudget(
+          document,
+          maxExpandedBytes,
+          (measuredBytes) => {
+            semanticBytes = measuredBytes;
+          },
+        ),
     },
   );
-  assertDocxOutputSize(converted.value, maxExpandedBytes);
+  if (semanticBytes === undefined) {
+    throw new Error("DOCX converter did not validate semantic output");
+  }
+  const convertedBytes = assertDocxOutputSize(
+    converted.value,
+    maxExpandedBytes,
+  );
   const html = extractHtml(
     sourceId,
     filePath,
     `<html><body>${converted.value}</body></html>`,
   );
   const structured = extractMarkdown(sourceId, filePath, html.text);
-  assertDocxOutputSize(structured.text, maxExpandedBytes);
-  return { ...structured, title: html.title };
+  const extractedBytes = assertDocxOutputSize(
+    structured.text,
+    maxExpandedBytes,
+  );
+  return {
+    extracted: { ...structured, title: html.title },
+    outputPolicy: {
+      version: 1,
+      semanticBytes,
+      convertedBytes,
+      extractedBytes,
+    },
+  };
 }
 
 function xmlChild(value: unknown, name: string): unknown {
