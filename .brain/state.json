@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "catalogRevision": "empty",
+  "knowledgeMutations": 0,
+  "lastSemanticAuditMutation": 0,
+  "bootstrap": {
+    "status": "pending",
+    "pendingSourceIds": []
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@second-brain/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "better-sqlite3": "^13.0.3",
+    "csv-parse": "^6.1.0",
+    "fast-xml-parser": "^5.3.3",
+    "jszip": "^3.10.1",
+    "linkedom": "^0.18.12",
+    "mammoth": "1.12.1",
+    "pdfjs-dist": "6.2.108",
+    "yaml": "^2.8.1",
+    "yauzl": "3.4.0",
+    "zod": "^4.1.12"
+  }
+}

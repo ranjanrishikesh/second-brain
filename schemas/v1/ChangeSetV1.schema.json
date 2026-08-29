@@ -1,0 +1,329 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^op_[a-z0-9_-]{3,96}$"
+    },
+    "catalogRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["create", "update", "rename", "merge", "archive"]
+          },
+          "expectedRevision": {
+            "type": "string"
+          },
+          "mergeSourceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^pg_[a-z0-9_]{3,64}$"
+            }
+          },
+          "page": {
+            "type": "object",
+            "properties": {
+              "schema": {
+                "type": "number",
+                "const": 1
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^pg_[a-z0-9_]{3,64}$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^wiki\\/.+\\.md$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": ["active", "superseded", "archived"]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "aliases": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "tags": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sources": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^src_[a-f0-9]{16}$"
+                    },
+                    "locators": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": ["id", "locators"],
+                  "additionalProperties": false
+                }
+              },
+              "relations": {
+                "default": [],
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "targetId": {
+                      "type": "string",
+                      "pattern": "^pg_[a-z0-9_]{3,64}$"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "anchor": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "note": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sourceIds": {
+                      "default": [],
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^src_[a-f0-9]{16}$"
+                      }
+                    }
+                  },
+                  "required": ["targetId", "kind", "sourceIds"],
+                  "additionalProperties": false
+                }
+              },
+              "body": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "schema",
+              "id",
+              "path",
+              "title",
+              "type",
+              "status",
+              "summary",
+              "aliases",
+              "tags",
+              "createdAt",
+              "updatedAt",
+              "revision",
+              "sources",
+              "relations",
+              "body"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["action", "page"],
+        "additionalProperties": false
+      }
+    },
+    "reconciliation": {
+      "type": "object",
+      "properties": {
+        "candidatePageIds": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^pg_[a-z0-9_]{3,64}$"
+          }
+        },
+        "plan": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "catalogRevision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "changedPageIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^pg_[a-z0-9_]{3,64}$"
+              }
+            },
+            "candidates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "pageId": {
+                    "type": "string",
+                    "pattern": "^pg_[a-z0-9_]{3,64}$"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reasons": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "graph-neighbor",
+                        "shared-source",
+                        "shared-locator",
+                        "shared-tag",
+                        "shared-alias",
+                        "near-duplicate",
+                        "contradiction",
+                        "lexical",
+                        "semantic"
+                      ]
+                    }
+                  }
+                },
+                "required": ["pageId", "revision", "reasons"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "version",
+            "catalogRevision",
+            "changedPageIds",
+            "candidates"
+          ],
+          "additionalProperties": false
+        },
+        "readReceipts": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pageId": {
+                "type": "string",
+                "pattern": "^pg_[a-z0-9_]{3,64}$"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "anchor": {
+                "type": "string",
+                "minLength": 1
+              },
+              "readAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              }
+            },
+            "required": ["pageId", "revision", "readAt"],
+            "additionalProperties": false
+          }
+        },
+        "reviewed": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pageId": {
+                "type": "string",
+                "pattern": "^pg_[a-z0-9_]{3,64}$"
+              },
+              "decision": {
+                "type": "string",
+                "enum": ["changed", "no-change"]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["pageId", "decision", "reason"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["candidatePageIds", "readReceipts", "reviewed"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "operationId",
+    "catalogRevision",
+    "reason",
+    "pages",
+    "reconciliation"
+  ],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/ChangeSetV1.schema.json",
+  "title": "ChangeSetV1"
+}

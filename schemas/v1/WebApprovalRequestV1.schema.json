@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "queryId": {
+      "type": "string",
+      "pattern": "^qry_[a-f0-9]{32}$"
+    },
+    "questionHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "hostSessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requestedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+    },
+    "status": {
+      "type": "string",
+      "const": "requested"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "version",
+    "queryId",
+    "questionHash",
+    "hostSessionId",
+    "requestedAt",
+    "expiresAt",
+    "status",
+    "reason"
+  ],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/WebApprovalRequestV1.schema.json",
+  "title": "WebApprovalRequestV1"
+}

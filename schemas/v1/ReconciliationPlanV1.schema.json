@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "catalogRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "changedPageIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^pg_[a-z0-9_]{3,64}$"
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "type": "string",
+            "pattern": "^pg_[a-z0-9_]{3,64}$"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reasons": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "graph-neighbor",
+                "shared-source",
+                "shared-locator",
+                "shared-tag",
+                "shared-alias",
+                "near-duplicate",
+                "contradiction",
+                "lexical",
+                "semantic"
+              ]
+            }
+          }
+        },
+        "required": ["pageId", "revision", "reasons"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["version", "catalogRevision", "changedPageIds", "candidates"],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/ReconciliationPlanV1.schema.json",
+  "title": "ReconciliationPlanV1"
+}

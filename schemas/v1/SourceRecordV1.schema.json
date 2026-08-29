@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "discoveredAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "extractor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error": {
+          "type": "string"
+        },
+        "docxOutputPolicy": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "semanticBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "convertedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "extractedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "version",
+            "semanticBytes",
+            "convertedBytes",
+            "extractedBytes"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string"
+        },
+        "provenance": {
+          "default": {
+            "kind": "file"
+          },
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["file", "web"]
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "query": {
+              "type": "string"
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        "extractionStatus": {
+          "type": "string",
+          "const": "ready"
+        },
+        "extractedSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "version",
+        "id",
+        "sha256",
+        "path",
+        "title",
+        "mediaType",
+        "bytes",
+        "discoveredAt",
+        "extractor",
+        "provenance",
+        "extractionStatus",
+        "extractedSha256"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "discoveredAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "extractor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error": {
+          "type": "string"
+        },
+        "docxOutputPolicy": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "semanticBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "convertedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "extractedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "version",
+            "semanticBytes",
+            "convertedBytes",
+            "extractedBytes"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string"
+        },
+        "provenance": {
+          "default": {
+            "kind": "file"
+          },
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["file", "web"]
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "query": {
+              "type": "string"
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        "extractionStatus": {
+          "type": "string",
+          "enum": ["unsupported", "extraction-required", "failed"]
+        },
+        "extractedSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "version",
+        "id",
+        "sha256",
+        "path",
+        "title",
+        "mediaType",
+        "bytes",
+        "discoveredAt",
+        "extractor",
+        "provenance",
+        "extractionStatus"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$id": "https://portable-second-brain.dev/schemas/v1/SourceRecordV1.schema.json",
+  "title": "SourceRecordV1"
+}

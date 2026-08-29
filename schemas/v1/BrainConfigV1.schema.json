@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "brain": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "default": "A self-maintaining personal knowledge base.",
+          "type": "string"
+        },
+        "language": {
+          "default": "en",
+          "type": "string",
+          "minLength": 2
+        }
+      },
+      "required": ["name", "description", "language"],
+      "additionalProperties": false
+    },
+    "sources": {
+      "default": {
+        "roots": ["sources"],
+        "maxFileBytes": 104857600
+      },
+      "type": "object",
+      "properties": {
+        "roots": {
+          "default": ["sources"],
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "maxFileBytes": {
+          "default": 104857600,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["roots", "maxFileBytes"],
+      "additionalProperties": false
+    },
+    "bootstrap": {
+      "default": {
+        "mode": "catalog-map",
+        "batchSize": 10
+      },
+      "type": "object",
+      "properties": {
+        "mode": {
+          "default": "catalog-map",
+          "type": "string",
+          "const": "catalog-map"
+        },
+        "batchSize": {
+          "default": 10,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["mode", "batchSize"],
+      "additionalProperties": false
+    },
+    "learning": {
+      "default": {
+        "mode": "durable"
+      },
+      "type": "object",
+      "properties": {
+        "mode": {
+          "default": "durable",
+          "type": "string",
+          "const": "durable"
+        }
+      },
+      "required": ["mode"],
+      "additionalProperties": false
+    },
+    "web": {
+      "default": {
+        "capture": "evidence",
+        "approvalTtlHours": 24
+      },
+      "type": "object",
+      "properties": {
+        "capture": {
+          "default": "evidence",
+          "type": "string",
+          "const": "evidence"
+        },
+        "approvalTtlHours": {
+          "default": 24,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["capture", "approvalTtlHours"],
+      "additionalProperties": false
+    },
+    "graph": {
+      "default": {
+        "semanticAuditEvery": 25,
+        "relatedPageLimit": 20,
+        "semanticModel": {
+          "id": "Xenova/multilingual-e5-small",
+          "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+          "artifactSha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
+        },
+        "pageTypes": [
+          "source",
+          "topic",
+          "entity",
+          "concept",
+          "synthesis",
+          "question"
+        ],
+        "relationTypes": [
+          "related-to",
+          "part-of",
+          "instance-of",
+          "causes",
+          "influences",
+          "supports",
+          "contradicts",
+          "compares-with",
+          "depends-on",
+          "supersedes"
+        ]
+      },
+      "type": "object",
+      "properties": {
+        "semanticAuditEvery": {
+          "default": 25,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "relatedPageLimit": {
+          "default": 20,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "semanticModel": {
+          "default": {
+            "id": "Xenova/multilingual-e5-small",
+            "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+            "artifactSha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
+          },
+          "type": "object",
+          "properties": {
+            "id": {
+              "default": "Xenova/multilingual-e5-small",
+              "type": "string",
+              "const": "Xenova/multilingual-e5-small"
+            },
+            "revision": {
+              "default": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+              "type": "string",
+              "const": "761b726dd34fb83930e26aab4e9ac3899aa1fa78"
+            },
+            "artifactSha256": {
+              "default": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+              "type": "string",
+              "const": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
+            }
+          },
+          "required": ["id", "revision", "artifactSha256"],
+          "additionalProperties": false
+        },
+        "pageTypes": {
+          "default": [
+            "source",
+            "topic",
+            "entity",
+            "concept",
+            "synthesis",
+            "question"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "relationTypes": {
+          "default": [
+            "related-to",
+            "part-of",
+            "instance-of",
+            "causes",
+            "influences",
+            "supports",
+            "contradicts",
+            "compares-with",
+            "depends-on",
+            "supersedes"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "semanticAuditEvery",
+        "relatedPageLimit",
+        "semanticModel",
+        "pageTypes",
+        "relationTypes"
+      ],
+      "additionalProperties": false
+    },
+    "git": {
+      "default": {
+        "autoCommit": true,
+        "autoPush": false
+      },
+      "type": "object",
+      "properties": {
+        "autoCommit": {
+          "default": true,
+          "type": "boolean"
+        },
+        "autoPush": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": ["autoCommit", "autoPush"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "brain",
+    "sources",
+    "bootstrap",
+    "learning",
+    "web",
+    "graph",
+    "git"
+  ],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/BrainConfigV1.schema.json",
+  "title": "BrainConfigV1"
+}

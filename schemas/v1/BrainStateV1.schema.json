@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "catalogRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "knowledgeMutations": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "lastSemanticAuditMutation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "bootstrap": {
+      "default": {
+        "status": "pending",
+        "pendingSourceIds": []
+      },
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "completed"]
+        },
+        "pendingSourceIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^src_[a-f0-9]{16}$"
+          }
+        }
+      },
+      "required": ["status", "pendingSourceIds"],
+      "additionalProperties": false
+    },
+    "setup": {
+      "default": {
+        "status": "not-started",
+        "initialSourceIds": [],
+        "pendingSourceIds": []
+      },
+      "type": "object",
+      "properties": {
+        "status": {
+          "default": "not-started",
+          "type": "string",
+          "enum": ["not-started", "in-progress", "completed"]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^setup_[a-f0-9]{32}$"
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "boundaries": {
+          "type": "string",
+          "minLength": 1
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "initialSourceIds": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^src_[a-f0-9]{16}$"
+          }
+        },
+        "pendingSourceIds": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^src_[a-f0-9]{16}$"
+          }
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        }
+      },
+      "required": ["status", "initialSourceIds", "pendingSourceIds"],
+      "additionalProperties": false
+    },
+    "semanticIndex": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "corpusRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifactSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": ["id", "revision", "artifactSha256"],
+          "additionalProperties": false
+        },
+        "dimensions": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "builtAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        }
+      },
+      "required": [
+        "version",
+        "corpusRevision",
+        "model",
+        "dimensions",
+        "builtAt"
+      ],
+      "additionalProperties": false
+    },
+    "syncTarget": {
+      "type": "object",
+      "properties": {
+        "remote": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "urlFingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "pushUrlFingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "confirmedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        }
+      },
+      "required": ["remote", "branch", "urlFingerprint", "confirmedAt"],
+      "additionalProperties": false
+    },
+    "semanticAuditDue": {
+      "type": "boolean"
+    },
+    "semanticAudit": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "completed"]
+        },
+        "targetMutation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pendingPageIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reviewedPageIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        }
+      },
+      "required": [
+        "status",
+        "targetMutation",
+        "pendingPageIds",
+        "reviewedPageIds",
+        "startedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "catalogRevision",
+    "knowledgeMutations",
+    "lastSemanticAuditMutation",
+    "bootstrap",
+    "setup"
+  ],
+  "additionalProperties": {},
+  "$id": "https://portable-second-brain.dev/schemas/v1/BrainStateV1.schema.json",
+  "title": "BrainStateV1"
+}
