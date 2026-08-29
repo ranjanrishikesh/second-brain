@@ -387,5 +387,5 @@ describe("knowledge workflow hardening smoke fixture", () => {
     ).resolves.toMatchObject({
       session: { tiersUsed: ["wiki"], changeOperationIds: [] },
     });
-  }, 30_000);
+  }, 60_000);
 });

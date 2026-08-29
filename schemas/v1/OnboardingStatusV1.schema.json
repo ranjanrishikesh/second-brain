@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "needs-initialization",
+        "awaiting-sources",
+        "sources-unregistered",
+        "sources-blocked",
+        "awaiting-charter",
+        "ready-for-setup",
+        "setup-in-progress",
+        "ready"
+      ]
+    },
+    "nextAction": {
+      "type": "string",
+      "enum": [
+        "initialize",
+        "add-sources",
+        "scan-sources",
+        "resolve-source-errors",
+        "set-charter",
+        "begin-setup",
+        "resume-setup",
+        "ask-question"
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "template": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suggestedName": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["template", "name", "description", "suggestedName"],
+      "additionalProperties": false
+    },
+    "charter": {
+      "type": "object",
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "origin": {
+          "type": "string",
+          "enum": ["pending", "inferred", "owner-specified", "legacy"]
+        }
+      },
+      "required": ["configured", "origin"],
+      "additionalProperties": false
+    },
+    "sourceFiles": {
+      "type": "object",
+      "properties": {
+        "discovered": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "supportedCandidates": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unsupportedCandidates": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "registered": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ready": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unsupported": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "extractionRequired": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "samplePaths": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "discovered",
+        "supportedCandidates",
+        "unsupportedCandidates",
+        "registered",
+        "ready",
+        "unsupported",
+        "extractionRequired",
+        "failed",
+        "samplePaths"
+      ],
+      "additionalProperties": false
+    },
+    "setup": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["not-started", "in-progress", "completed"]
+        }
+      },
+      "required": ["status"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "phase",
+    "nextAction",
+    "identity",
+    "charter",
+    "sourceFiles",
+    "setup"
+  ],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/OnboardingStatusV1.schema.json",
+  "title": "OnboardingStatusV1"
+}

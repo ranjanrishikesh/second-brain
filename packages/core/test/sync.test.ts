@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -118,6 +118,47 @@ async function syncApi(): Promise<{
 }
 
 describe("managed brain synchronization", () => {
+  test("pushes a managed identity commit to an already confirmed target", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "brain-sync-identity-"));
+    const root = path.join(parent, "astronomy-brain");
+    const remote = await mkdtemp(
+      path.join(tmpdir(), "brain-sync-identity-remote-"),
+    );
+    await mkdir(root);
+    await initBrain(root, {
+      name: "Portable Second Brain",
+      description: "A self-maintaining personal knowledge base.",
+    });
+    await writeFile(
+      path.join(root, ".gitignore"),
+      ".brain/cache/\n.brain/runtime/\n",
+    );
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Sync Test"]);
+    await git(root, ["config", "user.email", "brain-sync@example.invalid"]);
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial template"]);
+    await git(remote, ["init", "--bare"]);
+    await git(root, ["remote", "add", "origin", remote]);
+    await git(root, ["push", "-u", "origin", "main"]);
+    const { configureSyncTarget } = await syncApi();
+    await configureSyncTarget(root, {
+      remote: "origin",
+      branch: "main",
+      confirm: true,
+    });
+
+    const result = await initBrain(root);
+
+    expect(result).toMatchObject({
+      name: "Astronomy Brain",
+      sync: { status: "synced", remote: "origin", branch: "main" },
+    });
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(
+      result.commit,
+    );
+  });
+
   test("refuses to configure a push target without explicit confirmation", async () => {
     const { root, remote } = await gitBrainWithBareRemote();
     const { configureSyncTarget } = await syncApi();

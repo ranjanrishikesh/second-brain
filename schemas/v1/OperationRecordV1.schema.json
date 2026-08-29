@@ -19,7 +19,9 @@
         "source-supersede",
         "bootstrap",
         "audit",
-        "web-capture"
+        "web-capture",
+        "identity",
+        "charter"
       ]
     },
     "status": {

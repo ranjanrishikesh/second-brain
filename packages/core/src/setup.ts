@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
+import { inspectBrainCharter } from "./onboarding.js";
 import { prepareSemanticModel, type BrainRuntimeServices } from "./semantic.js";
+import { catalogedSourceIds } from "./source-page-coverage.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import {
   readBrainState,
@@ -64,15 +66,9 @@ export interface SetupBatchV1 {
 }
 
 async function assertUsableBrainCharter(root: string): Promise<void> {
-  let charter: string;
-  try {
-    charter = await readFile(path.join(root, "BRAIN.md"), "utf8");
-  } catch {
-    throw new Error("BRAIN.md is required before initial setup can begin");
-  }
-  if (/replace\s+this\s+section\s+after\s+cloning/i.test(charter)) {
+  if (!(await inspectBrainCharter(root)).configured) {
     throw new Error(
-      "BRAIN.md still contains its placeholder charter; define the brain purpose before setup",
+      "BRAIN.md still contains a placeholder or provisional charter; define the brain purpose before setup",
     );
   }
 }
@@ -117,16 +113,11 @@ export async function pendingReadySourceIds(root: string): Promise<string[]> {
     sourceRecords(root),
     loadWikiPages(root),
   ]);
-  const catalogedSourceIds = new Set(
-    pages
-      .filter((page) => page.type === "source")
-      .flatMap((page) => page.sources.map((source) => source.id)),
-  );
+  const coveredSourceIds = catalogedSourceIds(pages);
   return sources
     .filter(
       (source) =>
-        source.extractionStatus === "ready" &&
-        !catalogedSourceIds.has(source.id),
+        source.extractionStatus === "ready" && !coveredSourceIds.has(source.id),
     )
     .map((source) => source.id)
     .sort();
@@ -288,9 +279,25 @@ export async function beginSetup(
   await recoverBrain(root);
   await assertUsableBrainCharter(root);
   await scanAndRegisterSources(root, testOptions);
-  const existing = await readBrainState(root);
+  const [existing, registeredSources] = await Promise.all([
+    readBrainState(root),
+    sourceRecords(root),
+  ]);
   if (existing.setup.status === "completed") {
     throw new Error("Initial setup is already complete");
+  }
+  if (
+    !registeredSources.some((source) => source.extractionStatus === "ready")
+  ) {
+    const diagnostics =
+      registeredSources.length === 0
+        ? "no sources are registered"
+        : registeredSources
+            .map((source) => `${source.path} (${source.extractionStatus})`)
+            .join(", ");
+    throw new Error(
+      `Initial setup requires at least one registered ready source; ${diagnostics}`,
+    );
   }
   await prepareSemanticModel(root, services);
   const operationId = `op_setup_${randomUUID().replaceAll("-", "")}`;

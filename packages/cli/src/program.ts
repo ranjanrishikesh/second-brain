@@ -28,10 +28,12 @@ import {
   scanAndRegisterSources,
   resolveWebApproval,
   searchBrain,
+  setBrainCharter,
   statusBrain,
   supersedeRegisteredSource,
   syncStatus,
   type BrainRuntimeServices,
+  type BrainCharterV1,
   type SearchScope,
 } from "@second-brain/core";
 import { Command, CommanderError, Option } from "commander";
@@ -62,19 +64,33 @@ export async function runCli(
 
   const json = (value: unknown) =>
     output.write(`${JSON.stringify(value, null, 2)}\n`);
+  let commandStatus = 0;
 
   program
     .command("init")
-    .requiredOption("--name <name>")
-    .requiredOption("--description <description>")
+    .option("--name <name>")
+    .option("--description <description>")
     .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
     .action(
-      async (options: { name: string; description: string; root: string }) => {
-        await initBrain(options.root, {
-          name: options.name,
-          description: options.description,
+      async (options: {
+        name?: string;
+        description?: string;
+        root: string;
+        json?: boolean;
+      }) => {
+        const initialization = await initBrain(options.root, {
+          ...(options.name !== undefined ? { name: options.name } : {}),
+          ...(options.description !== undefined
+            ? { description: options.description }
+            : {}),
         });
-        output.write(`Initialized ${options.name} at ${options.root}\n`);
+        const status = await statusBrain(options.root);
+        if (options.json) json({ initialization, status });
+        else
+          output.write(
+            `Initialized ${initialization.name} at ${options.root}. Next: ${status.onboarding.nextAction}.\n`,
+          );
       },
     );
 
@@ -86,13 +102,18 @@ export async function runCli(
       const report = await doctorBrain(options.root);
       if (options.json) {
         output.write(`${JSON.stringify(report, null, 2)}\n`);
-      } else if (report.ok) {
-        output.write("Brain is healthy.\n");
       } else {
         for (const issue of report.issues)
-          output.write(`[${issue.severity}] ${issue.message}\n`);
+          output.write(`[${issue.severity}] ${issue.code}: ${issue.message}\n`);
+        if (report.ok) {
+          output.write(
+            report.issues.length > 0
+              ? "Brain is healthy with warnings.\n"
+              : "Brain is healthy.\n",
+          );
+        }
       }
-      if (!report.ok) process.exitCode = 1;
+      if (!report.ok) commandStatus = 1;
     });
 
   program
@@ -104,10 +125,31 @@ export async function runCli(
       if (options.json) json(status);
       else {
         output.write(
-          `${status.brain.name}: ${status.sources.total} sources, ${status.wiki.pages} pages, ${status.bootstrap.pendingSourceIds.length} pending bootstrap.\n`,
+          `${status.brain.name}: ${status.sources.total} registered sources (${status.sources.ready} ready), ${status.wiki.pages} wiki pages. Onboarding: ${status.onboarding.phase}. Next: ${status.onboarding.nextAction}.\n`,
         );
       }
     });
+
+  const charter = program
+    .command("charter")
+    .description("Manage the source-informed brain charter");
+  charter
+    .command("set <charter-json-file>")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (
+        charterFile: string,
+        options: { root: string; json?: boolean },
+      ) => {
+        const result = await setBrainCharter(
+          options.root,
+          JSON.parse(await readFile(charterFile, "utf8")) as BrainCharterV1,
+        );
+        if (options.json) json(result);
+        else output.write(`Set brain charter with ${result.operationId}.\n`);
+      },
+    );
 
   const source = program
     .command("source")
@@ -617,7 +659,9 @@ export async function runCli(
     .option("--root <path>", "brain repository root", process.cwd())
     .option("--json", "emit machine-readable JSON")
     .action(async (options: { root: string }) => {
-      json(await auditBrain(options.root));
+      const report = await auditBrain(options.root);
+      json(report);
+      if (!report.structural.ok) commandStatus = 1;
     });
   audit
     .command("record")
@@ -646,7 +690,7 @@ export async function runCli(
 
   try {
     await program.parseAsync(args, { from: "user" });
-    return 0;
+    return commandStatus;
   } catch (error) {
     if (error instanceof CommanderError) return error.exitCode;
     throw error;

@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { operationRecordV1Schema } from "./transaction.js";
+import {
+  brainCharterV1Schema,
+  onboardingStatusV1Schema,
+} from "./onboarding.js";
 import { brainConfigV1Schema } from "./config.js";
 import { querySessionV1Schema } from "./query.js";
 import { setupSessionV1Schema } from "./setup.js";
@@ -28,9 +32,11 @@ import {
 export type PublicSchemaNameV1 =
   | "AuditReportV1"
   | "BrainConfigV1"
+  | "BrainCharterV1"
   | "BrainStateV1"
   | "ChangeSetV1"
   | "OperationRecordV1"
+  | "OnboardingStatusV1"
   | "QuerySessionV1"
   | "ReadReceiptV1"
   | "ReconciliationPlanV1"
@@ -63,9 +69,14 @@ export const brainJsonSchemasV1: Record<
 > = {
   AuditReportV1: jsonSchema("AuditReportV1", auditReportV1Schema),
   BrainConfigV1: jsonSchema("BrainConfigV1", brainConfigV1Schema),
+  BrainCharterV1: jsonSchema("BrainCharterV1", brainCharterV1Schema),
   BrainStateV1: jsonSchema("BrainStateV1", brainStateV1Schema),
   ChangeSetV1: jsonSchema("ChangeSetV1", changeSetV1Schema),
   OperationRecordV1: jsonSchema("OperationRecordV1", operationRecordV1Schema),
+  OnboardingStatusV1: jsonSchema(
+    "OnboardingStatusV1",
+    onboardingStatusV1Schema,
+  ),
   QuerySessionV1: jsonSchema("QuerySessionV1", querySessionV1Schema),
   ReadReceiptV1: jsonSchema("ReadReceiptV1", readReceiptV1Schema),
   ReconciliationPlanV1: jsonSchema(

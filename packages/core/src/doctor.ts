@@ -5,6 +5,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
+import {
+  inspectBrainCharter,
+  inspectOnboarding,
+  inspectSetupCompletionIntegrity,
+  inspectSourceDuplicateAcknowledgements,
+} from "./onboarding.js";
 import { brainStateV1Schema } from "./state.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import { syncStatus } from "./sync.js";
@@ -100,8 +106,9 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
     });
   }
 
+  let state: z.infer<typeof brainStateV1Schema> | undefined;
   try {
-    brainStateV1Schema.parse(
+    state = brainStateV1Schema.parse(
       JSON.parse(
         await readFile(path.join(root, ".brain", "state.json"), "utf8"),
       ),
@@ -167,6 +174,22 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
         path: source.path,
       });
     }
+  }
+
+  if (manifest && state) {
+    const duplicateIntegrity = await inspectSourceDuplicateAcknowledgements(
+      root,
+      state,
+      manifest.sources,
+    );
+    issues.push(
+      ...duplicateIntegrity.invalid.map((duplicate) => ({
+        code: "SOURCE_DUPLICATE_MISMATCH",
+        severity: "error" as const,
+        message: `Duplicate source acknowledgement is invalid: ${duplicate.reason}`,
+        path: duplicate.path,
+      })),
+    );
   }
 
   try {
@@ -259,6 +282,102 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
         path: "wiki/pages",
       });
     }
+  }
+
+  try {
+    const [onboarding, charter] = await Promise.all([
+      inspectOnboarding(root),
+      inspectBrainCharter(root),
+    ]);
+    if (onboarding.identity.template) {
+      issues.push({
+        code: "IDENTITY_TEMPLATE",
+        severity: "warning",
+        message:
+          "The cloned template still needs its independent brain identity.",
+        path: "brain.config.yaml",
+      });
+    }
+    if (onboarding.sourceFiles.discovered === 0) {
+      issues.push({
+        code: "SOURCES_EMPTY",
+        severity: "warning",
+        message: "No source files have been added yet.",
+        path: "sources",
+      });
+    }
+    if (onboarding.phase === "sources-unregistered") {
+      issues.push({
+        code: "SOURCES_UNREGISTERED",
+        severity: "warning",
+        message: "Source files are waiting to be scanned and registered.",
+        path: "sources",
+      });
+    }
+    if (
+      onboarding.sourceFiles.registered > 0 &&
+      onboarding.sourceFiles.ready === 0
+    ) {
+      issues.push({
+        code: "SOURCES_NOT_READY",
+        severity: "warning",
+        message:
+          "Registered sources are unsupported, need extraction, or failed extraction.",
+        path: ".brain/source-manifest.json",
+      });
+    }
+    if (!onboarding.charter.configured) {
+      issues.push({
+        code: "CHARTER_PENDING",
+        severity: "warning",
+        message: "The source-informed brain charter has not been configured.",
+        path: "BRAIN.md",
+      });
+    }
+    if (charter.invalidReason) {
+      issues.push({
+        code: "CHARTER_INVALID",
+        severity: "error",
+        message: charter.invalidReason,
+        path: "BRAIN.md",
+      });
+    }
+    const setupIntegrity = state
+      ? await inspectSetupCompletionIntegrity(
+          root,
+          state,
+          manifest?.sources ?? [],
+        )
+      : { valid: true };
+    if (
+      state?.setup.status === "completed" &&
+      (onboarding.sourceFiles.ready === 0 ||
+        !onboarding.charter.configured ||
+        !setupIntegrity.valid)
+    ) {
+      issues.push({
+        code: "SETUP_STATE_INVALID",
+        severity: "error",
+        message: setupIntegrity.reason
+          ? `Completed setup is invalid: ${setupIntegrity.reason}`
+          : "Completed setup is inconsistent with the current ready-source and charter requirements",
+        path: ".brain/state.json",
+      });
+    }
+    if (onboarding.setup.status !== "completed") {
+      issues.push({
+        code: "SETUP_INCOMPLETE",
+        severity: "warning",
+        message:
+          onboarding.setup.status === "in-progress"
+            ? "Initial catalog-and-map setup is in progress."
+            : "Initial catalog-and-map setup has not started.",
+        path: ".brain/state.json",
+      });
+    }
+  } catch {
+    // Existing fatal configuration, manifest, or state issues already explain
+    // why derived onboarding diagnostics are unavailable.
   }
 
   return { ok: issues.every((issue) => issue.severity !== "error"), issues };

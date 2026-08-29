@@ -1,7 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import {
@@ -17,12 +18,73 @@ import {
 import { runCli } from "../src/program.js";
 
 const execFile = promisify(execFileCallback);
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../..",
+);
+
+async function runBrainSubprocess(args: string[]): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  return new Promise((resolve, reject) => {
+    execFileCallback(
+      "pnpm",
+      ["brain", ...args],
+      { cwd: repositoryRoot },
+      (error, stdout, stderr) => {
+        if (error && typeof error.code !== "number") {
+          reject(error);
+          return;
+        }
+        resolve({
+          exitCode: error?.code ?? 0,
+          stdout: stdout.toString(),
+          stderr: stderr.toString(),
+        });
+      },
+    );
+  });
+}
+
+function parseBrainJson(stdout: string): unknown {
+  return JSON.parse(
+    stdout.slice(stdout.indexOf("{"), stdout.lastIndexOf("}") + 1),
+  );
+}
 
 async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
 }
 
 describe("brain CLI", () => {
+  test("initializes from repository-derived defaults and returns onboarding JSON", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "brain-cli-bare-"));
+    const root = path.join(parent, "second-brain-smoke");
+    await mkdir(root);
+    const output: string[] = [];
+
+    const exitCode = await runCli(["init", "--root", root, "--json"], {
+      write: (value) => output.push(value),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      initialization: {
+        mode: "template-replaced",
+        name: "Second Brain Smoke",
+        description: "A source-backed knowledge brain for Second Brain Smoke.",
+      },
+      status: {
+        onboarding: {
+          phase: "awaiting-sources",
+          nextAction: "add-sources",
+        },
+      },
+    });
+  });
+
   test("initializes a brain from explicit arguments", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-cli-"));
     const output: string[] = [];
@@ -60,6 +122,10 @@ describe("brain CLI", () => {
         "Setup CLI test",
       ],
       { write: () => undefined },
+    );
+    await writeFile(
+      path.join(root, "sources", "foundation.md"),
+      "# Foundation\n\nInitial setup evidence.\n",
     );
     const output: string[] = [];
 
@@ -106,6 +172,10 @@ describe("brain CLI", () => {
       ],
       { write: () => undefined },
     );
+    await writeFile(
+      path.join(root, "sources", "foundation.md"),
+      "# Foundation\n\nInitial setup evidence.\n",
+    );
     const beginOutput: string[] = [];
     await runCli(
       [
@@ -139,11 +209,11 @@ describe("brain CLI", () => {
     expect(exitCode).toBe(0);
     expect(JSON.parse(output.join(""))).toMatchObject({
       setupId: setup.id,
-      sourceIds: [],
+      sourceIds: [expect.stringMatching(/^src_[a-f0-9]{16}$/)],
     });
   });
 
-  test("finishes an empty initial setup through the CLI", async () => {
+  test("refuses to start an empty initial setup through the CLI", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-cli-setup-finish-"));
     await runCli(
       [
@@ -157,50 +227,30 @@ describe("brain CLI", () => {
       ],
       { write: () => undefined },
     );
-    const beginOutput: string[] = [];
-    await runCli(
-      [
-        "setup",
-        "begin",
-        "--purpose",
-        "Create the initial source catalog.",
-        "--root",
-        root,
-        "--json",
-      ],
-      { write: (value) => beginOutput.push(value) },
-      {
-        runtimeServices: {
-          embeddings: {
-            modelId: "test/cli",
-            modelRevision: "test-revision",
-            embed: async (texts: readonly string[]) => texts.map(() => [0, 1]),
+    await expect(
+      runCli(
+        [
+          "setup",
+          "begin",
+          "--purpose",
+          "Create the initial source catalog.",
+          "--root",
+          root,
+          "--json",
+        ],
+        { write: () => undefined },
+        {
+          runtimeServices: {
+            embeddings: {
+              modelId: "test/cli",
+              modelRevision: "test-revision",
+              embed: async (texts: readonly string[]) =>
+                texts.map(() => [0, 1]),
+            },
           },
         },
-      },
-    );
-    const setup = JSON.parse(beginOutput.join("")) as { id: string };
-    const output: string[] = [];
-
-    const exitCode = await runCli(
-      [
-        "setup",
-        "finish",
-        setup.id,
-        "--summary",
-        "The source catalog is empty and healthy.",
-        "--root",
-        root,
-        "--json",
-      ],
-      { write: (value) => output.push(value) },
-    );
-
-    expect(exitCode).toBe(0);
-    expect(JSON.parse(output.join(""))).toMatchObject({
-      id: setup.id,
-      status: "completed",
-    });
+      ),
+    ).rejects.toThrow(/at least one.*ready source/i);
   });
 
   test("binds a source-page apply to the active setup checkpoint", async () => {
@@ -933,7 +983,273 @@ describe("brain CLI", () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(JSON.parse(output.join(""))).toMatchObject({ ok: true, issues: [] });
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      ok: true,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCES_EMPTY", severity: "warning" }),
+        expect.objectContaining({
+          code: "SETUP_INCOMPLETE",
+          severity: "warning",
+        }),
+      ]),
+    });
+
+    const humanOutput: string[] = [];
+    const humanExitCode = await runCli(["doctor", "--root", root], {
+      write: (value) => humanOutput.push(value),
+    });
+    expect(humanExitCode).toBe(0);
+    expect(humanOutput.join(" ")).toContain("[warning] SOURCES_EMPTY");
+    expect(humanOutput.join(" ")).toContain("[warning] SETUP_INCOMPLETE");
+    expect(humanOutput.at(-1)).toBe("Brain is healthy with warnings.\n");
+  });
+
+  test("returns a fatal doctor status without mutating process state", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-fatal-local-"));
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+    try {
+      const exitCode = await runCli(["doctor", "--root", root, "--json"], {
+        write: () => undefined,
+      });
+
+      expect(process.exitCode).toBeUndefined();
+      expect(exitCode).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  test("exits nonzero from pnpm brain when doctor reports fatal errors", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-doctor-subprocess-fatal-"),
+    );
+
+    const result = await runBrainSubprocess([
+      "doctor",
+      "--root",
+      root,
+      "--json",
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(parseBrainJson(result.stdout)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "CONFIG_MISSING", severity: "error" }),
+      ]),
+    });
+  });
+
+  test("exits zero from pnpm brain when doctor reports onboarding warnings", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-doctor-subprocess-warning-"),
+    );
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Warning health",
+        "--description",
+        "Warning-only doctor subprocess test",
+      ],
+      { write: () => undefined },
+    );
+
+    const result = await runBrainSubprocess([
+      "doctor",
+      "--root",
+      root,
+      "--json",
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(parseBrainJson(result.stdout)).toMatchObject({
+      ok: true,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SETUP_INCOMPLETE",
+          severity: "warning",
+        }),
+      ]),
+    });
+  });
+
+  test("exits nonzero from pnpm brain for a fatal structural audit", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-audit-subprocess-fatal-"),
+    );
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Structural audit",
+        "--description",
+        "Fatal structural audit subprocess test",
+      ],
+      { write: () => undefined },
+    );
+    const invalidPage: WikiPageV1 = {
+      schema: 1,
+      id: "pg_cli_invalid_audit",
+      path: "wiki/pages/invalid-audit.md",
+      title: "Invalid audit page",
+      type: "not-configured",
+      status: "active",
+      summary: "A page with an invalid structural type.",
+      aliases: [],
+      tags: [],
+      createdAt: "2026-08-29T00:00:00.000Z",
+      updatedAt: "2026-08-29T00:00:00.000Z",
+      revision: "pending",
+      sources: [],
+      relations: [],
+      body: "# Invalid audit page\n\nThis page violates the graph configuration.",
+    };
+    await writeFile(
+      path.join(root, invalidPage.path),
+      renderWikiPage(invalidPage),
+    );
+
+    const result = await runBrainSubprocess([
+      "audit",
+      "--root",
+      root,
+      "--json",
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(parseBrainJson(result.stdout)).toMatchObject({
+      structural: {
+        ok: false,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "UNKNOWN_PAGE_TYPE",
+            severity: "error",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("exits zero from pnpm brain while only semantic audit work remains", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-audit-subprocess-intermediate-"),
+    );
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Semantic audit",
+        "--description",
+        "Intermediate semantic audit subprocess test",
+      ],
+      { write: () => undefined },
+    );
+    const sourcePage: WikiPageV1 = {
+      schema: 1,
+      id: "pg_cli_semantic_audit",
+      path: "wiki/pages/semantic-audit.md",
+      title: "Semantic audit page",
+      type: "source",
+      status: "active",
+      summary: "A structurally healthy page awaiting semantic review.",
+      aliases: [],
+      tags: [],
+      createdAt: "2026-08-29T00:00:00.000Z",
+      updatedAt: "2026-08-29T00:00:00.000Z",
+      revision: "pending",
+      sources: [],
+      relations: [],
+      body: "# Semantic audit page\n\nThis page awaits semantic review.",
+    };
+    await writeFile(
+      path.join(root, sourcePage.path),
+      renderWikiPage(sourcePage),
+    );
+    const state = await readBrainState(root);
+    await writeBrainState(root, { ...state, semanticAuditDue: true });
+
+    const result = await runBrainSubprocess([
+      "audit",
+      "--root",
+      root,
+      "--json",
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(parseBrainJson(result.stdout)).toMatchObject({
+      structural: { ok: true },
+      semantic: { complete: false, pageIds: [sourcePage.id] },
+    });
+  });
+
+  test("sets a validated charter from JSON through the CLI", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "brain-cli-charter-"));
+    const root = path.join(parent, "astronomy-brain");
+    await mkdir(root);
+    await runCli(["init", "--root", root], { write: () => undefined });
+    await writeFile(
+      path.join(root, "sources", "orbits.md"),
+      "# Orbits\n\nBodies follow orbital paths.\n",
+    );
+    await runCli(["source", "scan", "--root", root, "--json"], {
+      write: () => undefined,
+    });
+    const charterPath = path.join(root, "charter.json");
+    await writeFile(
+      charterPath,
+      `${JSON.stringify({
+        version: 1,
+        description: "Astronomy observations and orbital mechanics.",
+        purpose: "Answer source-backed astronomy questions.",
+        boundaries: ["Include registered astronomy sources."],
+        domainConventions: ["Preserve astronomical terminology."],
+        evidencePreferences: ["Prefer primary evidence."],
+        origin: "inferred",
+      })}\n`,
+    );
+    const output: string[] = [];
+
+    const exitCode = await runCli(
+      ["charter", "set", charterPath, "--root", root, "--json"],
+      { write: (value) => output.push(value) },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      version: 1,
+      charter: { origin: "inferred" },
+      operationId: expect.stringMatching(/^op_charter_/),
+    });
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toContain(
+      "brainCharter: 1",
+    );
+  });
+
+  test("prints the onboarding phase and next action in human status", async () => {
+    const parent = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-status-human-"),
+    );
+    const root = path.join(parent, "physics-brain");
+    await mkdir(root);
+    await runCli(["init", "--root", root], { write: () => undefined });
+    const output: string[] = [];
+
+    const exitCode = await runCli(["status", "--root", root], {
+      write: (value) => output.push(value),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output.join("")).toContain("Onboarding: awaiting-sources");
+    expect(output.join("")).toContain("Next: add-sources");
   });
 
   test("scans sources and emits machine-readable results", async () => {

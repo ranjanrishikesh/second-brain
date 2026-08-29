@@ -209,6 +209,8 @@ async function remoteBranchHead(
 }
 
 const managedCommitFiles = new Set([
+  "BRAIN.md",
+  "brain.config.yaml",
   ".brain/source-manifest.json",
   ".brain/state.json",
   ".brain/operations.jsonl",

@@ -77,5 +77,10 @@ export interface SourceScanResult {
     actualSha256: string;
   }>;
   deleted: SourceRecordV1[];
-  duplicates: Array<{ path: string; sourceId: string }>;
+  duplicates: Array<{
+    path: string;
+    sourceId: string;
+    sha256: string;
+    bytes: number;
+  }>;
 }
