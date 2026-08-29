@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { parse } from "yaml";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
+import { catalogedSourceIds } from "./source-page-coverage.js";
 import { readBrainState, type BrainStateV1 } from "./state.js";
 import { sourceFormatForPath } from "./sources/format.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
@@ -314,11 +315,7 @@ export async function inspectSetupCompletionIntegrity(
       reason: "completed setup has no ready initial source",
     };
   }
-  const representedSourceIds = new Set(
-    (await loadWikiPages(root))
-      .filter((page) => page.type === "source")
-      .flatMap((page) => page.sources.map((source) => source.id)),
-  );
+  const representedSourceIds = catalogedSourceIds(await loadWikiPages(root));
   const missingSourceIds = readyInitialSourceIds.filter(
     (sourceId) => !representedSourceIds.has(sourceId),
   );

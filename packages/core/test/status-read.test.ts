@@ -401,6 +401,83 @@ describe("brain status and reading", () => {
     });
   });
 
+  test("requires matching declared inline citations for completed source-page coverage", async () => {
+    const root = await initializedBrain("Completed citation coverage");
+    await writeFile(
+      path.join(root, "sources", "evidence.md"),
+      "# Evidence\n\nUsable source material.\n",
+    );
+    const scan = await scanAndRegisterSources(root);
+    const source = scan.added[0];
+    if (!source) throw new Error("Expected a ready source");
+    const sourcePage: WikiPageV1 = {
+      schema: 1,
+      id: "pg_completed_citation_source",
+      path: "wiki/pages/completed-citation-source.md",
+      title: "Completed citation source",
+      type: "source",
+      status: "active",
+      summary: "A completed source page requiring cited coverage.",
+      aliases: [],
+      tags: [],
+      createdAt: "2026-08-29T00:00:00.000Z",
+      updatedAt: "2026-08-29T00:00:00.000Z",
+      revision: "pending",
+      sources: [{ id: source.id, locators: ["heading=evidence"] }],
+      relations: [],
+      body: "# Completed citation source\n\nThe declaration is initially uncited.",
+    };
+    await writeFile(
+      path.join(root, sourcePage.path),
+      renderWikiPage(sourcePage),
+    );
+    const state = await readBrainState(root);
+    await writeBrainState(root, {
+      ...state,
+      setup: {
+        status: "completed",
+        id: "setup_1234567890abcdef1234567890abcdef",
+        purpose: "Catalog cited evidence",
+        startedAt: "2026-08-29T00:00:00.000Z",
+        completedAt: "2026-08-29T00:01:00.000Z",
+        initialSourceIds: [source.id],
+        pendingSourceIds: [],
+      },
+    });
+
+    expect(await inspectOnboarding(root)).toMatchObject({
+      phase: "setup-in-progress",
+      nextAction: "resume-setup",
+    });
+    expect(await doctorBrain(root)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SETUP_STATE_INVALID",
+          severity: "error",
+        }),
+      ]),
+    });
+
+    await writeFile(
+      path.join(root, sourcePage.path),
+      renderWikiPage({
+        ...sourcePage,
+        body: `# Completed citation source\n\nThe evidence is cited. [@${source.id}#heading=evidence]`,
+      }),
+    );
+
+    expect(await inspectOnboarding(root)).toMatchObject({
+      phase: "ready",
+      nextAction: "ask-question",
+    });
+    expect((await doctorBrain(root)).issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "SETUP_STATE_INVALID" }),
+      ]),
+    );
+  });
+
   test("rejects empty and malformed managed charters instead of treating them as legacy", async () => {
     const root = await initializedBrain("Invalid charter");
     await writeFile(

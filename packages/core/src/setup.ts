@@ -5,6 +5,7 @@ import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { inspectBrainCharter } from "./onboarding.js";
 import { prepareSemanticModel, type BrainRuntimeServices } from "./semantic.js";
+import { catalogedSourceIds } from "./source-page-coverage.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import {
   readBrainState,
@@ -112,16 +113,11 @@ export async function pendingReadySourceIds(root: string): Promise<string[]> {
     sourceRecords(root),
     loadWikiPages(root),
   ]);
-  const catalogedSourceIds = new Set(
-    pages
-      .filter((page) => page.type === "source")
-      .flatMap((page) => page.sources.map((source) => source.id)),
-  );
+  const coveredSourceIds = catalogedSourceIds(pages);
   return sources
     .filter(
       (source) =>
-        source.extractionStatus === "ready" &&
-        !catalogedSourceIds.has(source.id),
+        source.extractionStatus === "ready" && !coveredSourceIds.has(source.id),
     )
     .map((source) => source.id)
     .sort();

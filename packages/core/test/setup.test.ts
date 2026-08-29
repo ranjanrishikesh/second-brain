@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PDFDocument } from "pdf-lib";
 import { describe, expect, test } from "vitest";
-import { beginSetup, initBrain, type WikiPageV1 } from "../src/index.js";
+import {
+  beginSetup,
+  finishSetup,
+  initBrain,
+  nextSetupBatch,
+  renderWikiPage,
+  type WikiPageV1,
+} from "../src/index.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
 const services = { embeddings: deterministicEmbeddings({}) };
@@ -238,6 +245,54 @@ describe("one-time brain setup", () => {
       pendingSourceIds: [],
     });
   });
+
+  test.each([
+    ["declares a locator without citing it", "declared"],
+    ["declares no locators", "empty"],
+  ] as const)(
+    "keeps a ready source pending when its source page %s",
+    async (_description, locatorMode) => {
+      const root = await brainWithInitialSource();
+      const setup = await beginSetup(
+        root,
+        { purpose: "Astronomy concepts" },
+        services,
+      );
+      const context = (await nextSetupBatch(root, setup.id)).sources[0];
+      const chunk = context?.extracted?.chunks[0];
+      if (!context || !chunk) throw new Error("Expected setup source context");
+      const incompleteSourcePage: WikiPageV1 = {
+        schema: 1,
+        id: `pg_setup_${locatorMode}_source`,
+        path: `wiki/pages/setup-${locatorMode}-source.md`,
+        title: `Setup ${locatorMode} source`,
+        type: "source",
+        status: "active",
+        summary: "A source page without matching cited coverage.",
+        aliases: [],
+        tags: [],
+        createdAt: "2026-08-29T00:00:00.000Z",
+        updatedAt: "2026-08-29T00:00:00.000Z",
+        revision: "pending",
+        sources: [
+          {
+            id: context.record.id,
+            locators: locatorMode === "declared" ? [chunk.locator] : [],
+          },
+        ],
+        relations: [],
+        body: `# Setup ${locatorMode} source\n\nThis body has no inline citation.`,
+      };
+      await writeFile(
+        path.join(root, incompleteSourcePage.path),
+        renderWikiPage(incompleteSourcePage),
+      );
+
+      await expect(
+        finishSetup(root, setup.id, { summary: "Initial catalog" }),
+      ).rejects.toThrow(/source page.*orbit/i);
+    },
+  );
 
   test("does not finish a knowledge question before initial setup is complete", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-setup-gate-"));

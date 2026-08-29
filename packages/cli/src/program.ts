@@ -64,6 +64,7 @@ export async function runCli(
 
   const json = (value: unknown) =>
     output.write(`${JSON.stringify(value, null, 2)}\n`);
+  let commandStatus = 0;
 
   program
     .command("init")
@@ -112,7 +113,7 @@ export async function runCli(
           );
         }
       }
-      if (!report.ok) process.exitCode = 1;
+      if (!report.ok) commandStatus = 1;
     });
 
   program
@@ -658,7 +659,9 @@ export async function runCli(
     .option("--root <path>", "brain repository root", process.cwd())
     .option("--json", "emit machine-readable JSON")
     .action(async (options: { root: string }) => {
-      json(await auditBrain(options.root));
+      const report = await auditBrain(options.root);
+      json(report);
+      if (!report.structural.ok) commandStatus = 1;
     });
   audit
     .command("record")
@@ -687,7 +690,7 @@ export async function runCli(
 
   try {
     await program.parseAsync(args, { from: "user" });
-    return 0;
+    return commandStatus;
   } catch (error) {
     if (error instanceof CommanderError) return error.exitCode;
     throw error;
