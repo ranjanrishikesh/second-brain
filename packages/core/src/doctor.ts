@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
+import { inspectOnboarding } from "./onboarding.js";
 import { brainStateV1Schema } from "./state.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import { syncStatus } from "./sync.js";
@@ -259,6 +260,69 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
         path: "wiki/pages",
       });
     }
+  }
+
+  try {
+    const onboarding = await inspectOnboarding(root);
+    if (onboarding.identity.template) {
+      issues.push({
+        code: "IDENTITY_TEMPLATE",
+        severity: "warning",
+        message:
+          "The cloned template still needs its independent brain identity.",
+        path: "brain.config.yaml",
+      });
+    }
+    if (onboarding.sourceFiles.discovered === 0) {
+      issues.push({
+        code: "SOURCES_EMPTY",
+        severity: "warning",
+        message: "No source files have been added yet.",
+        path: "sources",
+      });
+    }
+    if (onboarding.phase === "sources-unregistered") {
+      issues.push({
+        code: "SOURCES_UNREGISTERED",
+        severity: "warning",
+        message: "Source files are waiting to be scanned and registered.",
+        path: "sources",
+      });
+    }
+    if (
+      onboarding.sourceFiles.registered > 0 &&
+      onboarding.sourceFiles.ready === 0
+    ) {
+      issues.push({
+        code: "SOURCES_NOT_READY",
+        severity: "warning",
+        message:
+          "Registered sources are unsupported, need extraction, or failed extraction.",
+        path: ".brain/source-manifest.json",
+      });
+    }
+    if (!onboarding.charter.configured) {
+      issues.push({
+        code: "CHARTER_PENDING",
+        severity: "warning",
+        message: "The source-informed brain charter has not been configured.",
+        path: "BRAIN.md",
+      });
+    }
+    if (onboarding.setup.status !== "completed") {
+      issues.push({
+        code: "SETUP_INCOMPLETE",
+        severity: "warning",
+        message:
+          onboarding.setup.status === "in-progress"
+            ? "Initial catalog-and-map setup is in progress."
+            : "Initial catalog-and-map setup has not started.",
+        path: ".brain/state.json",
+      });
+    }
+  } catch {
+    // Existing fatal configuration, manifest, or state issues already explain
+    // why derived onboarding diagnostics are unavailable.
   }
 
   return { ok: issues.every((issue) => issue.severity !== "error"), issues };

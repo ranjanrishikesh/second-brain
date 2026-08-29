@@ -1,8 +1,9 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PDFDocument } from "pdf-lib";
 import { describe, expect, test } from "vitest";
-import { initBrain, type WikiPageV1 } from "../src/index.js";
+import { beginSetup, initBrain, type WikiPageV1 } from "../src/index.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
 const services = { embeddings: deterministicEmbeddings({}) };
@@ -52,7 +53,7 @@ describe("one-time brain setup", () => {
     ).toEqual([]);
   });
 
-  test("completes an empty initial setup without a semantic review batch", async () => {
+  test("refuses to start initial setup without a ready source", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-setup-empty-"));
     await initBrain(root, { name: "Empty brain", description: "Setup tests" });
     const exports = (await import("../src/index.js")) as Record<
@@ -64,26 +65,75 @@ describe("one-time brain setup", () => {
       input: { purpose: string },
       services: typeof services,
     ) => Promise<{ id: string; pendingSourceIds: string[] }>;
-    const finishSetup = exports.finishSetup as (
-      root: string,
-      setupId: string,
-      input: { summary: string },
-    ) => Promise<{ status: string; pendingSourceIds: string[] }>;
+    await expect(
+      beginSetup(root, { purpose: "A blank brain" }, services),
+    ).rejects.toThrow(/at least one.*ready source/i);
+  });
+
+  test("reports unsupported-only and extraction-required-only setup blockers", async () => {
+    const unsupportedRoot = await mkdtemp(
+      path.join(tmpdir(), "brain-setup-unsupported-"),
+    );
+    await initBrain(unsupportedRoot, {
+      name: "Unsupported",
+      description: "Unsupported evidence tests",
+    });
+    await writeFile(
+      path.join(unsupportedRoot, "sources", "image.png"),
+      "pixels",
+    );
+    await expect(
+      beginSetup(unsupportedRoot, { purpose: "Unsupported corpus" }, services),
+    ).rejects.toThrow(/image\.png.*unsupported/i);
+
+    const extractionRoot = await mkdtemp(
+      path.join(tmpdir(), "brain-setup-extraction-"),
+    );
+    await initBrain(extractionRoot, {
+      name: "Scanned",
+      description: "Scanned evidence tests",
+    });
+    const document = await PDFDocument.create();
+    document.addPage();
+    await writeFile(
+      path.join(extractionRoot, "sources", "scan.pdf"),
+      await document.save(),
+    );
+    await expect(
+      beginSetup(extractionRoot, { purpose: "Scanned corpus" }, services),
+    ).rejects.toThrow(/scan\.pdf.*extraction-required/i);
+  });
+
+  test("starts setup for ready sources while preserving unusable source diagnostics", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-setup-mixed-"));
+    await initBrain(root, { name: "Mixed", description: "Mixed evidence" });
+    await writeFile(
+      path.join(root, "sources", "ready.md"),
+      "# Ready\n\nUsable evidence.\n",
+    );
+    await writeFile(path.join(root, "sources", "image.png"), "pixels");
 
     const setup = await beginSetup(
       root,
-      { purpose: "A blank brain" },
+      { purpose: "Catalog usable evidence" },
       services,
     );
-    const completed = await finishSetup(root, setup.id, {
-      summary: "The empty base is ready for question-driven growth.",
-    });
+    const manifest = JSON.parse(
+      await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
+    ) as {
+      sources: Array<{ id: string; path: string; extractionStatus: string }>;
+    };
+    const ready = manifest.sources.find((source) =>
+      source.path.endsWith("ready.md"),
+    );
+    const unsupported = manifest.sources.find((source) =>
+      source.path.endsWith("image.png"),
+    );
+    if (!ready || !unsupported) throw new Error("Expected both source records");
 
-    expect(setup.pendingSourceIds).toEqual([]);
-    expect(completed).toMatchObject({
-      status: "completed",
-      pendingSourceIds: [],
-    });
+    expect(setup.pendingSourceIds).toEqual([ready.id]);
+    expect(setup.initialSourceIds).toEqual([ready.id, unsupported.id].sort());
+    expect(unsupported.extractionStatus).toBe("unsupported");
   });
 
   test("completes setup after source pages and its full semantic audit", async () => {
@@ -287,8 +337,7 @@ describe("one-time brain setup", () => {
   });
 
   test("does not finish setup before scanning a source dropped during setup", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "brain-setup-finish-scan-"));
-    await initBrain(root, { name: "Astronomy", description: "Setup tests" });
+    const root = await brainWithInitialSource();
     const exports = (await import("../src/index.js")) as Record<
       string,
       unknown
@@ -318,9 +367,8 @@ describe("one-time brain setup", () => {
     ).rejects.toThrow(/source page.*later/i);
   });
 
-  test("requires a semantic audit after a source arrives in an initially empty setup", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "brain-setup-late-audit-"));
-    await initBrain(root, { name: "Astronomy", description: "Setup tests" });
+  test("requires a semantic audit after another source arrives during setup", async () => {
+    const root = await brainWithInitialSource();
     const exports = (await import("../src/index.js")) as Record<
       string,
       unknown
@@ -366,34 +414,36 @@ describe("one-time brain setup", () => {
       path.join(root, "sources", "later.md"),
       "# Later\n\nA source arrives before setup finishes.\n",
     );
-    const context = (await nextSetupBatch(root, setup.id)).sources[0];
-    const chunk = context?.extracted?.chunks[0];
-    if (!context || !chunk) throw new Error("Expected the late source context");
-    const page: WikiPageV1 = {
-      schema: 1,
-      id: "pg_setup_late_source",
-      path: "wiki/pages/sources/setup-late.md",
-      title: "Late setup source",
-      type: "source",
-      status: "active",
-      summary: "A source added before initial setup completed.",
-      aliases: [],
-      tags: [],
-      createdAt: "2026-08-27T00:00:00.000Z",
-      updatedAt: "2026-08-27T00:00:00.000Z",
-      revision: "pending",
-      sources: [{ id: context.record.id, locators: [chunk.locator] }],
-      relations: [],
-      body: `# Late setup source\n\n${chunk.text} [@${context.record.id}#${chunk.locator}]`,
-    };
+    const contexts = (await nextSetupBatch(root, setup.id)).sources;
+    const pages = contexts.map((context, index): WikiPageV1 => {
+      const chunk = context.extracted?.chunks[0];
+      if (!chunk) throw new Error("Expected setup source context");
+      return {
+        schema: 1,
+        id: `pg_setup_audit_source_${index}`,
+        path: `wiki/pages/sources/setup-audit-${index}.md`,
+        title: `Setup audit source ${index}`,
+        type: "source",
+        status: "active",
+        summary: "A source cataloged before initial setup completed.",
+        aliases: [],
+        tags: [],
+        createdAt: "2026-08-27T00:00:00.000Z",
+        updatedAt: "2026-08-27T00:00:00.000Z",
+        revision: "pending",
+        sources: [{ id: context.record.id, locators: [chunk.locator] }],
+        relations: [],
+        body: `# Setup audit source ${index}\n\n${chunk.text} [@${context.record.id}#${chunk.locator}]`,
+      };
+    });
     const mutation = await applyChangeSetTransaction(
       root,
       {
         version: 1,
-        operationId: "op_setup_late_source",
+        operationId: "op_setup_audit_sources",
         catalogRevision: calculateCatalogRevision([]),
-        reason: "Catalog a source that arrived during setup",
-        pages: [{ action: "create", page }],
+        reason: "Catalog initial and newly arrived setup sources",
+        pages: pages.map((page) => ({ action: "create", page })),
         reconciliation: { candidatePageIds: [], reviewed: [] },
       },
       { context: { kind: "setup", id: setup.id }, runtimeServices: services },
@@ -405,9 +455,8 @@ describe("one-time brain setup", () => {
     ).rejects.toThrow(/semantic audit/i);
   });
 
-  test("recovers an interrupted setup completion and resumes the same setup", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "brain-setup-recover-"));
-    await initBrain(root, { name: "Astronomy", description: "Setup tests" });
+  test("recovers an interrupted setup start and can start cleanly", async () => {
+    const root = await brainWithInitialSource();
     const exports = (await import("../src/index.js")) as Record<
       string,
       unknown
@@ -416,43 +465,32 @@ describe("one-time brain setup", () => {
       root: string,
       input: { purpose: string },
       services: typeof services,
-    ) => Promise<{ id: string; status: string }>;
-    const finishSetup = exports.finishSetup as (
-      root: string,
-      setupId: string,
-      input: { summary: string },
       testOptions?: { simulateCrashAfter: "files-applied" },
-    ) => Promise<{ status: string }>;
+    ) => Promise<{ id: string; status: string; purpose: string }>;
+    const readBrainState = exports.readBrainState as (
+      root: string,
+    ) => Promise<{ setup: { status: string } }>;
     const recoverBrain = exports.recoverBrain as (
       root: string,
     ) => Promise<"restored">;
-    const setup = await beginSetup(
+    await expect(
+      beginSetup(root, { purpose: "Astronomy concepts" }, services, {
+        simulateCrashAfter: "files-applied",
+      }),
+    ).rejects.toThrow(/simulated transaction crash/i);
+    expect(await recoverBrain(root)).toBe("restored");
+    expect((await readBrainState(root)).setup.status).toBe("not-started");
+
+    const started = await beginSetup(
       root,
       { purpose: "Astronomy concepts" },
       services,
     );
 
-    await expect(
-      finishSetup(
-        root,
-        setup.id,
-        { summary: "Initial map" },
-        { simulateCrashAfter: "files-applied" },
-      ),
-    ).rejects.toThrow(/simulated transaction crash/i);
-    expect(await recoverBrain(root)).toBe("restored");
-
-    const resumed = await beginSetup(
-      root,
-      { purpose: "A changed purpose must not replace the initial charter" },
-      services,
-    );
-    const completed = await finishSetup(root, resumed.id, {
-      summary: "Initial map after recovery",
+    expect(started).toMatchObject({
+      status: "in-progress",
+      purpose: "Astronomy concepts",
     });
-
-    expect(resumed).toMatchObject({ id: setup.id, status: "in-progress" });
-    expect(completed.status).toBe("completed");
   });
 
   test("reports later registered sources as query-triggered delta work without reopening setup", async () => {

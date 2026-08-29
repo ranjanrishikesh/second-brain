@@ -61,6 +61,10 @@ describe("brain CLI", () => {
       ],
       { write: () => undefined },
     );
+    await writeFile(
+      path.join(root, "sources", "foundation.md"),
+      "# Foundation\n\nInitial setup evidence.\n",
+    );
     const output: string[] = [];
 
     const exitCode = await runCli(
@@ -106,6 +110,10 @@ describe("brain CLI", () => {
       ],
       { write: () => undefined },
     );
+    await writeFile(
+      path.join(root, "sources", "foundation.md"),
+      "# Foundation\n\nInitial setup evidence.\n",
+    );
     const beginOutput: string[] = [];
     await runCli(
       [
@@ -139,11 +147,11 @@ describe("brain CLI", () => {
     expect(exitCode).toBe(0);
     expect(JSON.parse(output.join(""))).toMatchObject({
       setupId: setup.id,
-      sourceIds: [],
+      sourceIds: [expect.stringMatching(/^src_[a-f0-9]{16}$/)],
     });
   });
 
-  test("finishes an empty initial setup through the CLI", async () => {
+  test("refuses to start an empty initial setup through the CLI", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-cli-setup-finish-"));
     await runCli(
       [
@@ -157,50 +165,30 @@ describe("brain CLI", () => {
       ],
       { write: () => undefined },
     );
-    const beginOutput: string[] = [];
-    await runCli(
-      [
-        "setup",
-        "begin",
-        "--purpose",
-        "Create the initial source catalog.",
-        "--root",
-        root,
-        "--json",
-      ],
-      { write: (value) => beginOutput.push(value) },
-      {
-        runtimeServices: {
-          embeddings: {
-            modelId: "test/cli",
-            modelRevision: "test-revision",
-            embed: async (texts: readonly string[]) => texts.map(() => [0, 1]),
+    await expect(
+      runCli(
+        [
+          "setup",
+          "begin",
+          "--purpose",
+          "Create the initial source catalog.",
+          "--root",
+          root,
+          "--json",
+        ],
+        { write: () => undefined },
+        {
+          runtimeServices: {
+            embeddings: {
+              modelId: "test/cli",
+              modelRevision: "test-revision",
+              embed: async (texts: readonly string[]) =>
+                texts.map(() => [0, 1]),
+            },
           },
         },
-      },
-    );
-    const setup = JSON.parse(beginOutput.join("")) as { id: string };
-    const output: string[] = [];
-
-    const exitCode = await runCli(
-      [
-        "setup",
-        "finish",
-        setup.id,
-        "--summary",
-        "The source catalog is empty and healthy.",
-        "--root",
-        root,
-        "--json",
-      ],
-      { write: (value) => output.push(value) },
-    );
-
-    expect(exitCode).toBe(0);
-    expect(JSON.parse(output.join(""))).toMatchObject({
-      id: setup.id,
-      status: "completed",
-    });
+      ),
+    ).rejects.toThrow(/at least one.*ready source/i);
   });
 
   test("binds a source-page apply to the active setup checkpoint", async () => {
@@ -933,7 +921,16 @@ describe("brain CLI", () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(JSON.parse(output.join(""))).toMatchObject({ ok: true, issues: [] });
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      ok: true,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCES_EMPTY", severity: "warning" }),
+        expect.objectContaining({
+          code: "SETUP_INCOMPLETE",
+          severity: "warning",
+        }),
+      ]),
+    });
   });
 
   test("scans sources and emits machine-readable results", async () => {

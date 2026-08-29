@@ -283,9 +283,25 @@ export async function beginSetup(
   await recoverBrain(root);
   await assertUsableBrainCharter(root);
   await scanAndRegisterSources(root, testOptions);
-  const existing = await readBrainState(root);
+  const [existing, registeredSources] = await Promise.all([
+    readBrainState(root),
+    sourceRecords(root),
+  ]);
   if (existing.setup.status === "completed") {
     throw new Error("Initial setup is already complete");
+  }
+  if (
+    !registeredSources.some((source) => source.extractionStatus === "ready")
+  ) {
+    const diagnostics =
+      registeredSources.length === 0
+        ? "no sources are registered"
+        : registeredSources
+            .map((source) => `${source.path} (${source.extractionStatus})`)
+            .join(", ");
+    throw new Error(
+      `Initial setup requires at least one registered ready source; ${diagnostics}`,
+    );
   }
   await prepareSemanticModel(root, services);
   const operationId = `op_setup_${randomUUID().replaceAll("-", "")}`;

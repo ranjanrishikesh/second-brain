@@ -73,6 +73,67 @@ describe("loadBrainConfig", () => {
 });
 
 describe("doctorBrain", () => {
+  test("reports incomplete template onboarding as non-fatal warnings", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-doctor-template-"));
+    await initBrain(root, {
+      name: "Portable Second Brain",
+      description: "A self-maintaining personal knowledge base.",
+    });
+
+    const report = await doctorBrain(root);
+
+    expect(report.ok).toBe(true);
+    expect(report.issues).toEqual(
+      expect.arrayContaining(
+        [
+          "IDENTITY_TEMPLATE",
+          "SOURCES_EMPTY",
+          "CHARTER_PENDING",
+          "SETUP_INCOMPLETE",
+        ].map((code) => expect.objectContaining({ code, severity: "warning" })),
+      ),
+    );
+  });
+
+  test("distinguishes unregistered and registered-but-unusable sources", async () => {
+    const unregisteredRoot = await mkdtemp(
+      path.join(tmpdir(), "brain-doctor-unregistered-"),
+    );
+    await initBrain(unregisteredRoot, {
+      name: "Unregistered",
+      description: "Unregistered evidence",
+    });
+    await writeFile(
+      path.join(unregisteredRoot, "sources", "facts.md"),
+      "# Facts\n\nEvidence.\n",
+    );
+    expect((await doctorBrain(unregisteredRoot)).issues).toContainEqual(
+      expect.objectContaining({
+        code: "SOURCES_UNREGISTERED",
+        severity: "warning",
+      }),
+    );
+
+    const blockedRoot = await mkdtemp(
+      path.join(tmpdir(), "brain-doctor-blocked-"),
+    );
+    await initBrain(blockedRoot, {
+      name: "Blocked",
+      description: "Blocked evidence",
+    });
+    await writeFile(path.join(blockedRoot, "sources", "image.png"), "pixels");
+    await scanSources(blockedRoot);
+    const blocked = await doctorBrain(blockedRoot);
+
+    expect(blocked.ok).toBe(true);
+    expect(blocked.issues).toContainEqual(
+      expect.objectContaining({
+        code: "SOURCES_NOT_READY",
+        severity: "warning",
+      }),
+    );
+  });
+
   test("reports a missing configuration", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-doctor-"));
 

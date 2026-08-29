@@ -421,6 +421,10 @@ describe("portable second-brain fake host", () => {
 
   test("captures web evidence and persists an honest unanswered gap", async () => {
     const root = await createBrain("Research Brain");
+    await writeFile(
+      path.join(root, "sources", "research-foundation.md"),
+      "# Research foundation\n\nThe initial local corpus contains general research notes.\n",
+    );
     await completeInitialSetup(root, "Research evidence");
     const session = await beginQuery(root, "Did Project Zephyr discover life?");
     await expandQuery(root, session.id, {
