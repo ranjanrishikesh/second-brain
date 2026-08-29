@@ -8,6 +8,7 @@ import { loadBrainConfig } from "./config.js";
 import {
   inspectBrainCharter,
   inspectOnboarding,
+  inspectSetupCompletionIntegrity,
   inspectSourceDuplicateAcknowledgements,
 } from "./onboarding.js";
 import { brainStateV1Schema } from "./state.js";
@@ -341,15 +342,25 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
         path: "BRAIN.md",
       });
     }
+    const setupIntegrity = state
+      ? await inspectSetupCompletionIntegrity(
+          root,
+          state,
+          manifest?.sources ?? [],
+        )
+      : { valid: true };
     if (
       state?.setup.status === "completed" &&
-      (onboarding.sourceFiles.ready === 0 || !onboarding.charter.configured)
+      (onboarding.sourceFiles.ready === 0 ||
+        !onboarding.charter.configured ||
+        !setupIntegrity.valid)
     ) {
       issues.push({
         code: "SETUP_STATE_INVALID",
         severity: "error",
-        message:
-          "Completed setup is inconsistent with the current ready-source and charter requirements",
+        message: setupIntegrity.reason
+          ? `Completed setup is invalid: ${setupIntegrity.reason}`
+          : "Completed setup is inconsistent with the current ready-source and charter requirements",
         path: ".brain/state.json",
       });
     }

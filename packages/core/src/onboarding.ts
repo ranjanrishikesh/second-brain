@@ -10,6 +10,7 @@ import { loadBrainConfig } from "./config.js";
 import { readBrainState, type BrainStateV1 } from "./state.js";
 import { sourceFormatForPath } from "./sources/format.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import { loadWikiPages } from "./wiki/graph.js";
 
 export const TEMPLATE_BRAIN_NAME = "Portable Second Brain";
 export const TEMPLATE_BRAIN_DESCRIPTION =
@@ -257,6 +258,73 @@ export async function inspectSourceDuplicateAcknowledgements(
   return { validPaths, invalid };
 }
 
+export interface SetupCompletionIntegrityV1 {
+  valid: boolean;
+  reason?: string;
+}
+
+export async function inspectSetupCompletionIntegrity(
+  root: string,
+  state: BrainStateV1,
+  records: SourceRecordV1[],
+): Promise<SetupCompletionIntegrityV1> {
+  if (state.setup.status !== "completed") return { valid: true };
+  if (
+    !state.setup.id ||
+    !state.setup.purpose ||
+    !state.setup.startedAt ||
+    !state.setup.completedAt
+  ) {
+    return {
+      valid: false,
+      reason: "completed setup is missing required session fields",
+    };
+  }
+  if (state.setup.pendingSourceIds.length > 0) {
+    return {
+      valid: false,
+      reason: "completed setup still has pending initial sources",
+    };
+  }
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const initialRecords = state.setup.initialSourceIds.map((sourceId) =>
+    recordsById.get(sourceId),
+  );
+  if (initialRecords.some((record) => !record)) {
+    return {
+      valid: false,
+      reason: "completed setup references a source missing from the manifest",
+    };
+  }
+  const readyInitialSourceIds = initialRecords
+    .filter(
+      (record): record is SourceRecordV1 =>
+        record?.extractionStatus === "ready",
+    )
+    .map((record) => record.id);
+  if (readyInitialSourceIds.length === 0) {
+    return {
+      valid: false,
+      reason: "completed setup has no ready initial source",
+    };
+  }
+  const representedSourceIds = new Set(
+    (await loadWikiPages(root))
+      .filter((page) => page.type === "source")
+      .flatMap((page) => page.sources.map((source) => source.id)),
+  );
+  const missingSourceIds = readyInitialSourceIds.filter(
+    (sourceId) => !representedSourceIds.has(sourceId),
+  );
+  if (missingSourceIds.length > 0) {
+    return {
+      valid: false,
+      reason: `completed setup is missing source pages for: ${missingSourceIds.join(", ")}`,
+    };
+  }
+  return { valid: true };
+}
+
 export async function inspectBrainCharter(
   root: string,
 ): Promise<BrainCharterStatusV1> {
@@ -331,6 +399,7 @@ function phaseAndAction(input: {
   registeredPaths: Set<string>;
   ready: number;
   charterConfigured: boolean;
+  setupCompletionValid: boolean;
 }): { phase: OnboardingPhaseV1; nextAction: OnboardingNextActionV1 } {
   if (input.template) {
     return { phase: "needs-initialization", nextAction: "initialize" };
@@ -358,6 +427,9 @@ function phaseAndAction(input: {
     return { phase: "setup-in-progress", nextAction: "resume-setup" };
   }
   if (input.setupStatus === "completed") {
+    if (!input.setupCompletionValid) {
+      return { phase: "setup-in-progress", nextAction: "resume-setup" };
+    }
     return { phase: "ready", nextAction: "ask-question" };
   }
   return { phase: "ready-for-setup", nextAction: "begin-setup" };
@@ -406,6 +478,11 @@ export async function inspectOnboarding(
       )
       .map((duplicate) => duplicate.path),
   ]);
+  const setupIntegrity = await inspectSetupCompletionIntegrity(
+    root,
+    state,
+    records,
+  );
   const phase = phaseAndAction({
     template,
     setupStatus: state.setup.status,
@@ -413,6 +490,7 @@ export async function inspectOnboarding(
     registeredPaths,
     ready: extractionCount("ready"),
     charterConfigured: charter.configured,
+    setupCompletionValid: setupIntegrity.valid,
   });
   return onboardingStatusV1Schema.parse({
     version: 1,

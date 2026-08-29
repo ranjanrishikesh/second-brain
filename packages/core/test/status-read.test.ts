@@ -188,7 +188,9 @@ describe("brain status and reading", () => {
       path.join(pendingRoot, "sources", "stars.md"),
       "# Stars\n\nStellar evidence.\n",
     );
-    await scanSources(pendingRoot);
+    const pendingScan = await scanSources(pendingRoot);
+    const pendingSource = pendingScan.added[0];
+    if (!pendingSource) throw new Error("Expected a ready source");
     expect(await inspectOnboarding(pendingRoot)).toMatchObject({
       phase: "awaiting-charter",
       nextAction: "set-charter",
@@ -199,6 +201,27 @@ describe("brain status and reading", () => {
       path.join(pendingRoot, "BRAIN.md"),
       "# Pending charter\n\nStellar evidence brain.\n\n## Purpose\n\nCatalog and answer questions from stellar evidence.\n",
     );
+    const pendingSourcePage: WikiPageV1 = {
+      schema: 1,
+      id: "pg_pending_stars_source",
+      path: "wiki/pages/sources/pending-stars.md",
+      title: "Pending stars source",
+      type: "source",
+      status: "active",
+      summary: "The registered stellar evidence source.",
+      aliases: [],
+      tags: ["astronomy"],
+      createdAt: "2026-08-29T00:00:00.000Z",
+      updatedAt: "2026-08-29T00:00:00.000Z",
+      revision: "pending",
+      sources: [{ id: pendingSource.id, locators: ["heading=stars"] }],
+      relations: [],
+      body: `# Pending stars source\n\nStellar evidence. [@${pendingSource.id}#heading=stars]`,
+    };
+    await writeFile(
+      path.join(pendingRoot, pendingSourcePage.path),
+      renderWikiPage(pendingSourcePage),
+    );
 
     const state = await readBrainState(pendingRoot);
     await writeBrainState(pendingRoot, {
@@ -208,7 +231,7 @@ describe("brain status and reading", () => {
         id: "setup_0123456789abcdef0123456789abcdef",
         purpose: "Catalog stellar evidence",
         startedAt: "2026-08-29T00:00:00.000Z",
-        initialSourceIds: [],
+        initialSourceIds: [pendingSource.id],
         pendingSourceIds: [],
       },
     });
@@ -225,13 +248,25 @@ describe("brain status and reading", () => {
         purpose: "Catalog stellar evidence",
         startedAt: "2026-08-29T00:00:00.000Z",
         completedAt: "2026-08-29T00:01:00.000Z",
-        initialSourceIds: [],
+        initialSourceIds: [pendingSource.id],
         pendingSourceIds: [],
       },
     });
     expect(await inspectOnboarding(pendingRoot)).toMatchObject({
       phase: "ready",
       nextAction: "ask-question",
+    });
+
+    await writeFile(
+      path.join(pendingRoot, "sources", "later-delta.md"),
+      "# Later delta\n\nEvidence added after initial setup.\n",
+    );
+    await scanAndRegisterSources(pendingRoot);
+    expect(await inspectOnboarding(pendingRoot)).toMatchObject({
+      phase: "ready",
+      nextAction: "ask-question",
+      setup: { status: "completed" },
+      sourceFiles: { registered: 2, ready: 2 },
     });
   });
 
@@ -299,6 +334,44 @@ describe("brain status and reading", () => {
       ok: false,
       issues: expect.arrayContaining([
         expect.objectContaining({ code: "SETUP_STATE_INVALID" }),
+      ]),
+    });
+
+    const missingPageRoot = await initializedBrain(
+      "Completed without source pages",
+    );
+    await writeFile(
+      path.join(missingPageRoot, "sources", "evidence.md"),
+      "# Evidence\n\nUsable source material.\n",
+    );
+    const missingPageScan = await scanAndRegisterSources(missingPageRoot);
+    const missingPageSource = missingPageScan.added[0];
+    if (!missingPageSource) throw new Error("Expected a ready source");
+    const missingPageState = await readBrainState(missingPageRoot);
+    await writeBrainState(missingPageRoot, {
+      ...missingPageState,
+      setup: {
+        status: "completed",
+        id: "setup_fedcba9876543210fedcba9876543210",
+        purpose: "Catalog the initial evidence",
+        startedAt: "2026-08-29T00:00:00.000Z",
+        completedAt: "2026-08-29T00:01:00.000Z",
+        initialSourceIds: [missingPageSource.id],
+        pendingSourceIds: [],
+      },
+    });
+
+    expect(await inspectOnboarding(missingPageRoot)).toMatchObject({
+      phase: "setup-in-progress",
+      nextAction: "resume-setup",
+    });
+    expect(await doctorBrain(missingPageRoot)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SETUP_STATE_INVALID",
+          severity: "error",
+        }),
       ]),
     });
   });
