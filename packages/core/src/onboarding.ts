@@ -212,6 +212,7 @@ export async function inspectSourceDuplicateAcknowledgements(
   root: string,
   state: BrainStateV1,
   records: SourceRecordV1[],
+  options: { verifyBytes?: boolean } = {},
 ): Promise<{
   validPaths: Set<string>;
   invalid: InvalidSourceDuplicateV1[];
@@ -242,7 +243,9 @@ export async function inspectSourceDuplicateAcknowledgements(
         const metadata = await lstat(absolutePath);
         if (!metadata.isFile()) {
           reason = "duplicate source path is not a regular file";
-        } else {
+        } else if (metadata.size !== duplicate.bytes) {
+          reason = "duplicate source size changed after acknowledgement";
+        } else if (options.verifyBytes ?? true) {
           const actual = await digestFile(absolutePath);
           if (
             actual.bytes !== duplicate.bytes ||
@@ -470,6 +473,7 @@ export async function inspectOnboarding(
     root,
     state,
     records,
+    { verifyBytes: false },
   );
   const registeredPaths = new Set([
     ...records.map((record) => record.path),

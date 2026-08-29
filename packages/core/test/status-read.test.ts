@@ -143,6 +143,31 @@ describe("brain status and reading", () => {
       await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
     ).toBe(operationsAfterAcknowledgement);
 
+    const sameSizeChangedBytes = sourceBytes.replace("One", "Two");
+    expect(Buffer.byteLength(sameSizeChangedBytes)).toBe(
+      Buffer.byteLength(sourceBytes),
+    );
+    await writeFile(
+      path.join(root, "sources", "copy.md"),
+      sameSizeChangedBytes,
+    );
+    // Routine status remains metadata-only; doctor performs the expensive
+    // cryptographic verification and catches same-size byte changes.
+    expect(await inspectOnboarding(root)).toMatchObject({
+      phase: "ready-for-setup",
+      nextAction: "begin-setup",
+    });
+    expect(await doctorBrain(root)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_DUPLICATE_MISMATCH",
+          severity: "error",
+          path: "sources/copy.md",
+        }),
+      ]),
+    });
+
     await writeFile(
       path.join(root, "sources", "copy.md"),
       "# Independent evidence\n\nThis is no longer a duplicate.\n",
