@@ -14,18 +14,23 @@ const execFileAsync = promisify(execFile);
 async function createDocx(
   body: string,
   extraEntries: Record<string, string> = {},
+  mainDocumentPath = "word/document.xml",
 ): Promise<Uint8Array> {
   const document = new JSZip();
   document.file(
     "[Content_Types].xml",
-    '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>',
+    `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/${mainDocumentPath}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`,
   );
   document.file(
     "_rels/.rels",
-    '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="${mainDocumentPath}"/></Relationships>`,
   );
   document.file(
-    "word/_rels/document.xml.rels",
+    path.posix.join(
+      path.posix.dirname(mainDocumentPath),
+      "_rels",
+      `${path.posix.basename(mainDocumentPath)}.rels`,
+    ),
     '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
   );
   document.file(
@@ -33,7 +38,7 @@ async function createDocx(
     '<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>',
   );
   document.file(
-    "word/document.xml",
+    mainDocumentPath,
     `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
   );
   for (const [entryPath, content] of Object.entries(extraEntries)) {
@@ -382,7 +387,7 @@ describe("scanSources", () => {
     expect(result.added[0]?.error).toMatch(/too many archive entries/i);
   });
 
-  test("rejects DOCX archives whose expanded XML exceeds the source limit", async () => {
+  test("rejects DOCX archives whose expanded contents exceed the source limit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-expanded-docx-"));
     await initBrain(root, {
       name: "Test",
@@ -397,6 +402,67 @@ describe("scanSources", () => {
     );
     expect(bytes.byteLength).toBeLessThan(4_096);
     await writeFile(path.join(root, "sources", "expanded.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(
+      /expanded docx content exceeds.*4096 bytes/i,
+    );
+  });
+
+  test("counts extensionless DOCX parts toward the expanded source limit", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-expanded-docx-part-"),
+    );
+    await initBrain(root, {
+      name: "Test",
+      description: "Expanded DOCX part test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4_096;
+    await writeFile(configPath, stringify(config));
+    const bytes = await createDocx(
+      "<w:p><w:r><w:t>Visible text</w:t></w:r></w:p>",
+      { "mammoth/style-map": " ".repeat(20_000) },
+    );
+    expect(bytes.byteLength).toBeLessThan(4_096);
+    await writeFile(path.join(root, "sources", "expanded-part.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(
+      /expanded docx content exceeds.*4096 bytes/i,
+    );
+  });
+
+  test("counts mixed-case DOCX relationship targets toward the expanded source limit", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-expanded-docx-target-"),
+    );
+    await initBrain(root, {
+      name: "Test",
+      description: "Expanded DOCX target test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4_096;
+    await writeFile(configPath, stringify(config));
+    const bytes = await createDocx(
+      `<w:p><w:r><w:t>${"A".repeat(20_000)}</w:t></w:r></w:p>`,
+      {},
+      "word/Main.XML",
+    );
+    expect(bytes.byteLength).toBeLessThan(4_096);
+    await writeFile(path.join(root, "sources", "expanded-target.docx"), bytes);
 
     const result = await scanSources(root);
 

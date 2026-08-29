@@ -308,12 +308,7 @@ export async function extractDocx(
     ) {
       throw new Error(`Unsafe DOCX path: ${originalName}`);
     }
-    if (
-      !entry.dir &&
-      (normalized === "[Content_Types].xml" ||
-        normalized.endsWith(".xml") ||
-        normalized.endsWith(".rels"))
-    ) {
+    if (!entry.dir) {
       const uncompressedSize = metadata._data?.uncompressedSize;
       if (
         typeof uncompressedSize !== "number" ||
@@ -321,12 +316,12 @@ export async function extractDocx(
         uncompressedSize < 0
       )
         throw new Error(`DOCX entry has an invalid size: ${normalized}`);
-      expandedBytes += uncompressedSize;
-      if (expandedBytes > maxExpandedBytes) {
+      if (uncompressedSize > maxExpandedBytes - expandedBytes) {
         throw new Error(
           `Expanded DOCX content exceeds configured maximum of ${maxExpandedBytes} bytes`,
         );
       }
+      expandedBytes += uncompressedSize;
     }
   }
   const { default: mammoth } = await import("mammoth");
