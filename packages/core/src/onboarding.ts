@@ -1,11 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { access, readFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { access, lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { readBrainState } from "./state.js";
+import { readBrainState, type BrainStateV1 } from "./state.js";
 import { sourceFormatForPath } from "./sources/format.js";
 import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
 
@@ -187,6 +189,74 @@ async function readSourceRecords(root: string): Promise<SourceRecordV1[]> {
   return manifest.sources;
 }
 
+export interface InvalidSourceDuplicateV1 {
+  path: string;
+  reason: string;
+}
+
+async function digestFile(filePath: string): Promise<{
+  bytes: number;
+  sha256: string;
+}> {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(filePath)) {
+    bytes += chunk.byteLength;
+    hash.update(chunk);
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
+
+export async function inspectSourceDuplicateAcknowledgements(
+  root: string,
+  state: BrainStateV1,
+  records: SourceRecordV1[],
+): Promise<{
+  validPaths: Set<string>;
+  invalid: InvalidSourceDuplicateV1[];
+}> {
+  const validPaths = new Set<string>();
+  const invalid: InvalidSourceDuplicateV1[] = [];
+  const rootPath = path.resolve(root);
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  for (const duplicate of state.sourceDuplicates) {
+    const canonical = recordsById.get(duplicate.sourceId);
+    const absolutePath = path.resolve(root, duplicate.path);
+    let reason: string | undefined;
+    if (!absolutePath.startsWith(`${rootPath}${path.sep}`)) {
+      reason = "duplicate source path escapes the brain root";
+    } else if (duplicate.sha256 === undefined || duplicate.bytes === undefined) {
+      reason = "legacy duplicate acknowledgement is not sealed to source bytes";
+    } else if (
+      !canonical ||
+      duplicate.sha256 !== canonical.sha256 ||
+      duplicate.bytes !== canonical.bytes
+    ) {
+      reason = "duplicate acknowledgement does not match its canonical source";
+    } else {
+      try {
+        const metadata = await lstat(absolutePath);
+        if (!metadata.isFile()) {
+          reason = "duplicate source path is not a regular file";
+        } else {
+          const actual = await digestFile(absolutePath);
+          if (
+            actual.bytes !== duplicate.bytes ||
+            actual.sha256 !== duplicate.sha256
+          ) {
+            reason = "duplicate source bytes changed after acknowledgement";
+          }
+        }
+      } catch {
+        reason = "duplicate source cannot be read";
+      }
+    }
+    if (reason) invalid.push({ path: duplicate.path, reason });
+    else validPaths.add(duplicate.path);
+  }
+  return { validPaths, invalid };
+}
+
 export async function inspectBrainCharter(
   root: string,
 ): Promise<BrainCharterStatusV1> {
@@ -321,10 +391,19 @@ export async function inspectOnboarding(
     config.brain.name === TEMPLATE_BRAIN_NAME &&
     config.brain.description === TEMPLATE_BRAIN_DESCRIPTION;
   const registeredSourceIds = new Set(records.map((record) => record.id));
+  const duplicateIntegrity = await inspectSourceDuplicateAcknowledgements(
+    root,
+    state,
+    records,
+  );
   const registeredPaths = new Set([
     ...records.map((record) => record.path),
     ...state.sourceDuplicates
-      .filter((duplicate) => registeredSourceIds.has(duplicate.sourceId))
+      .filter(
+        (duplicate) =>
+          registeredSourceIds.has(duplicate.sourceId) &&
+          duplicateIntegrity.validPaths.has(duplicate.path),
+      )
       .map((duplicate) => duplicate.path),
   ]);
   const phase = phaseAndAction({

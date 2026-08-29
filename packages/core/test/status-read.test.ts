@@ -129,11 +129,44 @@ describe("brain status and reading", () => {
       nextAction: "begin-setup",
       sourceFiles: { discovered: 2, registered: 1, ready: 1 },
     });
+    expect((await readBrainState(root)).sourceDuplicates).toEqual([
+      {
+        path: "sources/copy.md",
+        sourceId: expect.stringMatching(/^src_[a-f0-9]{16}$/),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        bytes: Buffer.byteLength(sourceBytes),
+      },
+    ]);
 
     await scanAndRegisterSources(root);
     expect(
       await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
     ).toBe(operationsAfterAcknowledgement);
+
+    await writeFile(
+      path.join(root, "sources", "copy.md"),
+      "# Independent evidence\n\nThis is no longer a duplicate.\n",
+    );
+    expect(await inspectOnboarding(root)).toMatchObject({
+      phase: "sources-unregistered",
+      nextAction: "scan-sources",
+    });
+    expect(await doctorBrain(root)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_DUPLICATE_MISMATCH",
+          severity: "error",
+          path: "sources/copy.md",
+        }),
+      ]),
+    });
+
+    const replacementScan = await scanAndRegisterSources(root);
+    expect(replacementScan.added).toEqual([
+      expect.objectContaining({ path: "sources/copy.md" }),
+    ]);
+    expect((await readBrainState(root)).sourceDuplicates).toEqual([]);
   });
 
   test("reports blocked extraction, pending charter, active setup, and completed setup", async () => {

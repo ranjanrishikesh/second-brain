@@ -162,7 +162,12 @@ export async function scanSources(
       }
       const duplicate = registeredByHash.get(digest);
       if (duplicate) {
-        result.duplicates.push({ path: relativePath, sourceId: duplicate.id });
+        result.duplicates.push({
+          path: relativePath,
+          sourceId: duplicate.id,
+          sha256: digest,
+          bytes: fileStats.size,
+        });
         continue;
       }
 

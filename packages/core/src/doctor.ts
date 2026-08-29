@@ -5,7 +5,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { inspectBrainCharter, inspectOnboarding } from "./onboarding.js";
+import {
+  inspectBrainCharter,
+  inspectOnboarding,
+  inspectSourceDuplicateAcknowledgements,
+} from "./onboarding.js";
 import { brainStateV1Schema } from "./state.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import { syncStatus } from "./sync.js";
@@ -169,6 +173,22 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
         path: source.path,
       });
     }
+  }
+
+  if (manifest && state) {
+    const duplicateIntegrity = await inspectSourceDuplicateAcknowledgements(
+      root,
+      state,
+      manifest.sources,
+    );
+    issues.push(
+      ...duplicateIntegrity.invalid.map((duplicate) => ({
+        code: "SOURCE_DUPLICATE_MISMATCH",
+        severity: "error" as const,
+        message: `Duplicate source acknowledgement is invalid: ${duplicate.reason}`,
+        path: duplicate.path,
+      })),
+    );
   }
 
   try {

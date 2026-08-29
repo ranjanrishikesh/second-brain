@@ -18,6 +18,10 @@ interface SourceDigest {
   sha256: string;
 }
 
+interface ImmutableSourceInput extends SourceDigest {
+  path: string;
+}
+
 interface SourceVerificationContext {
   gitRepository: boolean;
   indexPath?: string;
@@ -37,7 +41,7 @@ async function digestStream(
 
 async function stagedSourceDigest(
   root: string,
-  source: SourceRecordV1,
+  source: ImmutableSourceInput,
   indexPath: string | undefined,
 ): Promise<SourceDigest> {
   const child = spawn("git", ["show", `:${source.path}`], {
@@ -63,9 +67,9 @@ async function stagedSourceDigest(
   return result;
 }
 
-async function assertAddedSourcesAreStable(
+async function assertSourceInputsAreStable(
   root: string,
-  sources: readonly SourceRecordV1[],
+  sources: readonly ImmutableSourceInput[],
   context: SourceVerificationContext,
 ): Promise<void> {
   for (const source of sources) {
@@ -161,13 +165,20 @@ export async function scanAndRegisterSources(
           initialSourceIds?: string[];
           pendingSourceIds?: string[];
         };
-        sourceDuplicates?: Array<{ path: string; sourceId: string }>;
+        sourceDuplicates?: Array<{
+          path: string;
+          sourceId: string;
+          sha256?: string;
+          bytes?: number;
+        }>;
         semanticAuditDue?: boolean;
       };
       const sourceDuplicates = result.duplicates
         .map((duplicate) => ({
           path: duplicate.path,
           sourceId: duplicate.sourceId,
+          sha256: duplicate.sha256,
+          bytes: duplicate.bytes,
         }))
         .sort((left, right) => left.path.localeCompare(right.path));
       const duplicateAcknowledgementsChanged =
@@ -179,6 +190,14 @@ export async function scanAndRegisterSources(
         !duplicateAcknowledgementsChanged
       ) {
         return { value: result, stagePaths: [] };
+      }
+      if (duplicateAcknowledgementsChanged) {
+        for (const duplicate of result.duplicates) {
+          await writer.sealExisting(duplicate.path, {
+            bytes: duplicate.bytes,
+            sha256: duplicate.sha256,
+          });
+        }
       }
       const pendingSourceIds = [
         ...new Set([
@@ -253,11 +272,21 @@ export async function scanAndRegisterSources(
         value: result,
         stagePaths: [
           ...result.added.map((source) => source.path),
+          ...(duplicateAcknowledgementsChanged
+            ? result.duplicates.map((duplicate) => duplicate.path)
+            : []),
           ...(manifestChanged ? [canonicalPaths[0]] : []),
           ...canonicalPaths.slice(1),
         ],
         verifyBeforeCommit: async (context) =>
-          assertAddedSourcesAreStable(root, result.added, context),
+          assertSourceInputsAreStable(
+            root,
+            [
+              ...result.added,
+              ...(duplicateAcknowledgementsChanged ? result.duplicates : []),
+            ],
+            context,
+          ),
       };
     },
   );
