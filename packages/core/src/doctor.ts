@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z, ZodError } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { inspectOnboarding } from "./onboarding.js";
+import { inspectBrainCharter, inspectOnboarding } from "./onboarding.js";
 import { brainStateV1Schema } from "./state.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
 import { syncStatus } from "./sync.js";
@@ -101,8 +101,9 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
     });
   }
 
+  let state: z.infer<typeof brainStateV1Schema> | undefined;
   try {
-    brainStateV1Schema.parse(
+    state = brainStateV1Schema.parse(
       JSON.parse(
         await readFile(path.join(root, ".brain", "state.json"), "utf8"),
       ),
@@ -263,7 +264,10 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
   }
 
   try {
-    const onboarding = await inspectOnboarding(root);
+    const [onboarding, charter] = await Promise.all([
+      inspectOnboarding(root),
+      inspectBrainCharter(root),
+    ]);
     if (onboarding.identity.template) {
       issues.push({
         code: "IDENTITY_TEMPLATE",
@@ -307,6 +311,26 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
         severity: "warning",
         message: "The source-informed brain charter has not been configured.",
         path: "BRAIN.md",
+      });
+    }
+    if (charter.invalidReason) {
+      issues.push({
+        code: "CHARTER_INVALID",
+        severity: "error",
+        message: charter.invalidReason,
+        path: "BRAIN.md",
+      });
+    }
+    if (
+      state?.setup.status === "completed" &&
+      (onboarding.sourceFiles.ready === 0 || !onboarding.charter.configured)
+    ) {
+      issues.push({
+        code: "SETUP_STATE_INVALID",
+        severity: "error",
+        message:
+          "Completed setup is inconsistent with the current ready-source and charter requirements",
+        path: ".brain/state.json",
       });
     }
     if (onboarding.setup.status !== "completed") {

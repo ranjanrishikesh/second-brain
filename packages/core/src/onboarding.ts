@@ -92,6 +92,33 @@ export type OnboardingStatusV1 = z.infer<typeof onboardingStatusV1Schema>;
 export interface BrainCharterStatusV1 {
   configured: boolean;
   origin: "pending" | "inferred" | "owner-specified" | "legacy";
+  invalidReason?: string;
+}
+
+function charterSection(content: string, title: string): string | undefined {
+  const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(
+    `^## ${escapedTitle}\\s*\\n([\\s\\S]*?)(?=^## |$)`,
+    "im",
+  ).exec(content);
+  const value = match?.[1]?.trim();
+  return value ? value : undefined;
+}
+
+function hasMeaningfulCharterBody(content: string, managed: boolean): boolean {
+  const normalized = content.trim();
+  const heading = /^# [^\n]+\n/.exec(normalized);
+  if (!heading) return false;
+  const afterHeading = normalized.slice(heading[0].length);
+  const firstSection = afterHeading.search(/^## /m);
+  const description = (
+    firstSection < 0 ? afterHeading : afterHeading.slice(0, firstSection)
+  ).trim();
+  if (!description || !charterSection(normalized, "Purpose")) return false;
+  if (!managed) return true;
+  return ["Boundaries", "Domain conventions", "Evidence preferences"].every(
+    (title) => charterSection(normalized, title),
+  );
 }
 
 function displayName(value: string): string {
@@ -169,9 +196,23 @@ export async function inspectBrainCharter(
   } catch {
     return { configured: false, origin: "pending" };
   }
+  if (!content.trim()) {
+    return {
+      configured: false,
+      origin: "pending",
+      invalidReason: "BRAIN.md is empty",
+    };
+  }
   if (content.startsWith("---\n")) {
     const closingMarker = content.indexOf("\n---\n", 4);
-    if (closingMarker >= 0) {
+    if (closingMarker < 0) {
+      return {
+        configured: false,
+        origin: "pending",
+        invalidReason: "BRAIN.md has unterminated charter frontmatter",
+      };
+    }
+    try {
       const metadata = parse(content.slice(4, closingMarker)) as Record<
         string,
         unknown
@@ -179,11 +220,23 @@ export async function inspectBrainCharter(
       if (
         metadata.brainCharter === 1 &&
         (metadata.origin === "inferred" ||
-          metadata.origin === "owner-specified")
+          metadata.origin === "owner-specified") &&
+        hasMeaningfulCharterBody(
+          content.slice(closingMarker + "\n---\n".length),
+          true,
+        )
       ) {
         return { configured: true, origin: metadata.origin };
       }
+    } catch {
+      // The diagnostic below covers malformed YAML and invalid metadata alike.
     }
+    return {
+      configured: false,
+      origin: "pending",
+      invalidReason:
+        "BRAIN.md has invalid managed-charter metadata or missing required sections",
+    };
   }
   if (
     /replace\s+this\s+section\s+after\s+cloning/i.test(content) ||
@@ -191,7 +244,14 @@ export async function inspectBrainCharter(
   ) {
     return { configured: false, origin: "pending" };
   }
-  return { configured: true, origin: "legacy" };
+  return hasMeaningfulCharterBody(content, false)
+    ? { configured: true, origin: "legacy" }
+    : {
+        configured: false,
+        origin: "pending",
+        invalidReason:
+          "Legacy BRAIN.md must include a title, description, and non-empty Purpose section",
+      };
 }
 
 function phaseAndAction(input: {
@@ -204,12 +264,6 @@ function phaseAndAction(input: {
 }): { phase: OnboardingPhaseV1; nextAction: OnboardingNextActionV1 } {
   if (input.template) {
     return { phase: "needs-initialization", nextAction: "initialize" };
-  }
-  if (input.setupStatus === "completed") {
-    return { phase: "ready", nextAction: "ask-question" };
-  }
-  if (input.setupStatus === "in-progress") {
-    return { phase: "setup-in-progress", nextAction: "resume-setup" };
   }
   if (input.discoveredPaths.length === 0 && input.registeredPaths.size === 0) {
     return { phase: "awaiting-sources", nextAction: "add-sources" };
@@ -229,6 +283,12 @@ function phaseAndAction(input: {
   }
   if (!input.charterConfigured) {
     return { phase: "awaiting-charter", nextAction: "set-charter" };
+  }
+  if (input.setupStatus === "in-progress") {
+    return { phase: "setup-in-progress", nextAction: "resume-setup" };
+  }
+  if (input.setupStatus === "completed") {
+    return { phase: "ready", nextAction: "ask-question" };
   }
   return { phase: "ready-for-setup", nextAction: "begin-setup" };
 }

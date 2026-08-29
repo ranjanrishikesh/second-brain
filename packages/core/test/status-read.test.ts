@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+  doctorBrain,
   initBrain,
   inspectOnboarding,
   onboardingStatusV1Schema,
@@ -161,6 +162,10 @@ describe("brain status and reading", () => {
       charter: { configured: false, origin: "pending" },
       sourceFiles: { registered: 1, ready: 1 },
     });
+    await writeFile(
+      path.join(pendingRoot, "BRAIN.md"),
+      "# Pending charter\n\nStellar evidence brain.\n\n## Purpose\n\nCatalog and answer questions from stellar evidence.\n",
+    );
 
     const state = await readBrainState(pendingRoot);
     await writeBrainState(pendingRoot, {
@@ -195,6 +200,106 @@ describe("brain status and reading", () => {
       phase: "ready",
       nextAction: "ask-question",
     });
+  });
+
+  test("does not report a completed setup as ready when readiness invariants are missing", async () => {
+    const emptyRoot = await initializedBrain("Completed without sources");
+    const emptyState = await readBrainState(emptyRoot);
+    await writeBrainState(emptyRoot, {
+      ...emptyState,
+      setup: {
+        status: "completed",
+        id: "setup_0123456789abcdef0123456789abcdef",
+        purpose: "Legacy completed setup",
+        startedAt: "2026-08-29T00:00:00.000Z",
+        completedAt: "2026-08-29T00:01:00.000Z",
+        initialSourceIds: [],
+        pendingSourceIds: [],
+      },
+    });
+
+    expect(await inspectOnboarding(emptyRoot)).toMatchObject({
+      phase: "awaiting-sources",
+      nextAction: "add-sources",
+    });
+    expect(await doctorBrain(emptyRoot)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SETUP_STATE_INVALID",
+          severity: "error",
+        }),
+      ]),
+    });
+
+    const pendingCharterRoot = await initializedBrain(
+      "Completed without charter",
+    );
+    await writeFile(
+      path.join(pendingCharterRoot, "sources", "evidence.md"),
+      "# Evidence\n\nUsable source material.\n",
+    );
+    await scanAndRegisterSources(pendingCharterRoot);
+    await writeFile(
+      path.join(pendingCharterRoot, "BRAIN.md"),
+      "# Completed without charter\n\n## Purpose\n\nReplace this section after cloning.\n",
+    );
+    const pendingState = await readBrainState(pendingCharterRoot);
+    await writeBrainState(pendingCharterRoot, {
+      ...pendingState,
+      setup: {
+        status: "completed",
+        id: "setup_abcdef0123456789abcdef0123456789",
+        purpose: "Legacy completed setup",
+        startedAt: "2026-08-29T00:00:00.000Z",
+        completedAt: "2026-08-29T00:01:00.000Z",
+        initialSourceIds: [],
+        pendingSourceIds: [],
+      },
+    });
+
+    expect(await inspectOnboarding(pendingCharterRoot)).toMatchObject({
+      phase: "awaiting-charter",
+      nextAction: "set-charter",
+    });
+    expect(await doctorBrain(pendingCharterRoot)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "SETUP_STATE_INVALID" }),
+      ]),
+    });
+  });
+
+  test("rejects empty and malformed managed charters instead of treating them as legacy", async () => {
+    const root = await initializedBrain("Invalid charter");
+    await writeFile(
+      path.join(root, "sources", "evidence.md"),
+      "# Evidence\n\nUsable source material.\n",
+    );
+    await scanAndRegisterSources(root);
+
+    for (const invalidCharter of [
+      "",
+      "---\nbrainCharter: 2\norigin: inferred\n---\n\n# Invalid charter\n",
+      "---\nbrainCharter: 1\norigin: inferred\n\n# Missing close\n",
+    ]) {
+      await writeFile(path.join(root, "BRAIN.md"), invalidCharter);
+
+      expect(await inspectOnboarding(root)).toMatchObject({
+        phase: "awaiting-charter",
+        nextAction: "set-charter",
+        charter: { configured: false, origin: "pending" },
+      });
+      expect(await doctorBrain(root)).toMatchObject({
+        ok: false,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "CHARTER_INVALID",
+            severity: "error",
+          }),
+        ]),
+      });
+    }
   });
 
   test("recognizes a configured legacy charter and exposes onboarding through status", async () => {
