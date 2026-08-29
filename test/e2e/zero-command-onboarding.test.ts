@@ -107,6 +107,19 @@ async function runCliJson<T>(args: string[]): Promise<T> {
   return JSON.parse(result.output) as T;
 }
 
+async function runInstalledBrainJson<T>(
+  root: string,
+  args: string[],
+): Promise<T> {
+  const command = await execFile(
+    "pnpm",
+    ["--silent", "brain", ...args, "--json"],
+    { cwd: root },
+  );
+  expect(command.stderr).toBe("");
+  return JSON.parse(command.stdout) as T;
+}
+
 async function addPdfAndDocxCorpus(root: string): Promise<void> {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage();
@@ -299,6 +312,80 @@ describe("zero-command onboarding fake host", () => {
       access(path.join(root, "packages", "core", "dist", "index.js")),
     ).rejects.toThrow();
   }, 30_000);
+
+  test("resumes pre-semantic onboarding across installed CLI processes", async () => {
+    const { root } = await cloneTemplate("second-brain-process-resume");
+    await execFile("pnpm", ["install", "--offline", "--frozen-lockfile"], {
+      cwd: root,
+    });
+
+    expect(
+      (await runInstalledBrainJson<BrainStatusV1>(root, ["status"])).onboarding,
+    ).toMatchObject({
+      phase: "needs-initialization",
+      nextAction: "initialize",
+    });
+
+    const initialized = await runInstalledBrainJson<InitCliResult>(root, [
+      "init",
+    ]);
+    expect(initialized).toMatchObject({
+      initialization: { name: "Second Brain Process Resume" },
+      status: {
+        onboarding: {
+          phase: "awaiting-sources",
+          nextAction: "add-sources",
+        },
+      },
+    });
+
+    await addPdfAndDocxCorpus(root);
+    expect(
+      (await runInstalledBrainJson<BrainStatusV1>(root, ["status"])).onboarding,
+    ).toMatchObject({
+      phase: "sources-unregistered",
+      nextAction: "scan-sources",
+    });
+
+    const scan = await runInstalledBrainJson<SourceScanResult>(root, [
+      "source",
+      "scan",
+    ]);
+    expect(
+      scan.added.filter((source) => source.extractionStatus === "ready"),
+    ).toHaveLength(2);
+    expect(
+      (await runInstalledBrainJson<BrainStatusV1>(root, ["status"])).onboarding,
+    ).toMatchObject({
+      phase: "awaiting-charter",
+      nextAction: "set-charter",
+    });
+
+    const charterFile = path.join(root, ".brain", "runtime", "charter.json");
+    await writeFile(
+      charterFile,
+      `${JSON.stringify({
+        version: 1,
+        description: "Astronomy evidence about orbits and resonance.",
+        purpose: "Answer source-backed astronomy questions.",
+        boundaries: ["Include all registered source material."],
+        domainConventions: ["Preserve astronomical terminology."],
+        evidencePreferences: ["Prefer explicit stable source locators."],
+        origin: "inferred",
+      })}\n`,
+    );
+    await runInstalledBrainJson<BrainCharterResultV1>(root, [
+      "charter",
+      "set",
+      charterFile,
+    ]);
+    expect(
+      (await runInstalledBrainJson<BrainStatusV1>(root, ["status"])).onboarding,
+    ).toMatchObject({
+      phase: "ready-for-setup",
+      nextAction: "begin-setup",
+    });
+  }, 60_000);
 
   test("resumes a cloned brain from empty identity through cited ready state and safe sync", async () => {
     const { root, sandbox } = await cloneTemplate("second-brain-smoke");
