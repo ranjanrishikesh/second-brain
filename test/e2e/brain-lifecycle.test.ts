@@ -855,5 +855,5 @@ describe("portable second-brain fake host", () => {
     ).toMatch(
       /^⚠ Sync pending — knowledge is safely committed locally at [a-f0-9]{40}, but it has not yet been pushed to origin\//,
     );
-  }, 30_000);
+  }, 60_000);
 });

@@ -55,6 +55,21 @@ async function createDocx(
   });
 }
 
+async function createRepeatedFootnoteDocx(): Promise<Uint8Array> {
+  const references = Array.from(
+    { length: 200 },
+    () => '<w:r><w:footnoteReference w:id="1"/></w:r>',
+  ).join("");
+  return await createDocx(`<w:p>${references}</w:p>`, {
+    "word/footnotes.xml":
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:footnote w:id="1"><w:p><w:r><w:t>' +
+      "A".repeat(20_000) +
+      "</w:t></w:r></w:p></w:footnote></w:footnotes>",
+  });
+}
+
 interface CentralDirectoryEntryLocation {
   centralOffset: number;
   centralSize: number;
@@ -584,6 +599,31 @@ describe("scanSources", () => {
     );
   });
 
+  test("rejects DOCX semantic output that exceeds the source limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-amplified-docx-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Amplified DOCX output test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 1_000_000;
+    await writeFile(configPath, stringify(config));
+    const bytes = await createRepeatedFootnoteDocx();
+    expect(bytes.byteLength).toBeLessThan(1_000_000);
+    await writeFile(path.join(root, "sources", "amplified.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(
+      /converted docx content exceeds.*1000000 bytes/i,
+    );
+  });
+
   test("counts duplicate physical DOCX directory records", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-duplicate-docx-"));
     await initBrain(root, {
@@ -712,6 +752,39 @@ describe("scanSources", () => {
     config.sources.maxFileBytes = 4_096;
     await writeFile(configPath, stringify(config));
     const expectedError = /expanded docx content exceeds.*4096 bytes/i;
+
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
+    await rm(
+      path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+    );
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
+  });
+
+  test("enforces the DOCX semantic output limit equally with and without cache", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-docx-cache-output-policy-"),
+    );
+    await initBrain(root, {
+      name: "Test",
+      description: "DOCX cache output policy test",
+    });
+    await writeFile(
+      path.join(root, "sources", "amplified.docx"),
+      await createRepeatedFootnoteDocx(),
+    );
+    const scan = await scanSources(root);
+    const source = scan.added[0];
+    expect(source).toMatchObject({
+      extractionStatus: "ready",
+      extractor: "docx-v1",
+    });
+    if (!source) throw new Error("Expected the DOCX source to be registered");
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 1_000_000;
+    await writeFile(configPath, stringify(config));
+    const expectedError = /converted docx content exceeds.*1000000 bytes/i;
 
     await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
     await rm(

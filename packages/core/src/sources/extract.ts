@@ -5,6 +5,10 @@ import JSZip from "jszip";
 import { parseHTML } from "linkedom";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { validateDocxArchive } from "./docx-archive.js";
+import {
+  assertDocxOutputSize,
+  assertDocxSemanticOutputBudget,
+} from "./docx-output-budget.js";
 import type { ExtractedSourceV1 } from "./types.js";
 
 function titleFromMarkdown(text: string, filePath: string): string {
@@ -290,14 +294,18 @@ export async function extractDocx(
       externalFileAccess: false,
       includeEmbeddedStyleMap: false,
       convertImage: mammoth.images.imgElement(async () => ({ src: "" })),
+      transformDocument: (document: unknown) =>
+        assertDocxSemanticOutputBudget(document, maxExpandedBytes),
     },
   );
+  assertDocxOutputSize(converted.value, maxExpandedBytes);
   const html = extractHtml(
     sourceId,
     filePath,
     `<html><body>${converted.value}</body></html>`,
   );
   const structured = extractMarkdown(sourceId, filePath, html.text);
+  assertDocxOutputSize(structured.text, maxExpandedBytes);
   return { ...structured, title: html.title };
 }
 

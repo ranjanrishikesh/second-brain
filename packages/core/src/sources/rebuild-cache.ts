@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "../config.js";
 import { validateDocxArchive } from "./docx-archive.js";
+import { assertDocxOutputSize } from "./docx-output-budget.js";
 import {
   extractCsv,
   extractDocx,
@@ -125,6 +126,7 @@ export async function loadExtractedSourceCache(
       new Uint8Array(content),
       config.sources.maxFileBytes,
     );
+    assertDocxOutputSize(cached.text, config.sources.maxFileBytes);
   }
   return cached;
 }

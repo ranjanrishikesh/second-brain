@@ -98,7 +98,7 @@ The core then pushes only a normal fast-forward composed entirely of its own man
 | JSONL | line |
 | CSV / TSV | row |
 
-DOCX extraction preserves usable text structure from headings, paragraphs, lists, tables, footnotes, and text boxes; embedded images are not OCRed. Scanned PDFs, legacy `.doc` files, other Office formats, images/OCR, audio, and video are reported as unsupported or extraction-required; they are never silently ignored. To replace registered bytes, add a new file, scan it, then use `brain source supersede <old-id> <new-id>`.
+DOCX extraction preserves usable text structure from headings, paragraphs, lists, tables, footnotes, and text boxes; embedded images are not OCRed. Archive expansion and converted output share the configured source-size ceiling, including repeated note/comment content. Scanned PDFs, legacy `.doc` files, other Office formats, images/OCR, audio, and video are reported as unsupported or extraction-required; they are never silently ignored. To replace registered bytes, add a new file, scan it, then use `brain source supersede <old-id> <new-id>`.
 
 ## Hosted OpenClaw gateway
 
