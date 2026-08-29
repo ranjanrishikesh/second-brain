@@ -298,6 +298,41 @@ describe("initBrain", () => {
     expect(await git(root, ["status", "--short"])).toBe("");
   });
 
+  test("preserves the complete required layout when the first commit is cloned", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-first-clone-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+    await initBrain(root, {
+      name: "Cloneable Astronomy",
+      description: "A cloneable source-backed astronomy brain.",
+    });
+    const cloneParent = await mkdtemp(
+      path.join(tmpdir(), "brain-init-first-clone-copy-"),
+    );
+    const clone = path.join(cloneParent, "cloneable-astronomy");
+
+    await execFile("git", ["clone", "--quiet", root, clone]);
+
+    expect(await doctorBrain(clone)).toMatchObject({
+      ok: true,
+      issues: expect.not.arrayContaining([
+        expect.objectContaining({ code: "LAYOUT_MISSING" }),
+      ]),
+    });
+    expect(
+      await git(root, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "HEAD",
+        "--",
+        "sources",
+        "wiki/pages",
+      ]),
+    ).toContain("sources/.gitkeep");
+  });
+
   test("creates the first managed identity commit in an unborn SHA-256 Git repository", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-init-sha256-"));
     await git(root, ["init", "--object-format=sha256", "-b", "main"]);
@@ -367,6 +402,38 @@ describe("initBrain", () => {
     );
   });
 
+  test("refuses owner-created managed files before writing any first scaffold", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-owner-file-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+    const ownerCharter = "# Owner notes\n\nDo not overwrite this file.\n";
+    await writeFile(path.join(root, "BRAIN.md"), ownerCharter);
+
+    await expect(
+      initBrain(root, {
+        name: "Unsafe Initialization",
+        description: "This must not be written.",
+      }),
+    ).rejects.toThrow(/dirty managed files/i);
+
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toBe(
+      ownerCharter,
+    );
+    for (const generatedPath of [
+      "brain.config.yaml",
+      "sources",
+      "wiki",
+      ".brain/source-manifest.json",
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+    ]) {
+      await expect(
+        access(path.join(root, generatedPath)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
   test("recovers an interrupted explicit initialization before the first Git commit", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-init-unborn-crash-"));
     await git(root, ["init", "-b", "main"]);
@@ -387,9 +454,15 @@ describe("initBrain", () => {
     await expect(
       git(root, ["rev-parse", "--verify", "HEAD"]),
     ).rejects.toThrow();
-    expect((await loadBrainConfig(root)).brain.name).toBe(
-      "Portable Second Brain",
-    );
+    await expect(
+      access(path.join(root, "brain.config.yaml")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(path.join(root, "wiki"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      access(path.join(root, "sources", ".gitkeep")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
 
     await expect(
       initBrain(root, {

@@ -192,6 +192,8 @@ const transactionJournalSchema = z.object({
   canonicalCommitComplete: z.boolean().optional(),
   /** Extra root files included in this operation's snapshot and seal. */
   managedRootPaths: z.array(z.string()).optional(),
+  /** Extra exact canonical files included in this operation's snapshot. */
+  managedFilePaths: z.array(z.string()).optional(),
 });
 
 type TransactionJournal = z.infer<typeof transactionJournalSchema>;
@@ -222,6 +224,18 @@ function safeManagedRootPaths(relativePaths: readonly string[] = []): string[] {
     if (!allowedManagedRootFiles.has(relativePath)) {
       throw new Error(`Unsafe managed root path: ${relativePath}`);
     }
+    return relativePath;
+  });
+}
+
+function safeManagedFilePaths(
+  root: string,
+  relativePaths: readonly string[] = [],
+  managedRootPaths: readonly string[] = [],
+): string[] {
+  const rootPathSet = new Set(managedRootPaths);
+  return safeStagePaths(root, [...relativePaths]).map((relativePath) => {
+    canonicalManagedPath(root, relativePath, rootPathSet);
     return relativePath;
   });
 }
@@ -472,35 +486,111 @@ function safePagePath(root: string, pagePath: string): string {
   return absolutePath;
 }
 
+function brainSnapshotTargets(
+  managedRootPaths: readonly string[] = [],
+  managedFilePaths: readonly string[] = [],
+): string[] {
+  return [
+    "wiki",
+    ...trackedBrainFiles,
+    ...safeManagedRootPaths(managedRootPaths),
+    ...managedFilePaths,
+  ].filter(
+    (relativePath, index, values) => values.indexOf(relativePath) === index,
+  );
+}
+
 async function copyBrainSnapshot(
   root: string,
   backupPath: string,
   managedRootPaths: readonly string[] = [],
+  managedFilePaths: readonly string[] = [],
 ): Promise<void> {
   await mkdir(backupPath, { recursive: true });
-  await cp(path.join(root, "wiki"), path.join(backupPath, "wiki"), {
-    recursive: true,
-  });
-  await mkdir(path.join(backupPath, ".brain"), { recursive: true });
-  for (const relativePath of trackedBrainFiles) {
-    await cp(
-      path.join(root, relativePath),
-      path.join(backupPath, relativePath),
-    );
+  const targets = brainSnapshotTargets(managedRootPaths, managedFilePaths);
+  const entries: Array<{
+    path: string;
+    existed: boolean;
+    kind?: "file" | "directory";
+  }> = [];
+  for (const relativePath of targets) {
+    const source = path.join(root, relativePath);
+    const destination = path.join(backupPath, relativePath);
+    try {
+      const metadata = await lstat(source);
+      const kind = metadata.isDirectory()
+        ? ("directory" as const)
+        : metadata.isFile()
+          ? ("file" as const)
+          : undefined;
+      if (!kind) {
+        throw new Error(
+          `Canonical snapshot target must be a regular file or directory: ${relativePath}`,
+        );
+      }
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(source, destination, { recursive: kind === "directory" });
+      entries.push({ path: relativePath, existed: true, kind });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      entries.push({ path: relativePath, existed: false });
+    }
   }
-  for (const relativePath of safeManagedRootPaths(managedRootPaths)) {
-    await cp(
-      path.join(root, relativePath),
-      path.join(backupPath, relativePath),
-    );
-  }
+  await writeFile(
+    path.join(backupPath, ".snapshot-manifest.json"),
+    `${JSON.stringify({ version: 1, entries }, null, 2)}\n`,
+    "utf8",
+  );
 }
 
 async function restoreBrainSnapshot(
   root: string,
   backupPath: string,
   managedRootPaths: readonly string[] = [],
+  managedFilePaths: readonly string[] = [],
 ): Promise<void> {
+  const snapshotManifestPath = path.join(backupPath, ".snapshot-manifest.json");
+  if (await pathExists(snapshotManifestPath)) {
+    const snapshot = z
+      .object({
+        version: z.literal(1),
+        entries: z.array(
+          z.object({
+            path: z.string().min(1),
+            existed: z.boolean(),
+            kind: z.enum(["file", "directory"]).optional(),
+          }),
+        ),
+      })
+      .parse(JSON.parse(await readFile(snapshotManifestPath, "utf8")));
+    const expectedPaths = brainSnapshotTargets(
+      managedRootPaths,
+      managedFilePaths,
+    ).sort();
+    const snapshotPaths = snapshot.entries.map((entry) => entry.path).sort();
+    if (
+      new Set(snapshotPaths).size !== snapshotPaths.length ||
+      JSON.stringify(snapshotPaths) !== JSON.stringify(expectedPaths)
+    ) {
+      throw new Error("Canonical snapshot manifest paths are invalid");
+    }
+    for (const entry of snapshot.entries) {
+      const destination = path.join(root, entry.path);
+      await rm(destination, { recursive: true, force: true });
+      if (!entry.existed) continue;
+      if (!entry.kind) {
+        throw new Error(`Snapshot entry is missing its kind: ${entry.path}`);
+      }
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(path.join(backupPath, entry.path), destination, {
+        recursive: entry.kind === "directory",
+      });
+    }
+    return;
+  }
+
+  // Journals produced before absence-aware snapshots always contained every
+  // legacy canonical path, so retain their original recovery behavior.
   await rm(path.join(root, "wiki"), { recursive: true, force: true });
   await cp(path.join(backupPath, "wiki"), path.join(root, "wiki"), {
     recursive: true,
@@ -512,6 +602,12 @@ async function restoreBrainSnapshot(
     );
   }
   for (const relativePath of safeManagedRootPaths(managedRootPaths)) {
+    await cp(
+      path.join(backupPath, relativePath),
+      path.join(root, relativePath),
+    );
+  }
+  for (const relativePath of managedFilePaths) {
     await cp(
       path.join(backupPath, relativePath),
       path.join(root, relativePath),
@@ -968,6 +1064,7 @@ interface CanonicalWorktreeChange {
 async function changedCanonicalWorktreeEntries(
   root: string,
   managedRootPaths: readonly string[] = [],
+  managedFilePaths: readonly string[] = [],
 ): Promise<CanonicalWorktreeChange[]> {
   const { stdout } = await execFile(
     "git",
@@ -980,6 +1077,7 @@ async function changedCanonicalWorktreeEntries(
       "wiki",
       ...trackedBrainFiles,
       ...managedRootPaths,
+      ...managedFilePaths,
     ],
     { cwd: root, encoding: "buffer" },
   );
@@ -1006,20 +1104,30 @@ async function changedCanonicalWorktreeEntries(
 async function changedCanonicalWorktreePaths(
   root: string,
   managedRootPaths: readonly string[] = [],
+  managedFilePaths: readonly string[] = [],
 ): Promise<string[]> {
-  return (await changedCanonicalWorktreeEntries(root, managedRootPaths)).map(
-    (change) => change.path,
-  );
+  return (
+    await changedCanonicalWorktreeEntries(
+      root,
+      managedRootPaths,
+      managedFilePaths,
+    )
+  ).map((change) => change.path);
 }
 
 async function assertNoUnexpectedCanonicalWorktreeChanges(
   root: string,
   stagePaths: string[],
   managedRootPaths: readonly string[] = [],
+  managedFilePaths: readonly string[] = [],
 ): Promise<void> {
   const allowedPaths = new Set(stagePaths);
   const unexpected = (
-    await changedCanonicalWorktreePaths(root, managedRootPaths)
+    await changedCanonicalWorktreePaths(
+      root,
+      managedRootPaths,
+      managedFilePaths,
+    )
   ).filter((relativePath) => !allowedPaths.has(relativePath));
   if (unexpected.length > 0) {
     throw new Error(
@@ -1097,6 +1205,8 @@ export interface CanonicalWriteOptions<T> {
   managedRootPaths?: string[];
   /** Exact missing scaffold files that this operation may adopt as untracked. */
   allowUntrackedPaths?: string[];
+  /** Extra exact canonical files this operation must snapshot and restore. */
+  managedFilePaths?: string[];
 }
 
 export async function runCanonicalWrite<T>(
@@ -1111,6 +1221,11 @@ export async function runCanonicalWrite<T>(
   }
   const managedRootPaths = safeManagedRootPaths(options.managedRootPaths);
   const managedRootPathSet = new Set(managedRootPaths);
+  const managedFilePaths = safeManagedFilePaths(
+    root,
+    options.managedFilePaths,
+    managedRootPaths,
+  );
   const allowUntrackedPaths = new Set(
     safeStagePaths(root, options.allowUntrackedPaths ?? []),
   );
@@ -1134,7 +1249,11 @@ export async function runCanonicalWrite<T>(
       throw new Error("Refusing canonical write while Git has staged changes");
     }
     const dirtyManaged = (
-      await changedCanonicalWorktreeEntries(root, managedRootPaths)
+      await changedCanonicalWorktreeEntries(
+        root,
+        managedRootPaths,
+        managedFilePaths,
+      )
     ).filter(
       (change) =>
         change.status !== "??" || !allowUntrackedPaths.has(change.path),
@@ -1179,7 +1298,12 @@ export async function runCanonicalWrite<T>(
       throw new Error("Unsafe canonical transaction root");
     }
     await mkdir(transactionPath);
-    await copyBrainSnapshot(root, backupPath, managedRootPaths);
+    await copyBrainSnapshot(
+      root,
+      backupPath,
+      managedRootPaths,
+      managedFilePaths,
+    );
     snapshotPrepared = true;
     journal = {
       version: 1,
@@ -1190,6 +1314,7 @@ export async function runCanonicalWrite<T>(
       gitRepository,
       stagePaths,
       managedRootPaths,
+      managedFilePaths,
     };
     await writeJournal(journalPath, journal);
     simulateCrash(options.testOptions ?? {}, "prepared");
@@ -1236,6 +1361,7 @@ export async function runCanonicalWrite<T>(
         root,
         stagePaths,
         managedRootPaths,
+        managedFilePaths,
       );
       await writer.assertWorktree();
       let indexLock: HeldGitIndexLock | undefined;
@@ -1263,6 +1389,7 @@ export async function runCanonicalWrite<T>(
           root,
           stagePaths,
           managedRootPaths,
+          managedFilePaths,
         );
         await writer.assertWorktree();
         await writer.assertPrivateIndex(isolatedIndexPath);
@@ -1276,6 +1403,7 @@ export async function runCanonicalWrite<T>(
           root,
           stagePaths,
           managedRootPaths,
+          managedFilePaths,
         );
         await writer.assertWorktree();
         await writer.assertPrivateIndex(isolatedIndexPath);
@@ -1294,6 +1422,7 @@ export async function runCanonicalWrite<T>(
           root,
           stagePaths,
           managedRootPaths,
+          managedFilePaths,
         );
         await mutation.verifyBeforeCommit?.({
           gitRepository: true,
@@ -1310,6 +1439,7 @@ export async function runCanonicalWrite<T>(
           root,
           stagePaths,
           managedRootPaths,
+          managedFilePaths,
         );
         await writer.assertWorktree();
         await writer.assertPrivateIndex(isolatedIndexPath);
@@ -1350,6 +1480,7 @@ export async function runCanonicalWrite<T>(
           root,
           stagePaths,
           managedRootPaths,
+          managedFilePaths,
         );
         await writer.assertWorktree();
         await writer.assertPrivateIndex(isolatedIndexPath);
@@ -1473,7 +1604,12 @@ export async function runCanonicalWrite<T>(
         if (options.testOptions?.simulateRollbackFailure) {
           throw new Error("Simulated rollback failure");
         }
-        await restoreBrainSnapshot(root, backupPath, managedRootPaths);
+        await restoreBrainSnapshot(
+          root,
+          backupPath,
+          managedRootPaths,
+          managedFilePaths,
+        );
         if (gitRepository && stagePaths.length > 0 && !journal?.isolatedIndex) {
           await restoreStagedIndex(
             root,
@@ -1841,6 +1977,11 @@ export async function recoverBrain(
   }
   safeStagePaths(root, journal.stagePaths ?? []);
   const managedRootPaths = safeManagedRootPaths(journal.managedRootPaths);
+  const managedFilePaths = safeManagedFilePaths(
+    root,
+    journal.managedFilePaths,
+    managedRootPaths,
+  );
   const gitRepository = journal.gitRepository ?? true;
   if (gitRepository && (journal.gitIndexLockPath || journal.gitIndexLock)) {
     await removeOwnedGitIndexLock(
@@ -1908,7 +2049,12 @@ export async function recoverBrain(
     await writeJournal(journalPath, journal);
   }
   if (outcome === "restored") {
-    await restoreBrainSnapshot(root, journal.backupPath, managedRootPaths);
+    await restoreBrainSnapshot(
+      root,
+      journal.backupPath,
+      managedRootPaths,
+      managedFilePaths,
+    );
     if (
       gitRepository &&
       (journal.stagePaths?.length ?? 0) > 0 &&

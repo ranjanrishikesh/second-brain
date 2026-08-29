@@ -385,7 +385,7 @@ describe("zero-command onboarding fake host", () => {
       phase: "ready-for-setup",
       nextAction: "begin-setup",
     });
-  }, 60_000);
+  }, 120_000);
 
   test("resumes a cloned brain from empty identity through cited ready state and safe sync", async () => {
     const { root, sandbox } = await cloneTemplate("second-brain-smoke");

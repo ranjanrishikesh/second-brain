@@ -1,14 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  access,
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
@@ -52,6 +44,10 @@ const pageDirectories = [
   "questions",
 ] as const;
 
+const pageKeepPaths = pageDirectories.map(
+  (directory) => `wiki/pages/${directory}/.gitkeep`,
+);
+
 const initialScaffoldStagePaths = [
   "BRAIN.md",
   "brain.config.yaml",
@@ -63,14 +59,8 @@ const initialScaffoldStagePaths = [
   ".brain/source-manifest.json",
   ".brain/state.json",
   ".brain/operations.jsonl",
-] as const;
-
-const unchangedInitialScaffoldPaths = [
-  "wiki/index.md",
-  "wiki/map.md",
-  "wiki/reports/health.md",
-  ".brain/source-manifest.json",
-  ".brain/state.json",
+  "sources/.gitkeep",
+  ...pageKeepPaths,
 ] as const;
 
 const templateCharter = `# ${TEMPLATE_BRAIN_NAME}
@@ -108,25 +98,15 @@ Include source material relevant to ${identity.name}.
 `;
 }
 
-async function writeIfMissing(
+async function readOrDefault(
   filePath: string,
-  content: string,
-): Promise<void> {
+  defaultContent: string,
+): Promise<string> {
   try {
-    await readFile(filePath);
+    return await readFile(filePath, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await atomicWrite(filePath, content);
-  }
-}
-
-async function atomicWrite(filePath: string, content: string): Promise<void> {
-  const temporaryPath = `${filePath}.tmp-${randomUUID()}`;
-  try {
-    await writeFile(temporaryPath, content, "utf8");
-    await rename(temporaryPath, filePath);
-  } finally {
-    await rm(temporaryPath, { force: true });
+    return defaultContent;
   }
 }
 
@@ -191,11 +171,13 @@ async function pristineTemplateState(root: string): Promise<boolean> {
       await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
     ) as { sources?: unknown[] };
     if ((manifest.sources ?? []).length > 0) return false;
-    if (
-      (
-        await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8")
-      ).trim().length > 0
-    ) {
+    const operations = (
+      await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8")
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind?: unknown });
+    if (operations.some((operation) => operation.kind !== "identity")) {
       return false;
     }
     for (const directory of pageDirectories) {
@@ -255,11 +237,8 @@ function updateHomeIdentity(content: string, name: string): string {
   return `${lines.join("\n")}\n`;
 }
 
-async function ensureScaffold(
-  root: string,
-  initialIdentity?: { name: string; description: string },
-): Promise<void> {
-  const scaffoldIdentity = initialIdentity ?? {
+function scaffoldDefaults(): Map<string, string> {
+  const scaffoldIdentity = {
     name: TEMPLATE_BRAIN_NAME,
     description: TEMPLATE_BRAIN_DESCRIPTION,
   };
@@ -270,44 +249,23 @@ async function ensureScaffold(
       language: "en",
     },
   });
-  await mkdir(root, { recursive: true });
-  await mkdir(path.join(root, "sources"), { recursive: true });
-  await mkdir(path.join(root, ".brain", "cache"), { recursive: true });
-  await mkdir(path.join(root, ".brain", "runtime"), { recursive: true });
-  await mkdir(path.join(root, "wiki", "reports"), { recursive: true });
-  for (const directory of pageDirectories) {
-    await mkdir(path.join(root, "wiki", "pages", directory), {
-      recursive: true,
-    });
-  }
-  await writeIfMissing(
-    path.join(root, "brain.config.yaml"),
-    stringify(templateConfig),
-  );
-  await writeIfMissing(
-    path.join(root, "BRAIN.md"),
-    initialIdentity ? renderLegacyCharter(initialIdentity) : templateCharter,
-  );
-  await writeIfMissing(
-    path.join(root, ".brain", "source-manifest.json"),
-    `${JSON.stringify({ version: 1, sources: [] }, null, 2)}\n`,
-  );
-  await writeIfMissing(
-    path.join(root, ".brain", "state.json"),
-    `${JSON.stringify(defaultBrainState(), null, 2)}\n`,
-  );
-  await writeIfMissing(path.join(root, ".brain", "operations.jsonl"), "");
-  await writeIfMissing(
-    path.join(root, "wiki", "home.md"),
-    `# ${scaffoldIdentity.name}\n`,
-  );
-  await writeIfMissing(path.join(root, "wiki", "index.md"), "# Wiki Index\n");
-  await writeIfMissing(path.join(root, "wiki", "map.md"), "# Knowledge Map\n");
-  await writeIfMissing(path.join(root, "wiki", "log.md"), "# Brain Log\n");
-  await writeIfMissing(
-    path.join(root, "wiki", "reports", "health.md"),
-    "# Brain Health\n",
-  );
+  return new Map([
+    ["brain.config.yaml", stringify(templateConfig)],
+    ["BRAIN.md", templateCharter],
+    [
+      ".brain/source-manifest.json",
+      `${JSON.stringify({ version: 1, sources: [] }, null, 2)}\n`,
+    ],
+    [".brain/state.json", `${JSON.stringify(defaultBrainState(), null, 2)}\n`],
+    [".brain/operations.jsonl", ""],
+    ["wiki/home.md", `# ${scaffoldIdentity.name}\n`],
+    ["wiki/index.md", "# Wiki Index\n"],
+    ["wiki/map.md", "# Knowledge Map\n"],
+    ["wiki/log.md", "# Brain Log\n"],
+    ["wiki/reports/health.md", "# Brain Health\n"],
+    ["sources/.gitkeep", ""],
+    ...pageKeepPaths.map((relativePath) => [relativePath, ""] as const),
+  ]);
 }
 
 function requestedIdentity(
@@ -370,17 +328,34 @@ export async function initBrain(
     configuredIdentity.brain.description === TEMPLATE_BRAIN_DESCRIPTION &&
     (await pristineTemplateState(root)) &&
     (await isUnbornGitRepository(root));
-  const includeInitialScaffold =
-    !hadConfiguration || adoptExistingUnbornScaffold;
-  const adoptableScaffoldPaths = !hadConfiguration
-    ? await missingPaths(root, initialScaffoldStagePaths)
-    : adoptExistingUnbornScaffold
-      ? [...initialScaffoldStagePaths]
-      : [];
-  await ensureScaffold(root);
-  const existing = brainConfigV1Schema.parse(
-    parse(await readFile(path.join(root, "brain.config.yaml"), "utf8")),
+  const missingScaffoldPaths = await missingPaths(
+    root,
+    initialScaffoldStagePaths,
   );
+  const scaffoldPathsToWrite =
+    !hadConfiguration || adoptExistingUnbornScaffold
+      ? [...initialScaffoldStagePaths]
+      : missingScaffoldPaths;
+  const adoptableScaffoldPaths = adoptExistingUnbornScaffold
+    ? [...initialScaffoldStagePaths]
+    : missingScaffoldPaths;
+  const defaults = scaffoldDefaults();
+  const scaffoldContents = new Map<string, string>();
+  for (const relativePath of initialScaffoldStagePaths) {
+    const defaultContent = defaults.get(relativePath);
+    if (defaultContent === undefined) {
+      throw new Error(`Missing scaffold default: ${relativePath}`);
+    }
+    scaffoldContents.set(
+      relativePath,
+      await readOrDefault(path.join(root, relativePath), defaultContent),
+    );
+  }
+  const existing =
+    configuredIdentity ??
+    brainConfigV1Schema.parse(
+      parse(scaffoldContents.get("brain.config.yaml") ?? ""),
+    );
   const targetConfig = identityConfig(existing, identity);
   const sameIdentity =
     existing.brain.name === identity.name &&
@@ -400,10 +375,8 @@ export async function initBrain(
     );
   }
 
-  const charterPath = path.join(root, "BRAIN.md");
-  const homePath = path.join(root, "wiki", "home.md");
-  const currentCharter = await readFile(charterPath, "utf8");
-  const currentHome = await readFile(homePath, "utf8");
+  const currentCharter = scaffoldContents.get("BRAIN.md") ?? "";
+  const currentHome = scaffoldContents.get("wiki/home.md") ?? "";
   const identityCharter = updateCharterIdentity(
     currentCharter,
     identity.name,
@@ -422,6 +395,7 @@ export async function initBrain(
       : identityCharter;
   const nextHome = updateHomeIdentity(currentHome, identity.name);
   if (
+    scaffoldPathsToWrite.length === 0 &&
     sameIdentity &&
     nextCharter === currentCharter &&
     nextHome === currentHome
@@ -440,6 +414,9 @@ export async function initBrain(
       operationId,
       commitMessage: `brain(identity): initialize ${identity.name} [op:${operationId}]`,
       managedRootPaths: ["BRAIN.md", "brain.config.yaml"],
+      managedFilePaths: scaffoldPathsToWrite.includes("sources/.gitkeep")
+        ? ["sources/.gitkeep"]
+        : [],
       allowUntrackedPaths: adoptableScaffoldPaths,
       testOptions,
     },
@@ -456,39 +433,38 @@ export async function initBrain(
         pageIds: [],
         tiersUsed: [],
       };
-      await writer.writeText("BRAIN.md", nextCharter);
-      await writer.writeText("brain.config.yaml", stringify(targetConfig));
-      await writer.writeText("wiki/home.md", nextHome);
-      await writer.writeText(
+      const finalContents = new Map(scaffoldContents);
+      finalContents.set("BRAIN.md", nextCharter);
+      finalContents.set("brain.config.yaml", stringify(targetConfig));
+      finalContents.set("wiki/home.md", nextHome);
+      finalContents.set(
         ".brain/operations.jsonl",
-        `${await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8")}${JSON.stringify(operation)}\n`,
+        `${scaffoldContents.get(".brain/operations.jsonl") ?? ""}${JSON.stringify(operation)}\n`,
       );
-      const existingLog = await readFile(
-        path.join(root, "wiki", "log.md"),
-        "utf8",
-      );
-      await writer.writeText(
+      finalContents.set(
         "wiki/log.md",
-        `${existingLog.trimEnd()}\n\n## [${now}] identity | Initialized ${identity.name}\n\n- Operation: \`${operationId}\`\n`,
+        `${(scaffoldContents.get("wiki/log.md") ?? "# Brain Log\n").trimEnd()}\n\n## [${now}] identity | Initialized ${identity.name}\n\n- Operation: \`${operationId}\`\n`,
       );
-      if (includeInitialScaffold) {
-        for (const relativePath of unchangedInitialScaffoldPaths) {
-          await writer.writeText(
-            relativePath,
-            await readFile(path.join(root, relativePath), "utf8"),
-          );
-        }
-      }
-      return {
-        value: { version: 1 as const, mode, ...identity, operationId },
-        stagePaths: [
+      const stagePaths = [
+        ...new Set([
           "BRAIN.md",
           "brain.config.yaml",
           "wiki/home.md",
           "wiki/log.md",
           ".brain/operations.jsonl",
-          ...(includeInitialScaffold ? unchangedInitialScaffoldPaths : []),
-        ],
+          ...scaffoldPathsToWrite,
+        ]),
+      ];
+      for (const relativePath of stagePaths) {
+        const content = finalContents.get(relativePath);
+        if (content === undefined) {
+          throw new Error(`Missing final scaffold content: ${relativePath}`);
+        }
+        await writer.writeText(relativePath, content);
+      }
+      return {
+        value: { version: 1 as const, mode, ...identity, operationId },
+        stagePaths,
       };
     },
   );
