@@ -34,7 +34,7 @@ export type {
   SyncTargetV1,
 } from "./state.js";
 export { initBrain } from "./init.js";
-export type { InitBrainOptions } from "./init.js";
+export type { InitBrainOptions, InitBrainResultV1 } from "./init.js";
 export {
   brainCharterV1Schema,
   inspectOnboarding,

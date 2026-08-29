@@ -9,12 +9,33 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
-import { brainConfigV1Schema } from "./config.js";
-import { defaultBrainState } from "./state.js";
+import { z } from "zod";
+import { brainConfigV1Schema, type BrainConfigV1 } from "./config.js";
+import {
+  suggestBrainName,
+  TEMPLATE_BRAIN_DESCRIPTION,
+  TEMPLATE_BRAIN_NAME,
+} from "./onboarding.js";
+import { defaultBrainState, type SyncStatusV1 } from "./state.js";
+import {
+  runCanonicalWrite,
+  type OperationRecordV1,
+  type TransactionTestOptions,
+} from "./transaction.js";
 
 export interface InitBrainOptions {
+  name?: string;
+  description?: string;
+}
+
+export interface InitBrainResultV1 {
+  version: 1;
+  mode: "template-replaced" | "repaired" | "existing";
   name: string;
   description: string;
+  operationId?: string;
+  commit?: string;
+  sync?: SyncStatusV1;
 }
 
 const pageDirectories = [
@@ -25,6 +46,23 @@ const pageDirectories = [
   "syntheses",
   "questions",
 ] as const;
+
+const templateCharter = `# ${TEMPLATE_BRAIN_NAME}
+
+${TEMPLATE_BRAIN_DESCRIPTION}
+
+## Purpose
+
+Replace this section after cloning with the domain, questions, and outcomes this brain should support.
+
+## Boundaries
+
+Document what belongs in this brain and what should remain outside it.
+
+## Domain conventions
+
+Add domain-specific terminology, entity types, relationship types, and evidence preferences here.
+`;
 
 async function writeIfMissing(
   filePath: string,
@@ -102,46 +140,22 @@ function updateHomeIdentity(content: string, name: string): string {
   return `${lines.join("\n")}\n`;
 }
 
-export async function initBrain(
+async function ensureScaffold(
   root: string,
-  options: InitBrainOptions,
+  initialIdentity?: { name: string; description: string },
 ): Promise<void> {
-  const config = brainConfigV1Schema.parse({
+  const scaffoldIdentity = initialIdentity ?? {
+    name: TEMPLATE_BRAIN_NAME,
+    description: TEMPLATE_BRAIN_DESCRIPTION,
+  };
+  const templateConfig = brainConfigV1Schema.parse({
     version: 1,
     brain: {
-      name: options.name,
-      description: options.description,
+      ...scaffoldIdentity,
       language: "en",
     },
   });
-
   await mkdir(root, { recursive: true });
-  let identityMode: "new" | "replace-template" | "existing" = "new";
-  try {
-    const existing = brainConfigV1Schema.parse(
-      parse(await readFile(path.join(root, "brain.config.yaml"), "utf8")),
-    );
-    if (
-      existing.brain.name === config.brain.name &&
-      existing.brain.description === config.brain.description
-    ) {
-      identityMode = "existing";
-    } else if (
-      existing.brain.name === "Portable Second Brain" &&
-      existing.brain.description ===
-        "A self-maintaining personal knowledge base." &&
-      (await pristineTemplateState(root))
-    ) {
-      identityMode = "replace-template";
-    } else {
-      throw new Error(
-        `Brain is already initialized as ${existing.brain.name}; edit BRAIN.md and brain.config.yaml deliberately to rename it`,
-      );
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-
   await mkdir(path.join(root, "sources"), { recursive: true });
   await mkdir(path.join(root, ".brain", "cache"), { recursive: true });
   await mkdir(path.join(root, ".brain", "runtime"), { recursive: true });
@@ -151,45 +165,16 @@ export async function initBrain(
       recursive: true,
     });
   }
-
-  if (identityMode === "new") {
-    await writeIfMissing(
-      path.join(root, "brain.config.yaml"),
-      stringify(config),
-    );
-    await writeIfMissing(
-      path.join(root, "BRAIN.md"),
-      `# ${config.brain.name}\n\n${config.brain.description}\n\n## Boundaries\n\nDocument what belongs in this brain and what does not.\n`,
-    );
-  } else if (identityMode === "replace-template") {
-    await atomicWrite(path.join(root, "brain.config.yaml"), stringify(config));
-  }
-  if (identityMode !== "new") {
-    let charter: string;
-    try {
-      charter = await readFile(path.join(root, "BRAIN.md"), "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      charter =
-        "# Portable Second Brain\n\nA self-maintaining personal knowledge base.\n";
-    }
-    await atomicWrite(
-      path.join(root, "BRAIN.md"),
-      updateCharterIdentity(
-        charter,
-        config.brain.name,
-        config.brain.description,
-      ),
-    );
-    const homePath = path.join(root, "wiki", "home.md");
-    let home = `# ${config.brain.name}\n`;
-    try {
-      home = await readFile(homePath, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await atomicWrite(homePath, updateHomeIdentity(home, config.brain.name));
-  }
+  await writeIfMissing(
+    path.join(root, "brain.config.yaml"),
+    stringify(templateConfig),
+  );
+  await writeIfMissing(
+    path.join(root, "BRAIN.md"),
+    initialIdentity
+      ? `# ${initialIdentity.name}\n\n${initialIdentity.description}\n\n## Boundaries\n\nDocument what belongs in this brain and what does not.\n`
+      : templateCharter,
+  );
   await writeIfMissing(
     path.join(root, ".brain", "source-manifest.json"),
     `${JSON.stringify({ version: 1, sources: [] }, null, 2)}\n`,
@@ -201,7 +186,7 @@ export async function initBrain(
   await writeIfMissing(path.join(root, ".brain", "operations.jsonl"), "");
   await writeIfMissing(
     path.join(root, "wiki", "home.md"),
-    `# ${config.brain.name}\n`,
+    `# ${scaffoldIdentity.name}\n`,
   );
   await writeIfMissing(path.join(root, "wiki", "index.md"), "# Wiki Index\n");
   await writeIfMissing(path.join(root, "wiki", "map.md"), "# Knowledge Map\n");
@@ -210,4 +195,165 @@ export async function initBrain(
     path.join(root, "wiki", "reports", "health.md"),
     "# Brain Health\n",
   );
+}
+
+function requestedIdentity(
+  options: InitBrainOptions | undefined,
+  suggestedName: string,
+): { name: string; description: string } {
+  const name =
+    options?.name === undefined
+      ? suggestedName
+      : z.string().trim().min(1).parse(options.name);
+  const description =
+    options?.description === undefined
+      ? `A source-backed knowledge brain for ${name}.`
+      : z.string().trim().min(1).parse(options.description);
+  return { name, description };
+}
+
+function identityConfig(
+  existing: BrainConfigV1,
+  identity: { name: string; description: string },
+): BrainConfigV1 {
+  return brainConfigV1Schema.parse({
+    ...existing,
+    brain: { ...existing.brain, ...identity },
+  });
+}
+
+export async function initBrain(
+  root: string,
+  options?: InitBrainOptions,
+  testOptions: TransactionTestOptions = {},
+): Promise<InitBrainResultV1> {
+  await mkdir(root, { recursive: true });
+  let hadConfiguration = true;
+  try {
+    await readFile(path.join(root, "brain.config.yaml"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    hadConfiguration = false;
+  }
+  const suggestedName =
+    options?.name === undefined ? await suggestBrainName(root) : options.name;
+  const identity = requestedIdentity(options, suggestedName);
+  const explicitNewIdentity =
+    !hadConfiguration &&
+    options?.name !== undefined &&
+    options.description !== undefined &&
+    (identity.name !== TEMPLATE_BRAIN_NAME ||
+      identity.description !== TEMPLATE_BRAIN_DESCRIPTION)
+      ? identity
+      : undefined;
+  await ensureScaffold(root, explicitNewIdentity);
+  const existing = brainConfigV1Schema.parse(
+    parse(await readFile(path.join(root, "brain.config.yaml"), "utf8")),
+  );
+  const targetConfig = identityConfig(existing, identity);
+  const sameIdentity =
+    existing.brain.name === identity.name &&
+    existing.brain.description === identity.description;
+  let mode: InitBrainResultV1["mode"];
+  if (sameIdentity) {
+    mode = hadConfiguration ? "repaired" : "template-replaced";
+  } else if (
+    existing.brain.name === TEMPLATE_BRAIN_NAME &&
+    existing.brain.description === TEMPLATE_BRAIN_DESCRIPTION &&
+    (await pristineTemplateState(root))
+  ) {
+    mode = "template-replaced";
+  } else {
+    throw new Error(
+      `Brain is already initialized as ${existing.brain.name}; use the managed charter workflow to change its scope`,
+    );
+  }
+
+  const charterPath = path.join(root, "BRAIN.md");
+  const homePath = path.join(root, "wiki", "home.md");
+  const currentCharter = await readFile(charterPath, "utf8");
+  const currentHome = await readFile(homePath, "utf8");
+  const identityCharter = updateCharterIdentity(
+    currentCharter,
+    identity.name,
+    identity.description,
+  );
+  const explicitLegacyCharter =
+    options?.name !== undefined &&
+    options.description !== undefined &&
+    (identity.name !== TEMPLATE_BRAIN_NAME ||
+      identity.description !== TEMPLATE_BRAIN_DESCRIPTION);
+  const nextCharter = explicitLegacyCharter
+    ? identityCharter.replace(
+        /Replace this section after cloning[^\n]*/i,
+        identity.description,
+      )
+    : identityCharter;
+  const nextHome = updateHomeIdentity(currentHome, identity.name);
+  if (
+    sameIdentity &&
+    nextCharter === currentCharter &&
+    nextHome === currentHome
+  ) {
+    return {
+      version: 1,
+      mode: hadConfiguration ? "existing" : "template-replaced",
+      ...identity,
+    };
+  }
+
+  const operationId = `op_identity_${randomUUID().replaceAll("-", "")}`;
+  const transaction = await runCanonicalWrite(
+    root,
+    {
+      operationId,
+      commitMessage: `brain(identity): initialize ${identity.name} [op:${operationId}]`,
+      managedRootPaths: ["BRAIN.md", "brain.config.yaml"],
+      testOptions,
+    },
+    async (writer) => {
+      const now = new Date().toISOString();
+      const operation: OperationRecordV1 = {
+        version: 1,
+        id: operationId,
+        kind: "identity",
+        status: "completed",
+        startedAt: now,
+        completedAt: now,
+        summary: `Initialized brain identity as ${identity.name}`,
+        pageIds: [],
+        tiersUsed: [],
+      };
+      await writer.writeText("BRAIN.md", nextCharter);
+      await writer.writeText("brain.config.yaml", stringify(targetConfig));
+      await writer.writeText("wiki/home.md", nextHome);
+      await writer.writeText(
+        ".brain/operations.jsonl",
+        `${await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8")}${JSON.stringify(operation)}\n`,
+      );
+      const existingLog = await readFile(
+        path.join(root, "wiki", "log.md"),
+        "utf8",
+      );
+      await writer.writeText(
+        "wiki/log.md",
+        `${existingLog.trimEnd()}\n\n## [${now}] identity | Initialized ${identity.name}\n\n- Operation: \`${operationId}\`\n`,
+      );
+      return {
+        value: { version: 1 as const, mode, ...identity, operationId },
+        stagePaths: [
+          "BRAIN.md",
+          "brain.config.yaml",
+          "wiki/home.md",
+          "wiki/log.md",
+          ".brain/operations.jsonl",
+        ],
+      };
+    },
+  );
+  return {
+    ...transaction.value,
+    ...(transaction.commit ? { commit: transaction.commit } : {}),
+    ...(transaction.sync ? { sync: transaction.sync } : {}),
+  };
 }

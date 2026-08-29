@@ -1,13 +1,44 @@
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import {
   doctorBrain,
   initBrain,
   loadBrainConfig,
+  recoverBrain,
   scanSources,
 } from "../src/index.js";
+
+const execFile = promisify(execFileCallback);
+
+async function git(root: string, args: string[]): Promise<string> {
+  return (await execFile("git", args, { cwd: root })).stdout.trim();
+}
+
+async function templateGitRepository(
+  repositoryName = "second-brain-smoke",
+): Promise<string> {
+  const parent = await mkdtemp(path.join(tmpdir(), "brain-init-git-"));
+  const root = path.join(parent, repositoryName);
+  await mkdir(root);
+  await initBrain(root, {
+    name: "Portable Second Brain",
+    description: "A self-maintaining personal knowledge base.",
+  });
+  await writeFile(
+    path.join(root, ".gitignore"),
+    ".brain/cache/\n.brain/runtime/\n",
+  );
+  await git(root, ["init", "-b", "main"]);
+  await git(root, ["config", "user.name", "Second Brain Init Test"]);
+  await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+  await git(root, ["add", "."]);
+  await git(root, ["commit", "-m", "initial template"]);
+  return root;
+}
 
 describe("loadBrainConfig", () => {
   test("loads a valid version 1 configuration", async () => {
@@ -106,6 +137,132 @@ describe("doctorBrain", () => {
 });
 
 describe("initBrain", () => {
+  test("derives identity from the repository and creates a managed commit", async () => {
+    const root = await templateGitRepository();
+
+    const result = await initBrain(root);
+
+    expect(result).toMatchObject({
+      mode: "template-replaced",
+      name: "Second Brain Smoke",
+      description: "A source-backed knowledge brain for Second Brain Smoke.",
+    });
+    expect(await git(root, ["log", "-1", "--format=%B"])).toContain(
+      "Brain-Managed: true",
+    );
+    expect(await git(root, ["log", "-1", "--format=%B"])).toContain(
+      "Brain-Operation: op_identity_",
+    );
+    expect(
+      await git(root, ["show", "--format=", "--name-only", "HEAD"]),
+    ).toContain("BRAIN.md");
+    expect(
+      (await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toContainEqual(expect.objectContaining({ kind: "identity" }));
+  });
+
+  test("uses the Git common-directory name for a linked worktree", async () => {
+    const repository = await templateGitRepository("orbital-knowledge");
+    const worktreeParent = await mkdtemp(
+      path.join(tmpdir(), "brain-init-worktree-"),
+    );
+    const worktree = path.join(worktreeParent, "kyiv");
+    await git(repository, ["worktree", "add", "-b", "smoke", worktree]);
+
+    const result = await initBrain(worktree);
+
+    expect(result).toMatchObject({
+      name: "Orbital Knowledge",
+      description: "A source-backed knowledge brain for Orbital Knowledge.",
+    });
+  });
+
+  test("falls back to the directory name outside Git", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "brain-init-local-"));
+    const root = path.join(parent, "simple-physics");
+    await mkdir(root);
+
+    const result = await initBrain(root);
+
+    expect(result).toMatchObject({
+      name: "Simple Physics",
+      description: "A source-backed knowledge brain for Simple Physics.",
+    });
+    expect((await loadBrainConfig(root)).brain.name).toBe("Simple Physics");
+  });
+
+  test("keeps explicit identity overrides and clean reruns idempotent", async () => {
+    const root = await templateGitRepository();
+    const first = await initBrain(root, {
+      name: "Orbital Mechanics",
+      description: "A precise orbital mechanics brain.",
+    });
+    const firstHead = await git(root, ["rev-parse", "HEAD"]);
+    const operations = await readFile(
+      path.join(root, ".brain", "operations.jsonl"),
+      "utf8",
+    );
+
+    const second = await initBrain(root, {
+      name: "Orbital Mechanics",
+      description: "A precise orbital mechanics brain.",
+    });
+
+    expect(first).toMatchObject({ mode: "template-replaced" });
+    expect(second).toMatchObject({ mode: "existing" });
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(firstHead);
+    expect(
+      await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
+    ).toBe(operations);
+  });
+
+  test("refuses staged work and preserves unrelated unstaged files", async () => {
+    const stagedRoot = await templateGitRepository();
+    await writeFile(path.join(stagedRoot, "staged.txt"), "keep staged\n");
+    await git(stagedRoot, ["add", "staged.txt"]);
+    await expect(initBrain(stagedRoot)).rejects.toThrow(/staged changes/i);
+    expect((await loadBrainConfig(stagedRoot)).brain.name).toBe(
+      "Portable Second Brain",
+    );
+    expect(
+      await git(stagedRoot, ["status", "--short", "--", "staged.txt"]),
+    ).toBe("A  staged.txt");
+
+    const dirtyRoot = await templateGitRepository("astronomy-notes");
+    await writeFile(path.join(dirtyRoot, "private-notes.txt"), "keep local\n");
+    await initBrain(dirtyRoot);
+    expect(
+      await readFile(path.join(dirtyRoot, "private-notes.txt"), "utf8"),
+    ).toBe("keep local\n");
+    expect(
+      await git(dirtyRoot, ["status", "--short", "--", "private-notes.txt"]),
+    ).toBe("?? private-notes.txt");
+  });
+
+  test("restores identity files after an interrupted managed initialization", async () => {
+    const root = await templateGitRepository("recoverable-brain");
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      initBrain(root, undefined, { simulateCrashAfter: "files-applied" }),
+    ).rejects.toThrow(/simulated transaction crash/i);
+    expect((await loadBrainConfig(root)).brain.name).toBe("Recoverable Brain");
+
+    await expect(recoverBrain(root)).resolves.toBe("restored");
+    expect((await loadBrainConfig(root)).brain.name).toBe(
+      "Portable Second Brain",
+    );
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+
+    await expect(initBrain(root)).resolves.toMatchObject({
+      mode: "template-replaced",
+      name: "Recoverable Brain",
+    });
+  });
+
   test("creates the canonical brain layout", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-init-"));
 
@@ -116,9 +273,9 @@ describe("initBrain", () => {
 
     const config = await loadBrainConfig(root);
     expect(config.brain.name).toBe("Physics");
-    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toContain(
-      "# Physics",
-    );
+    const charter = await readFile(path.join(root, "BRAIN.md"), "utf8");
+    expect(charter).toContain("# Physics");
+    expect(charter).not.toMatch(/replace this section after cloning/i);
     await expect(
       access(path.join(root, ".brain", "source-manifest.json")),
     ).resolves.toBeUndefined();

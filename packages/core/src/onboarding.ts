@@ -1,5 +1,7 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { parse } from "yaml";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
@@ -10,6 +12,8 @@ import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
 export const TEMPLATE_BRAIN_NAME = "Portable Second Brain";
 export const TEMPLATE_BRAIN_DESCRIPTION =
   "A self-maintaining personal knowledge base.";
+
+const execFile = promisify(execFileCallback);
 
 const nonEmptyText = z.string().trim().min(1);
 
@@ -101,6 +105,21 @@ function displayName(value: string): string {
 
 export function fallbackBrainName(root: string): string {
   return displayName(path.basename(path.resolve(root)));
+}
+
+export async function suggestBrainName(root: string): Promise<string> {
+  try {
+    const commonDirectory = (
+      await execFile("git", ["rev-parse", "--git-common-dir"], { cwd: root })
+    ).stdout.trim();
+    const resolvedCommonDirectory = path.resolve(root, commonDirectory);
+    const repositoryPath = resolvedCommonDirectory.endsWith(`${path.sep}.git`)
+      ? path.dirname(resolvedCommonDirectory)
+      : resolvedCommonDirectory.replace(/\.git$/i, "");
+    return displayName(path.basename(repositoryPath));
+  } catch {
+    return fallbackBrainName(root);
+  }
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -217,11 +236,12 @@ function phaseAndAction(input: {
 export async function inspectOnboarding(
   root: string,
 ): Promise<OnboardingStatusV1> {
-  const [config, records, state, charter] = await Promise.all([
+  const [config, records, state, charter, suggestedName] = await Promise.all([
     loadBrainConfig(root),
     readSourceRecords(root),
     readBrainState(root),
     inspectBrainCharter(root),
+    suggestBrainName(root),
   ]);
   const discoveredAbsolutePaths = (
     await Promise.all(
@@ -255,7 +275,7 @@ export async function inspectOnboarding(
       template,
       name: config.brain.name,
       description: config.brain.description,
-      suggestedName: fallbackBrainName(root),
+      suggestedName,
     },
     charter,
     sourceFiles: {
