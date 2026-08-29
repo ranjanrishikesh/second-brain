@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { auditReportV1Schema, operationRecordV1Schema } from "../src/index.js";
+import {
+  auditReportV1Schema,
+  brainCharterV1Schema,
+  onboardingStatusV1Schema,
+  operationRecordV1Schema,
+} from "../src/index.js";
 
 describe("versioned public schemas", () => {
   test("exports reconciliation contracts for host agents", async () => {
@@ -63,5 +68,20 @@ describe("versioned public schemas", () => {
       }),
     ).toMatchObject({ version: 1, ok: true });
     expect(() => operationRecordV1Schema.parse({ version: 2 })).toThrow();
+  });
+
+  test("validates versioned onboarding and charter contracts", () => {
+    expect(
+      brainCharterV1Schema.parse({
+        version: 1,
+        description: "Astronomy observations and orbital mechanics.",
+        purpose: "Answer source-backed astronomy questions.",
+        boundaries: ["Include registered astronomy sources."],
+        domainConventions: ["Preserve astronomical terminology."],
+        evidencePreferences: ["Prefer primary sources."],
+        origin: "inferred",
+      }),
+    ).toMatchObject({ version: 1, origin: "inferred" });
+    expect(() => onboardingStatusV1Schema.parse({ version: 2 })).toThrow();
   });
 });

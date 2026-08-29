@@ -6,9 +6,11 @@ import { brainJsonSchemasV1 } from "../src/index.js";
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const expectedSchemas = [
   "AuditReportV1",
+  "BrainCharterV1",
   "BrainConfigV1",
   "BrainStateV1",
   "ChangeSetV1",
+  "OnboardingStatusV1",
   "OperationRecordV1",
   "QuerySessionV1",
   "ReadReceiptV1",

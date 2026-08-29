@@ -23,6 +23,7 @@ import {
   type SourceRecordV1,
   type SourceScanResult,
 } from "./types.js";
+import { sourceFormatForPath } from "./format.js";
 
 interface SourceManifestV1 {
   version: 1;
@@ -165,21 +166,21 @@ export async function scanSources(
         continue;
       }
 
-      const extension = path.extname(absolutePath).toLowerCase();
+      const sourceFormat = sourceFormatForPath(absolutePath);
       const id = `src_${digest.slice(0, 16)}`;
-      const markdown = extension === ".md" || extension === ".markdown";
+      const markdown = sourceFormat === "markdown";
       const webCapture = markdown
         ? readWebCaptureMetadata(content?.toString("utf8") ?? "")
         : undefined;
-      const plainText = extension === ".txt";
-      const html = extension === ".html" || extension === ".htm";
-      const json = extension === ".json";
-      const jsonLines = extension === ".jsonl";
-      const csv = extension === ".csv";
-      const tsv = extension === ".tsv";
-      const pdf = extension === ".pdf";
-      const docx = extension === ".docx";
-      const epub = extension === ".epub";
+      const plainText = sourceFormat === "text";
+      const html = sourceFormat === "html";
+      const json = sourceFormat === "json";
+      const jsonLines = sourceFormat === "jsonl";
+      const csv = sourceFormat === "csv";
+      const tsv = sourceFormat === "tsv";
+      const pdf = sourceFormat === "pdf";
+      const docx = sourceFormat === "docx";
+      const epub = sourceFormat === "epub";
       let extracted: ExtractedSourceV1 | undefined;
       let docxOutputPolicy: DocxOutputPolicyV1 | undefined;
       let extractionError = exceedsSizeLimit

@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "./config.js";
+import { inspectOnboarding, type OnboardingStatusV1 } from "./onboarding.js";
 import { pendingBootstrapSourceIds } from "./query.js";
 import { readBrainState, type SyncStatusV1 } from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
@@ -39,6 +40,7 @@ export interface BrainStatusV1 {
     pendingPageIds: string[];
   };
   recovery: { required: boolean };
+  onboarding: OnboardingStatusV1;
 }
 
 export type BrainReadResultV1 =
@@ -78,6 +80,7 @@ export async function statusBrain(root: string): Promise<BrainStatusV1> {
     pendingSourceIds,
     recoveryRequired,
     sync,
+    onboarding,
   ] = await Promise.all([
     loadBrainConfig(root),
     sourceRecords(root),
@@ -86,6 +89,7 @@ export async function statusBrain(root: string): Promise<BrainStatusV1> {
     pendingBootstrapSourceIds(root),
     pathExists(path.join(root, ".brain", "runtime", "transaction.json")),
     syncStatus(root),
+    inspectOnboarding(root),
   ]);
   const extractionCount = (status: SourceRecordV1["extractionStatus"]) =>
     sources.filter((source) => source.extractionStatus === status).length;
@@ -121,6 +125,7 @@ export async function statusBrain(root: string): Promise<BrainStatusV1> {
       pendingPageIds: state.semanticAudit?.pendingPageIds ?? [],
     },
     recovery: { required: recoveryRequired },
+    onboarding,
   };
 }
 

@@ -35,6 +35,19 @@ export type {
 } from "./state.js";
 export { initBrain } from "./init.js";
 export type { InitBrainOptions } from "./init.js";
+export {
+  brainCharterV1Schema,
+  inspectOnboarding,
+  onboardingNextActionV1Schema,
+  onboardingPhaseV1Schema,
+  onboardingStatusV1Schema,
+} from "./onboarding.js";
+export type {
+  BrainCharterV1,
+  OnboardingNextActionV1,
+  OnboardingPhaseV1,
+  OnboardingStatusV1,
+} from "./onboarding.js";
 export { doctorBrain } from "./doctor.js";
 export type { DoctorIssue, DoctorReport } from "./doctor.js";
 export { scanSources } from "./sources/scan.js";
