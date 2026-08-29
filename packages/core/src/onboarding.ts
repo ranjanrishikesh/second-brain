@@ -107,8 +107,8 @@ function charterSection(content: string, title: string): string | undefined {
 
 function hasMeaningfulCharterBody(content: string, managed: boolean): boolean {
   const normalized = content.trim();
-  const heading = /^# [^\n]+\n/.exec(normalized);
-  if (!heading) return false;
+  const heading = /^# ([^\n]*)\n/.exec(normalized);
+  if (!heading?.[1]?.trim()) return false;
   const afterHeading = normalized.slice(heading[0].length);
   const firstSection = afterHeading.search(/^## /m);
   const description = (

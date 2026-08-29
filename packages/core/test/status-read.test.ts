@@ -282,6 +282,7 @@ describe("brain status and reading", () => {
       "",
       "---\nbrainCharter: 2\norigin: inferred\n---\n\n# Invalid charter\n",
       "---\nbrainCharter: 1\norigin: inferred\n\n# Missing close\n",
+      "#    \n\nAstronomy reference material.\n\n## Purpose\n\nAnswer astronomy questions from registered evidence.\n",
     ]) {
       await writeFile(path.join(root, "BRAIN.md"), invalidCharter);
 
