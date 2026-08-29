@@ -226,7 +226,10 @@ export async function inspectSourceDuplicateAcknowledgements(
     let reason: string | undefined;
     if (!absolutePath.startsWith(`${rootPath}${path.sep}`)) {
       reason = "duplicate source path escapes the brain root";
-    } else if (duplicate.sha256 === undefined || duplicate.bytes === undefined) {
+    } else if (
+      duplicate.sha256 === undefined ||
+      duplicate.bytes === undefined
+    ) {
       reason = "legacy duplicate acknowledgement is not sealed to source bytes";
     } else if (
       !canonical ||
