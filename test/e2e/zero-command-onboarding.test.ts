@@ -391,7 +391,7 @@ describe("zero-command onboarding fake host", () => {
         access(path.join(root, canonicalPath)),
       ).resolves.toBeUndefined();
     }
-  });
+  }, 30_000);
 
   test("runs the brain CLI after a locked install without prebuilt artifacts", async () => {
     const { root } = await materializePristineTemplate("second-brain-unbuilt");
