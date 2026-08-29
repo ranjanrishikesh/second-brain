@@ -97,6 +97,37 @@ describe("managed brain charter", () => {
     );
   });
 
+  test("keeps repeated same-identity initialization idempotent after a managed charter", async () => {
+    const root = await initializedGitBrain();
+    await setBrainCharter(root, astronomyCharter);
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const beforeCharter = await readFile(path.join(root, "BRAIN.md"), "utf8");
+    const beforeOperations = await readFile(
+      path.join(root, ".brain", "operations.jsonl"),
+      "utf8",
+    );
+
+    const result = await initBrain(root, {
+      name: "Astronomy Brain",
+      description: astronomyCharter.description,
+    });
+
+    expect(result).toMatchObject({ mode: "existing" });
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toBe(
+      beforeCharter,
+    );
+    expect(
+      await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
+    ).toBe(beforeOperations);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+
+    await expect(initBrain(root)).resolves.toMatchObject({ mode: "existing" });
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toBe(
+      beforeCharter,
+    );
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+  });
+
   test("rejects malformed input, template identity, and a brain without ready sources", async () => {
     const emptyRoot = await mkdtemp(
       path.join(tmpdir(), "brain-charter-empty-"),

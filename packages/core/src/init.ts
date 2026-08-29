@@ -124,6 +124,22 @@ function updateCharterIdentity(
   name: string,
   description: string,
 ): string {
+  if (content.startsWith("---\n")) {
+    const closingMarker = content.indexOf("\n---\n", 4);
+    if (closingMarker >= 0) {
+      const metadata = parse(content.slice(4, closingMarker)) as Record<
+        string,
+        unknown
+      >;
+      if (
+        metadata.brainCharter === 1 &&
+        (metadata.origin === "inferred" ||
+          metadata.origin === "owner-specified")
+      ) {
+        return content;
+      }
+    }
+  }
   const lines = content.trimEnd().split("\n");
   lines[0] = `# ${name}`;
   const descriptionIndex = lines.findIndex(
@@ -229,15 +245,27 @@ export async function initBrain(
 ): Promise<InitBrainResultV1> {
   await mkdir(root, { recursive: true });
   let hadConfiguration = true;
+  let configuredIdentity: BrainConfigV1 | undefined;
   try {
-    await readFile(path.join(root, "brain.config.yaml"));
+    configuredIdentity = brainConfigV1Schema.parse(
+      parse(await readFile(path.join(root, "brain.config.yaml"), "utf8")),
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     hadConfiguration = false;
   }
   const suggestedName =
     options?.name === undefined ? await suggestBrainName(root) : options.name;
-  const identity = requestedIdentity(options, suggestedName);
+  const identity =
+    options === undefined &&
+    configuredIdentity &&
+    (configuredIdentity.brain.name !== TEMPLATE_BRAIN_NAME ||
+      configuredIdentity.brain.description !== TEMPLATE_BRAIN_DESCRIPTION)
+      ? {
+          name: configuredIdentity.brain.name,
+          description: configuredIdentity.brain.description,
+        }
+      : requestedIdentity(options, suggestedName);
   const explicitNewIdentity =
     !hadConfiguration &&
     options?.name !== undefined &&
