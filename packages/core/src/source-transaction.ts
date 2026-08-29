@@ -123,13 +123,17 @@ export async function scanAndRegisterSources(
     {
       operationId,
       commitMessage: (result) =>
-        `brain(source): register ${result.added.length} source${result.added.length === 1 ? "" : "s"} [op:${operationId}]`,
+        result.added.length > 0
+          ? `brain(source): register ${result.added.length} source${result.added.length === 1 ? "" : "s"} [op:${operationId}]`
+          : `brain(source): acknowledge duplicate paths [op:${operationId}]`,
       testOptions,
     },
     async (writer) => {
-      const result = await scanSources(root, (content) =>
-        writer.writeText(".brain/source-manifest.json", content),
-      );
+      let manifestChanged = false;
+      const result = await scanSources(root, async (content) => {
+        manifestChanged = true;
+        await writer.writeText(".brain/source-manifest.json", content);
+      });
       if (result.modified.length || result.deleted.length) {
         throw new Error(
           `Immutable source violation: ${[
@@ -137,9 +141,6 @@ export async function scanAndRegisterSources(
             ...result.deleted.map((source) => source.path),
           ].join(", ")}`,
         );
-      }
-      if (result.added.length === 0) {
-        return { value: result, stagePaths: [] };
       }
       for (const source of result.added) {
         await writer.sealExisting(source.path, {
@@ -160,8 +161,25 @@ export async function scanAndRegisterSources(
           initialSourceIds?: string[];
           pendingSourceIds?: string[];
         };
+        sourceDuplicates?: Array<{ path: string; sourceId: string }>;
         semanticAuditDue?: boolean;
       };
+      const sourceDuplicates = result.duplicates
+        .map((duplicate) => ({
+          path: duplicate.path,
+          sourceId: duplicate.sourceId,
+        }))
+        .sort((left, right) => left.path.localeCompare(right.path));
+      const duplicateAcknowledgementsChanged =
+        JSON.stringify(state.sourceDuplicates ?? []) !==
+        JSON.stringify(sourceDuplicates);
+      if (
+        result.added.length === 0 &&
+        !manifestChanged &&
+        !duplicateAcknowledgementsChanged
+      ) {
+        return { value: result, stagePaths: [] };
+      }
       const pendingSourceIds = [
         ...new Set([
           ...(state.bootstrap?.pendingSourceIds ?? []),
@@ -193,6 +211,7 @@ export async function scanAndRegisterSources(
         `${JSON.stringify(
           {
             ...state,
+            sourceDuplicates,
             bootstrap: { status: "pending", pendingSourceIds },
             ...(setup ? { setup } : {}),
             ...(state.setup?.status === "in-progress" &&
@@ -211,7 +230,10 @@ export async function scanAndRegisterSources(
         status: "completed",
         startedAt: now,
         completedAt: now,
-        summary: `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}`,
+        summary:
+          result.added.length > 0
+            ? `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}`
+            : `Acknowledged ${sourceDuplicates.length} duplicate source path${sourceDuplicates.length === 1 ? "" : "s"}`,
         pageIds: [],
         tiersUsed: [],
       };
@@ -225,13 +247,14 @@ export async function scanAndRegisterSources(
       const existingLog = await readFile(logPath, "utf8");
       await writer.writeText(
         "wiki/log.md",
-        `${existingLog.trimEnd()}\n\n## [${now}] source | Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}\n\n- Operation: \`${operationId}\`\n${result.added.map((source) => `- \`${source.id}\` — \`${source.path}\` (${source.extractionStatus})`).join("\n")}\n`,
+        `${existingLog.trimEnd()}\n\n## [${now}] source | ${result.added.length > 0 ? `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}` : `Acknowledged ${sourceDuplicates.length} duplicate source path${sourceDuplicates.length === 1 ? "" : "s"}`}\n\n- Operation: \`${operationId}\`\n${result.added.map((source) => `- \`${source.id}\` — \`${source.path}\` (${source.extractionStatus})`).join("\n")}${sourceDuplicates.map((duplicate) => `\n- \`${duplicate.path}\` duplicates \`${duplicate.sourceId}\``).join("")}\n`,
       );
       return {
         value: result,
         stagePaths: [
           ...result.added.map((source) => source.path),
-          ...canonicalPaths,
+          ...(manifestChanged ? [canonicalPaths[0]] : []),
+          ...canonicalPaths.slice(1),
         ],
         verifyBeforeCommit: async (context) =>
           assertAddedSourcesAreStable(root, result.added, context),

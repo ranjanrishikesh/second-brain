@@ -5,6 +5,15 @@ import { z } from "zod";
 
 const sourceIdV1Schema = z.string().regex(/^src_[a-f0-9]{16}$/);
 
+export const sourceDuplicateAcknowledgementV1Schema = z.object({
+  path: z.string().trim().min(1),
+  sourceId: sourceIdV1Schema,
+});
+
+export type SourceDuplicateAcknowledgementV1 = z.infer<
+  typeof sourceDuplicateAcknowledgementV1Schema
+>;
+
 export const setupStateV1Schema = z.object({
   status: z
     .enum(["not-started", "in-progress", "completed"])
@@ -91,6 +100,9 @@ export const brainStateV1Schema = z
       status: "pending",
       pendingSourceIds: [],
     }),
+    sourceDuplicates: z
+      .array(sourceDuplicateAcknowledgementV1Schema)
+      .default([]),
     setup: setupStateV1Schema.default(() => ({
       status: "not-started" as const,
       initialSourceIds: [],

@@ -9,6 +9,7 @@ import {
   readBrainState,
   readBrainItem,
   renderWikiPage,
+  scanAndRegisterSources,
   scanSources,
   statusBrain,
   writeBrainState,
@@ -93,6 +94,45 @@ describe("brain status and reading", () => {
         ),
       ).sources,
     ).toEqual([]);
+  });
+
+  test("treats content-identical source paths as durably acknowledged after scanning", async () => {
+    const root = await initializedBrain("Duplicate sources");
+    const sourceBytes = "# Shared evidence\n\nOne canonical source body.\n";
+    await writeFile(path.join(root, "sources", "original.md"), sourceBytes);
+    await scanAndRegisterSources(root);
+    await writeFile(path.join(root, "sources", "copy.md"), sourceBytes);
+
+    expect(await inspectOnboarding(root)).toMatchObject({
+      phase: "sources-unregistered",
+      nextAction: "scan-sources",
+    });
+
+    const scan = await scanAndRegisterSources(root);
+    const operationsAfterAcknowledgement = await readFile(
+      path.join(root, ".brain", "operations.jsonl"),
+      "utf8",
+    );
+
+    expect(scan).toMatchObject({
+      added: [],
+      duplicates: [
+        {
+          path: "sources/copy.md",
+          sourceId: expect.stringMatching(/^src_[a-f0-9]{16}$/),
+        },
+      ],
+    });
+    expect(await inspectOnboarding(root)).toMatchObject({
+      phase: "ready-for-setup",
+      nextAction: "begin-setup",
+      sourceFiles: { discovered: 2, registered: 1, ready: 1 },
+    });
+
+    await scanAndRegisterSources(root);
+    expect(
+      await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
+    ).toBe(operationsAfterAcknowledgement);
   });
 
   test("reports blocked extraction, pending charter, active setup, and completed setup", async () => {

@@ -260,11 +260,18 @@ export async function inspectOnboarding(
   const template =
     config.brain.name === TEMPLATE_BRAIN_NAME &&
     config.brain.description === TEMPLATE_BRAIN_DESCRIPTION;
+  const registeredSourceIds = new Set(records.map((record) => record.id));
+  const registeredPaths = new Set([
+    ...records.map((record) => record.path),
+    ...state.sourceDuplicates
+      .filter((duplicate) => registeredSourceIds.has(duplicate.sourceId))
+      .map((duplicate) => duplicate.path),
+  ]);
   const phase = phaseAndAction({
     template,
     setupStatus: state.setup.status,
     discoveredPaths,
-    registeredPaths: new Set(records.map((record) => record.path)),
+    registeredPaths,
     ready: extractionCount("ready"),
     charterConfigured: charter.configured,
   });
