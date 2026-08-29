@@ -51,7 +51,7 @@ Run each command in a separate clone. One repository always represents one brain
 
 ## Use it locally with an agent
 
-Open the repository in Codex or another instruction-aware coding agent. `AGENTS.md` routes domain questions through `.agents/skills/second-brain/SKILL.md`; engineering requests remain normal code work and do not pollute the wiki.
+Open the repository in Codex or Claude Code. Codex reads `AGENTS.md`; Claude Code reads `CLAUDE.md`, which imports the same contract. Both route domain questions through `.agents/skills/second-brain/SKILL.md`, while engineering requests remain normal code work and do not pollute the wiki.
 
 Useful checks:
 
@@ -100,23 +100,11 @@ The core then pushes only a normal fast-forward composed entirely of its own man
 
 DOCX extraction preserves usable text structure from headings, paragraphs, lists, tables, footnotes, and text boxes; embedded images are not OCRed. Archive expansion and converted output share the configured source-size ceiling, including repeated note/comment content. Scanned PDFs, legacy `.doc` files, other Office formats, images/OCR, audio, and video are reported as unsupported or extraction-required; they are never silently ignored. To replace registered bytes, add a new file, scan it, then use `brain source supersede <old-id> <new-id>`.
 
-## Hosted OpenClaw gateway
-
-OpenClaw is only a hosting harness. The repository, CLI, schemas, and wiki remain canonical; the deployment does not enable OpenClaw Memory Wiki or create another knowledge database.
-
-```bash
-cp .env.example .env
-# Fill OPENCLAW_GATEWAY_TOKEN and provider credentials.
-docker compose -f deploy/openclaw/compose.yaml up --build
-```
-
-The gateway is exposed only on `127.0.0.1`. The repository is a writable bind mount and OpenClaw runtime state uses a separate disposable named volume. See [deploy/openclaw/README.md](deploy/openclaw/README.md) for remote access and multiple-brain hosting.
-
 ## Verification and live-smoke handoff
 
 The deterministic end-to-end suite uses a disposable source fixture, a fake local embedding provider, fake captured web content, and temporary Git remotes. It proves the template contracts without model or web credentials, including source setup, source-backed persistence, semantic-cache rebuilding, synonym candidates, reciprocal contradictions, denied/approved web paths, audit resumption, safe-sync warnings, and independent brains.
 
-Run [the v1 exit checklist](docs/V1_EXIT_CHECKLIST.md) before calling a clone v1-verified. It separates the deterministic template gate from two credential-gated live smokes: one through Codex and one through the hosted OpenClaw gateway. A successful build or unit test is not a hosted live smoke; OpenClaw verification remains pending until its real gateway sequence has been recorded as passed. Only after those template checks should a personal-brain pilot begin, as a usefulness evaluation rather than a safety substitute.
+Run [the v1 exit checklist](docs/V1_EXIT_CHECKLIST.md) before calling a clone v1-verified. It separates the deterministic template gate from live agent checks in Codex and Claude Code. A successful build or unit test does not prove that an agent follows the full repository workflow. Only after those template checks should a personal-brain pilot begin, as a usefulness evaluation rather than a safety substitute.
 
 ## Repository map
 
@@ -126,9 +114,8 @@ wiki/                        canonical Obsidian Markdown graph
 .brain/                      tracked manifests/logs plus ignored cache/runtime
 packages/core/               schemas, extraction, search, graph, transactions
 packages/cli/                deterministic brain executable
-adapters/openclaw/           thin typed OpenClaw tools
 .agents/skills/second-brain/ host-neutral reasoning workflow
-deploy/openclaw/             pinned reference container
+AGENTS.md / CLAUDE.md        Codex and Claude Code project instructions
 schemas/v1/                  generated public JSON Schemas
 ```
 
@@ -142,4 +129,4 @@ pnpm test:e2e
 pnpm brain doctor
 ```
 
-Conductor users get shared modern run commands from `.conductor/settings.toml`, including test watch, verification, doctor, and a workspace-port-isolated OpenClaw gateway. No legacy `conductor.json` is used.
+Conductor users get shared modern run commands from `.conductor/settings.toml` for test watch, verification, and doctor. No legacy `conductor.json` is used.

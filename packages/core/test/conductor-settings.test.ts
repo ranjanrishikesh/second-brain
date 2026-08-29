@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
 describe("Conductor repository settings", () => {
-  it("uses modern shared TOML with isolated concurrent commands", async () => {
+  it("exposes only repository-local maintenance commands", async () => {
     const settings = await readFile(
       resolve(repositoryRoot, ".conductor/settings.toml"),
       "utf8",
@@ -19,8 +19,11 @@ describe("Conductor repository settings", () => {
     expect(settings).toContain("pnpm test:watch");
     expect(settings).toContain("pnpm verify");
     expect(settings).toContain("pnpm brain doctor");
-    expect(settings).toContain("OPENCLAW_GATEWAY_PORT=$CONDUCTOR_PORT");
-    expect(settings).toContain("-p brain-$CONDUCTOR_WORKSPACE_ID");
+    expect(settings.match(/\[scripts\.run\.[^\]]+\]/g)).toEqual([
+      "[scripts.run.test-watch]",
+      "[scripts.run.verify]",
+      "[scripts.run.doctor]",
+    ]);
   });
 
   it("does not retain legacy conductor.json", async () => {

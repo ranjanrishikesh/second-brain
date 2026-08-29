@@ -47,8 +47,6 @@ pnpm brain rebuild
 pnpm brain doctor
 ```
 
-For hosted use, recreate the OpenClaw runtime volume rather than restoring it as canonical data. The repository mount retains the actual brain.
-
 ## Pending remote synchronization
 
 If an operation or final query reports `⚠ Sync pending — …`, the knowledge is already safely committed in the local repository. Do not rewrite history or retry with force. Inspect the state first:

@@ -7,7 +7,7 @@ description: Use when answering or maintaining domain knowledge in a portable se
 
 ## Core contract
 
-The repository is durable memory. The `brain` CLI or equivalent `brain_*` host tools are its only write boundary. Treat a domain question as a query session; treat code, configuration, deployment, and test work as ordinary repository work unless `BRAIN.md` explicitly makes them domain knowledge.
+The repository is durable memory. The `brain` CLI is its only write boundary. Treat a domain question as a query session; treat code, configuration, and test work as ordinary repository work unless `BRAIN.md` explicitly makes them domain knowledge.
 
 ## Decision ladder
 

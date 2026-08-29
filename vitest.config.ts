@@ -10,11 +10,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: [
-      "packages/**/*.test.ts",
-      "adapters/**/*.test.ts",
-      "test/**/*.test.ts",
-    ],
+    include: ["packages/**/*.test.ts", "test/**/*.test.ts"],
     maxWorkers: 1,
     testTimeout: 20_000,
   },

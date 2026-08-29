@@ -9,7 +9,7 @@ base from its local sources, deepen it through questions, discover and review
 meaningful cross-links, require approval before web research, and safely
 commit and push durable knowledge changes.
 
-The template remains host-driven: Codex or OpenClaw is the reasoning agent;
+The template remains host-driven: Codex or Claude Code is the reasoning agent;
 the repository is the canonical memory, evidence store, graph validator, and
 safety boundary. It does not introduce a second generic LLM loop or chat UI.
 
@@ -209,17 +209,13 @@ web-tier answer validate an unexpired approval. Web captures include URL,
 retrieval time, query, capture kind, content, and SHA-256. They follow the
 existing immutable source/supersession rules.
 
-OpenClaw is the reference hard-enforced host. Its plugin requests approval
-before web tools, binds an approved request to the query, and uses a restrictive
-tool allowlist for knowledge work. A denied, expired, unavailable, or timed-out
-approval fails closed.
-
-Local Codex has a documented platform limitation: repository hooks cannot
-intercept its native hosted WebSearch tool. v1 therefore enforces local web
-approval through the core query state, agent contract, and audit trail; native
-web search remains disabled unless the current query has an approval. A custom
-hard-gated web MCP provider is explicitly deferred because it needs a selected
-provider, credentials, and a second web integration.
+Codex and Claude Code use the same repository contract and core query state.
+The contract prohibits native web tools until the active query has an approved
+grant, while the CLI independently rejects web-tier transitions, evidence
+capture, and web-backed completion without that grant. A denied, expired,
+unavailable, or timed-out approval fails closed. A custom hard-gated web MCP
+provider is explicitly deferred because it needs a selected provider,
+credentials, and a second web integration.
 
 ## Git commit and synchronization
 
@@ -246,8 +242,8 @@ conflict automatically.
 
 On a push failure, the local commit stays authoritative. Derived runtime state
 records a pending safe reason and is recomputed from Git if the runtime cache
-is removed. Eligible sync is retried at query start, query finish, gateway
-startup, or `brain sync`; status and doctor remain read-only.
+is removed. Eligible sync is retried at query start, query finish, or
+`brain sync`; status and doctor remain read-only.
 
 Every answer after a failed push carries this exact visible form:
 
@@ -256,8 +252,9 @@ Every answer after a failed push carries this exact visible form:
 yet been pushed to <remote>/<branch>: <safe reason>.
 ```
 
-The result contracts returned to Codex/OpenClaw contain `SyncStatusV1`, so the
-host can show the same warning deterministically without exposing secrets.
+The result contracts returned to the agent contain `SyncStatusV1`, so Codex or
+Claude Code can show the same warning deterministically without exposing
+secrets.
 
 ## Public contracts and commands
 
@@ -282,25 +279,22 @@ New or expanded CLI operations:
 - expanded `brain status` and `brain doctor` output for setup, semantic index,
   web approval, and sync state
 
-The OpenClaw adapter adds equivalent typed setup, reconciliation, web-approval,
-and sync tools. It must not introduce another database or wiki format.
+## Agent host integration
 
-## Hosting and version constraints
-
-- Retain the stable OpenClaw `2026.7.1-2` pin.
-- Update the reference OpenClaw container to Node `24.15.0`.
-- Use `/readyz`, rather than only `/healthz`, for deployment readiness.
-- Keep the repository mount canonical and the OpenClaw runtime volume
-  disposable.
-- Keep web and host credentials in environment variables, never repository
-  files or operation logs.
+- Codex loads the shared contract from `AGENTS.md`.
+- Claude Code loads `CLAUDE.md`, which imports `AGENTS.md`, and follows the same
+  second-brain skill and CLI lifecycle.
+- The repository ships only its CLI and agent instructions, with no external
+  runtime or second persistence layer.
+- Web credentials remain host-managed and never enter repository files or
+  operation logs.
 
 ## Verification gates
 
 Deterministic tests must cover all new state transitions, recovery paths,
 invalid/stale reconciliation receipts, source immutability, approval expiry,
-safe-push refusals, and semantic-cache rebuilding. They use fake host and web
-adapters in CI.
+safe-push refusals, and semantic-cache rebuilding. They use deterministic fake
+host behavior and captured web content in CI.
 
 A disposable clone with synthetic sources is the required template smoke
 fixture. It must contain distributed facts, synonyms, contradictions, a local
@@ -308,14 +302,15 @@ bare Git remote, and a deliberate local-knowledge gap. The live gates are:
 
 1. **Codex live smoke:** setup, raw-source-backed answer, repeated wiki-only
    answer, push, and visible sync-pending behavior.
-2. **OpenClaw live smoke:** container build/start, `/readyz`, plugin discovery,
-   approval denial and approval grant, captured web evidence, restart
-   persistence, and safe synchronization to the test remote.
+2. **Claude Code live smoke:** project-instruction loading, setup,
+   raw-source-backed answer, repeated wiki-only answer, approval denial and
+   approval grant, captured web evidence, and safe synchronization to the test
+   remote.
 
 Until both live gates pass, the project must report the precise state, for
-example: “Core/Codex verified; OpenClaw verification pending.” A personal
-second-brain pilot follows template verification and evaluates usefulness, not
-basic mechanics.
+example: “Core/Codex verified; Claude Code verification pending.” A personal
+second-brain pilot follows template verification and evaluates usefulness,
+not basic mechanics.
 
 ## Post-v1 reminder
 
@@ -337,9 +332,9 @@ watching.
   <https://huggingface.co/docs/transformers.js/main/en/tutorials/node>
 - The selected multilingual E5 model is Transformers.js-compatible:
   <https://huggingface.co/Xenova/multilingual-e5-small>
-- OpenClaw documents approval-capable plugin hooks:
-  <https://docs.openclaw.ai/plugins/hooks>
-- Codex documents that hosted tools are not intercepted by repository hooks:
-  <https://learn.chatgpt.com/docs/hooks>
+- Claude Code documents project instructions and `AGENTS.md` imports:
+  <https://code.claude.com/docs/en/memory>
+- Claude Code documents project-scoped skills:
+  <https://code.claude.com/docs/en/slash-commands>
 - Git documents normal fast-forward push behavior:
   <https://git-scm.com/docs/git-push>

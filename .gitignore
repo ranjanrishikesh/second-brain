@@ -4,7 +4,7 @@ dist/
 .DS_Store
 .env
 .env.*
-!.env.example
+CLAUDE.local.md
 .brain/cache/
 .brain/runtime/
 coverage/

@@ -4,9 +4,9 @@
 
 **Goal:** Turn the template into a safely self-compounding knowledge system with explicit setup, whole-graph hybrid reconciliation, question-scoped web approval, and safe Git synchronization.
 
-**Architecture:** Keep Markdown, source manifests, and tracked state canonical. Add a local, rebuildable semantic index beside FTS5; use it to generate whole-graph reconciliation candidates, then require current-revision reads and a decision for each candidate. Setup, web approval, and synchronization are explicit state machines implemented in the shared core and exposed unchanged through the CLI and OpenClaw.
+**Architecture:** Keep Markdown, source manifests, and tracked state canonical. Add a local, rebuildable semantic index beside FTS5; use it to generate whole-graph reconciliation candidates, then require current-revision reads and a decision for each candidate. Setup, web approval, and synchronization are explicit state machines implemented in the shared core and exposed through the CLI to Codex and Claude Code.
 
-**Tech Stack:** TypeScript ESM, pnpm, Zod v4, Vitest, SQLite FTS5, `@huggingface/transformers@4.2.0`, `Xenova/multilingual-e5-small` at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`, Git CLI, OpenClaw `2026.7.1-2`, Node `24.15.0` in the hosted container.
+**Tech Stack:** TypeScript ESM, pnpm, Zod v4, Vitest, SQLite FTS5, `@huggingface/transformers@4.2.0`, `Xenova/multilingual-e5-small` at revision `761b726dd34fb83930e26aab4e9ac3899aa1fa78`, and Git CLI.
 
 **Spec:** `docs/superpowers/specs/2026-08-27-v1-knowledge-workflow-hardening-design.md`
 
@@ -21,7 +21,7 @@
 - Auto-commit managed knowledge changes. Push only to an explicitly confirmed target, only as a normal fast-forward, never by force, pull, merge, rebase, remote rewrite, or conflict resolution.
 - Preserve unrelated unstaged work. Refuse managed writes with staged changes or dirty managed paths.
 - Every production behavior starts with a focused failing Vitest test, is run red, receives minimal production code, then is run green before the task commit.
-- Run `pnpm verify:fast` after every green task. Final verification additionally runs `pnpm format:check`, `pnpm build`, `pnpm test:e2e`, `pnpm schemas:generate`, `pnpm brain doctor`, and Docker Compose validation/build.
+- Run `pnpm verify:fast` after every green task. Final verification additionally runs `pnpm format:check`, `pnpm build`, `pnpm test:e2e`, `pnpm schemas:generate`, and `pnpm brain doctor`.
 
 ## File map
 
@@ -39,9 +39,7 @@
 | `packages/core/src/transaction.ts` | Managed Git trailers and post-commit synchronization without rollback on push failure. |
 | `packages/core/src/status-read.ts` / `doctor.ts` | Setup, semantic, approval, writer-lock, and sync observability. |
 | `packages/cli/src/program.ts` | Setup, reconciliation/read-receipt, web-approval, and sync commands. |
-| `adapters/openclaw/src/index.ts` / `tools.ts` | Typed host tools and OpenClaw approval hook integration. |
-| `deploy/openclaw/*` | Node 24.15 deployment, restrictive runtime policy, `/readyz` health check. |
-| `AGENTS.md` / `.agents/skills/second-brain/SKILL.md` | Host-neutral lifecycle rules, approval and sync warning contract. |
+| `AGENTS.md` / `CLAUDE.md` / `.agents/skills/second-brain/SKILL.md` | Codex and Claude Code lifecycle rules, approval, and sync warning contract. |
 | `docs/*`, `README.md`, `test/e2e/*` | Template instructions, v1 exit reminder, deterministic full-lifecycle coverage. |
 
 ---
@@ -491,7 +489,7 @@ Brain-Managed: true
 Brain-Operation: op_<operation-id>
 ```
 
-After a canonical commit is fully durable and the transaction journal is removed, call `attemptManagedSync`. It must inspect commits ahead of the configured upstream; every commit must contain both trailers. Use `git push <remote> HEAD:refs/heads/<branch>` without `--force`. On failure, return a `pending` status with a safe reason; never restore the snapshot or amend the commit. Recompute pending state from Git if runtime status disappears. Retry eligible sync at query start, query finish, gateway startup, and explicit `syncBrain` only.
+After a canonical commit is fully durable and the transaction journal is removed, call `attemptManagedSync`. It must inspect commits ahead of the configured upstream; every commit must contain both trailers. Use `git push <remote> HEAD:refs/heads/<branch>` without `--force`. On failure, return a `pending` status with a safe reason; never restore the snapshot or amend the commit. Recompute pending state from Git if runtime status disappears. Retry eligible sync at query start, query finish, and explicit `syncBrain` only.
 
 - [ ] **Step 4: Re-run Git integration tests and fast verification**
 
@@ -518,7 +516,7 @@ git commit -m "feat: safely synchronize managed brain commits"
 **Interfaces:**
 
 - Consumes: public core APIs from Tasks 1–6.
-- Produces: deterministic JSON CLI commands used by agents and hosted adapters.
+- Produces: deterministic JSON CLI commands used by Codex and Claude Code.
 
 - [ ] **Step 1: Write failing CLI lifecycle tests**
 
@@ -617,7 +615,7 @@ Expected: FAIL because the scripted lifecycle cannot observe the new setup/appro
 
 Update the skill to require: `brain setup` before initial knowledge questions; `brain query read` receipts for all reconciliation candidates; per-query web request/approval; no uncaptured web claims; completing audits; and reporting `SyncStatusV1` with the exact visible warning. Replace “Never auto-push” with “never push except through a confirmed managed sync target.”
 
-Explain the local Codex native-web limitation and OpenClaw’s hard approval boundary. Document the model’s one-time local download and checksum behavior, setup versus delta ingestion, safe Git push constraints, recovery steps, and post-v1 reminder.
+Explain the shared Codex and Claude Code web-approval contract. Document the model’s one-time local download and checksum behavior, setup versus delta ingestion, safe Git push constraints, recovery steps, and post-v1 reminder.
 
 - [ ] **Step 4: Re-run the lifecycle test and documentation-oriented verification**
 
@@ -632,72 +630,7 @@ git add AGENTS.md .agents/skills/second-brain/SKILL.md docs/configuration.md doc
 git commit -m "docs: codify compounding brain workflow"
 ```
 
-### Task 9: Add OpenClaw typed tools and hard web-approval enforcement
-
-**Files:**
-
-- Modify: `adapters/openclaw/src/tools.ts`
-- Modify: `adapters/openclaw/src/index.ts`
-- Modify: `adapters/openclaw/test/tools.test.ts`
-- Modify: `adapters/openclaw/openclaw.plugin.json`
-- Modify: `deploy/openclaw/openclaw.json`
-- Modify: `deploy/openclaw/Dockerfile`
-- Modify: `deploy/openclaw/compose.yaml`
-- Modify: `deploy/openclaw/README.md`
-- Modify: `packages/core/test/openclaw-deployment.test.ts`
-
-**Interfaces:**
-
-- Consumes: setup, reconciliation, web approval, sync, and status core APIs.
-- Produces: typed `brain_*` tools, OpenClaw per-tool approval enforcement, restrictive policy, Node 24.15 container, and `/readyz` health check.
-
-- [ ] **Step 1: Write failing adapter/deployment tests**
-
-Prove that handler names include setup/reconciliation/web-approval/sync tools, a web transition is rejected without the approved core session state, plugin prompt context includes setup/sync state, and Compose uses `/readyz` with Node 24.15.
-
-```ts
-test("does not allow an OpenClaw web capture before the query approval", async () => {
-  const tools = createBrainToolHandlers(await initializedBrain());
-  const session = await sourceTierSession(tools);
-
-  await expect(tools.brain_capture_web({
-    queryId: session.id,
-    url: "https://example.test/evidence",
-    title: "Evidence",
-    captureKind: "page",
-    content: "Captured evidence.",
-  })).rejects.toThrow(/approval/i);
-});
-```
-
-- [ ] **Step 2: Run adapter/deployment tests and confirm red failures**
-
-Run: `pnpm vitest run adapters/openclaw/test/tools.test.ts packages/core/test/openclaw-deployment.test.ts`
-
-Expected: FAIL because these tools and readiness settings are absent.
-
-- [ ] **Step 3: Implement shared-tool forwarding and approval hook**
-
-Add typed handlers and TypeBox schemas for `brain_begin_setup`, `brain_next_setup`, `brain_finish_setup`, `brain_plan_reconciliation`, `brain_request_web_approval`, `brain_resolve_web_approval`, and `brain_sync` alongside the existing tools. Bind OpenClaw host session identity to approval requests.
-
-In the plugin `before_tool_call` hook, require an approval for web-search/web-fetch calls in a brain query and deny them when the associated core query lacks a non-expired approved grant. Keep the restrictive brain-tool allowlist; do not enable Memory Wiki or another persistent knowledge store. Extend `before_prompt_build` status context with setup state, due audit, and sync state.
-
-Update the container base image to `node:24.15.0-bookworm-slim`, retain OpenClaw `2026.7.1-2`, change healthcheck to `http://127.0.0.1:18789/readyz`, retain loopback port publication and disposable runtime volume, and document environment-only secrets.
-
-- [ ] **Step 4: Re-run adapter/deployment tests and fast verification**
-
-Run: `pnpm vitest run adapters/openclaw/test/tools.test.ts packages/core/test/openclaw-deployment.test.ts && pnpm verify:fast && docker compose -f deploy/openclaw/compose.yaml config`
-
-Expected: PASS; tool schemas match handlers and Compose configuration renders successfully.
-
-- [ ] **Step 5: Commit the green slice**
-
-```bash
-git add adapters/openclaw/src/tools.ts adapters/openclaw/src/index.ts adapters/openclaw/test/tools.test.ts adapters/openclaw/openclaw.plugin.json deploy/openclaw/openclaw.json deploy/openclaw/Dockerfile deploy/openclaw/compose.yaml deploy/openclaw/README.md packages/core/test/openclaw-deployment.test.ts
-git commit -m "feat: enforce hosted web approval workflow"
-```
-
-### Task 10: Build deterministic end-to-end coverage and live-smoke handoff
+### Task 9: Build deterministic end-to-end coverage and live-smoke handoff
 
 **Files:**
 
@@ -708,12 +641,12 @@ git commit -m "feat: enforce hosted web approval workflow"
 - Modify: `test/e2e/brain-lifecycle.test.ts`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `README.md`
-- Modify: `deploy/openclaw/README.md`
+- Create: `CLAUDE.md`
 
 **Interfaces:**
 
-- Consumes: all core/CLI/OpenClaw public contracts.
-- Produces: repeatable fixture tests plus explicit manual Codex/OpenClaw live-smoke instructions and truthful verification status.
+- Consumes: all core/CLI public contracts and both agent instruction entry points.
+- Produces: repeatable fixture tests plus explicit manual Codex and Claude Code live-smoke instructions and truthful verification status.
 
 - [ ] **Step 1: Write failing end-to-end scenarios**
 
@@ -742,14 +675,14 @@ Expected: FAIL because the fixture lifecycle does not yet cover or satisfy all n
 
 - [ ] **Step 3: Implement only test fixtures and verification wiring**
 
-Keep all CI adapters deterministic: use the test embedding provider and fake web capture content; never require a model credential in CI. Add CI jobs that run the core/CLI suite on Node 22.22.3 and 24.15.0, adapter tests, generated-schema diff, Compose config, and container build.
+Keep CI deterministic: use the test embedding provider and fake web capture content; never require a model credential in CI. Run the core/CLI suite on Node 22.22.3 and 24.15.0 and verify generated schemas remain stable.
 
 Document two separate credential-gated live smoke procedures:
 
-1. Codex: disposable clone → setup → raw answer → repeated wiki-only answer → pending/successful sync.
-2. OpenClaw: Docker build/start → `/readyz` → plugin discovery → denied then approved web flow → restart → safe test-remote sync.
+1. Codex: disposable clone → setup → raw answer → repeated wiki-only answer → denied/approved web flow → pending/successful sync.
+2. Claude Code: verify shared project instructions load → run the same disposable-clone lifecycle and safe test-remote sync.
 
-State that a personal-brain pilot is a usefulness evaluation after the template smoke tests, and that OpenClaw remains pending until its live smoke actually passes.
+State that a personal-brain pilot is a usefulness evaluation after both agent smoke tests pass.
 
 - [ ] **Step 4: Run the full verification matrix**
 
@@ -765,16 +698,14 @@ pnpm test:e2e
 pnpm schemas:generate
 git diff --exit-code -- schemas
 pnpm brain doctor
-docker compose -f deploy/openclaw/compose.yaml config
-docker compose -f deploy/openclaw/compose.yaml build
 ```
 
-Expected: every locally available command exits `0`. If Docker is unavailable, record exactly that the OpenClaw live/container gate is pending; do not report hosted verification as complete.
+Expected: every command exits `0`; live agent smokes remain separately recorded, credential-gated checks.
 
 - [ ] **Step 5: Commit the green slice**
 
 ```bash
-git add test/e2e/knowledge-workflow-hardening.test.ts test/fixtures/smoke-brain test/e2e/brain-lifecycle.test.ts .github/workflows/ci.yml README.md deploy/openclaw/README.md
+git add test/e2e/knowledge-workflow-hardening.test.ts test/fixtures/smoke-brain test/e2e/brain-lifecycle.test.ts .github/workflows/ci.yml README.md CLAUDE.md
 git commit -m "test: verify hardened second-brain workflow"
 ```
 
@@ -790,7 +721,6 @@ git commit -m "test: verify hardened second-brain workflow"
 | Safe commit/push, pending warning, no accidental template push | Task 6 |
 | CLI and host-facing contract | Task 7 |
 | Agent workflow and post-v1 reminder | Task 8 |
-| OpenClaw hard gate and deployment constraints | Task 9 |
-| Deterministic and live-smoke acceptance coverage | Task 10 |
+| Deterministic and live-smoke acceptance coverage | Task 9 |
 
 The plan uses one contract name for each public behavior, includes focused red/green commands for every implementation task, contains no deferred implementation placeholders, and keeps the design’s explicit deferred scope out of v1 work.
