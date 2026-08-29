@@ -19,7 +19,7 @@
     "test:e2e": "vitest run test/e2e",
     "verify:fast": "pnpm lint && pnpm typecheck && pnpm test",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
-    "brain": "tsx packages/cli/src/main.ts"
+    "brain": "tsx --conditions=source packages/cli/src/main.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.15",

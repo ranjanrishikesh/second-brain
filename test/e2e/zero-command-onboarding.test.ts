@@ -1,5 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -259,6 +267,39 @@ afterEach(async () => {
 });
 
 describe("zero-command onboarding fake host", () => {
+  test("runs the brain CLI after a locked install without prebuilt artifacts", async () => {
+    const sandbox = await mkdtemp(
+      path.join(tmpdir(), "brain-unbuilt-cli-e2e-"),
+    );
+    temporaryRoots.push(sandbox);
+    const root = path.join(sandbox, "second-brain-unbuilt");
+    await cp(repositoryRoot, root, {
+      recursive: true,
+      filter: (source) => {
+        const relative = path.relative(repositoryRoot, source);
+        const parts = relative.split(path.sep);
+        return !parts.some((part) =>
+          [".git", ".context", "node_modules", "dist"].includes(part),
+        );
+      },
+    });
+    await expect(
+      access(path.join(root, "packages", "core", "dist", "index.js")),
+    ).rejects.toThrow();
+
+    await execFile("pnpm", ["install", "--offline", "--frozen-lockfile"], {
+      cwd: root,
+    });
+    const command = await execFile("pnpm", ["brain", "status"], {
+      cwd: root,
+    });
+
+    expect(command.stdout).toContain("Onboarding: needs-initialization");
+    await expect(
+      access(path.join(root, "packages", "core", "dist", "index.js")),
+    ).rejects.toThrow();
+  }, 30_000);
+
   test("resumes a cloned brain from empty identity through cited ready state and safe sync", async () => {
     const { root, sandbox } = await cloneTemplate("second-brain-smoke");
     const remote = path.join(sandbox, "confirmed.git");
