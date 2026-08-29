@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -28,5 +29,6 @@ jobs:
       - run: pnpm verify
       - run: pnpm test:e2e
       - run: pnpm brain doctor
+      - run: pnpm brain audit
       - run: pnpm schemas:generate
       - run: git diff --exit-code -- schemas
