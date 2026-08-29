@@ -21,7 +21,8 @@
     "fast-xml-parser": "^5.3.3",
     "jszip": "^3.10.1",
     "linkedom": "^0.18.12",
-    "pdfjs-dist": "^5.4.394",
+    "mammoth": "1.12.1",
+    "pdfjs-dist": "6.2.108",
     "yaml": "^2.8.1",
     "zod": "^4.1.12"
   }

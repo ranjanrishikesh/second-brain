@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { loadBrainConfig } from "../config.js";
 import {
   extractCsv,
+  extractDocx,
   extractEpub,
   extractHtml,
   extractJson,
@@ -56,13 +58,20 @@ export async function rebuildExtractedSourceCache(
                       source.path,
                       new Uint8Array(content),
                     )
-                  : source.extractor === "epub-v1"
-                    ? await extractEpub(
+                  : source.extractor === "docx-v1"
+                    ? await extractDocx(
                         source.id,
                         source.path,
                         new Uint8Array(content),
+                        (await loadBrainConfig(root)).sources.maxFileBytes,
                       )
-                    : undefined;
+                    : source.extractor === "epub-v1"
+                      ? await extractEpub(
+                          source.id,
+                          source.path,
+                          new Uint8Array(content),
+                        )
+                      : undefined;
   if (!extracted) {
     throw new Error(
       `Cannot rebuild cache for extractor ${source.extractor}: ${source.id}`,

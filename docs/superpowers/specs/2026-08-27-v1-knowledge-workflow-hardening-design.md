@@ -31,8 +31,8 @@ safety boundary. It does not introduce a second generic LLM loop or chat UI.
 - A background watcher or daemon that ingests source files without a setup or
   query.
 - A standalone LLM agent, RAG server, or custom chat UI.
-- OCR, Office document parsing, audio/video transcription, or image
-  understanding.
+- OCR, legacy `.doc` and other Office-format parsing, audio/video
+  transcription, or image understanding. DOCX text extraction is supported.
 - Cross-brain knowledge sharing, team permissions, or automatic conflict
   resolution.
 - Automatic web approval, force-pushing, automatic pull/merge/rebase, or

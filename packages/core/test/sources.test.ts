@@ -1,13 +1,69 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import JSZip from "jszip";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { describe, expect, test } from "vitest";
 import { parse, stringify } from "yaml";
 import { initBrain, scanSources, supersedeSource } from "../src/index.js";
 
+const execFileAsync = promisify(execFile);
+
+async function createDocx(
+  body: string,
+  extraEntries: Record<string, string> = {},
+): Promise<Uint8Array> {
+  const document = new JSZip();
+  document.file(
+    "[Content_Types].xml",
+    '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>',
+  );
+  document.file(
+    "_rels/.rels",
+    '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+  );
+  document.file(
+    "word/_rels/document.xml.rels",
+    '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+  );
+  document.file(
+    "word/styles.xml",
+    '<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>',
+  );
+  document.file(
+    "word/document.xml",
+    `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
+  );
+  for (const [entryPath, content] of Object.entries(extraEntries)) {
+    document.file(entryPath, content);
+  }
+  return await document.generateAsync({
+    type: "uint8array",
+    compression: "DEFLATE",
+  });
+}
+
 describe("scanSources", () => {
+  test("keeps the DOCX parser unloaded until DOCX extraction", async () => {
+    const script = [
+      'import { createRequire } from "node:module";',
+      'await import("./packages/core/src/index.ts");',
+      "const require = createRequire(import.meta.url);",
+      'const loaded = Object.keys(require.cache).some((file) => file.includes("/mammoth/"));',
+      "process.stdout.write(String(loaded));",
+    ].join("\n");
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", script],
+      { cwd: path.resolve(".") },
+    );
+
+    expect(stdout).toBe("false");
+  });
+
   test("registers and extracts a new Markdown source", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-sources-"));
     await initBrain(root, { name: "Test", description: "Source test" });
@@ -222,6 +278,155 @@ describe("scanSources", () => {
     );
     expect(extracted.chunks[0]).toMatchObject({ locator: "page=1" });
     expect(extracted.chunks[0].text).toContain("Orbital mechanics");
+  });
+
+  test("extracts DOCX sections with heading locators", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-docx-"));
+    await initBrain(root, { name: "Test", description: "DOCX test" });
+    await writeFile(
+      path.join(root, "sources", "orbital-notes.docx"),
+      await createDocx(
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Orbital Notes</w:t></w:r></w:p><w:p><w:r><w:t>Orbital mechanics links velocity and gravity.</w:t></w:r></w:p>',
+      ),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      mediaType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      extractionStatus: "ready",
+      extractor: "docx-v1",
+      title: "Orbital Notes",
+    });
+    const extracted = JSON.parse(
+      await readFile(
+        path.join(
+          root,
+          ".brain",
+          "cache",
+          "extracted",
+          `${result.added[0]?.id}.json`,
+        ),
+        "utf8",
+      ),
+    );
+    expect(extracted.chunks[0]).toMatchObject({
+      locator: "heading=orbital-notes",
+    });
+    expect(extracted.chunks[0].text).toContain(
+      "Orbital mechanics links velocity and gravity.",
+    );
+  });
+
+  test("requires extraction for a DOCX without usable text", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-empty-docx-"));
+    await initBrain(root, { name: "Test", description: "Empty DOCX test" });
+    await writeFile(
+      path.join(root, "sources", "image-only.docx"),
+      await createDocx("<w:p><w:r><w:drawing/></w:r></w:p>"),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      mediaType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      extractionStatus: "extraction-required",
+      extractor: "docx-v1",
+    });
+  });
+
+  test("rejects DOCX archives containing traversal entry names", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-unsafe-docx-"));
+    await initBrain(root, { name: "Test", description: "Unsafe DOCX test" });
+    await writeFile(
+      path.join(root, "sources", "unsafe.docx"),
+      await createDocx("<w:p><w:r><w:t>Safe visible text</w:t></w:r></w:p>", {
+        "../outside.xml": "<unsafe/>",
+      }),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(/unsafe docx path/i);
+  });
+
+  test("rejects DOCX archives with excessive entry counts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-large-docx-"));
+    await initBrain(root, { name: "Test", description: "Large DOCX test" });
+    const extraEntries = Object.fromEntries(
+      Array.from({ length: 996 }, (_, index) => [
+        `custom/item-${index}.xml`,
+        "<item/>",
+      ]),
+    );
+    await writeFile(
+      path.join(root, "sources", "too-many-parts.docx"),
+      await createDocx(
+        "<w:p><w:r><w:t>Visible text</w:t></w:r></w:p>",
+        extraEntries,
+      ),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(/too many archive entries/i);
+  });
+
+  test("rejects DOCX archives whose expanded XML exceeds the source limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-expanded-docx-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Expanded DOCX test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4_096;
+    await writeFile(configPath, stringify(config));
+    const bytes = await createDocx(
+      `<w:p><w:r><w:t>${"A".repeat(20_000)}</w:t></w:r></w:p>`,
+    );
+    expect(bytes.byteLength).toBeLessThan(4_096);
+    await writeFile(path.join(root, "sources", "expanded.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(
+      /expanded docx content exceeds.*4096 bytes/i,
+    );
+  });
+
+  test("reports malformed DOCX archives as extraction failures", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-malformed-docx-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Malformed DOCX test",
+    });
+    await writeFile(
+      path.join(root, "sources", "malformed.docx"),
+      "not a ZIP archive",
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(/invalid docx archive/i);
   });
 
   test("extracts EPUB spine chapters without trusting archive paths", async () => {

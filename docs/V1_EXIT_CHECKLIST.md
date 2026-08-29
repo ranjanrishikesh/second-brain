@@ -7,6 +7,7 @@ V1 is not complete because a feature appears to work once. Mark it verified only
 Use a disposable clone with synthetic sources that include distributed facts, synonyms, contradictions, a deliberate local-knowledge gap, and a local bare Git remote. It must prove all of the following without model or web credentials:
 
 - First domain question automatically completes/resumes initial setup and makes every ready source shallowly searchable.
+- Text PDFs and DOCX documents are extracted with stable page or heading/section locators; image-only content is reported as extraction-required.
 - Repeated answer is wiki-only and creates no redundant page.
 - Raw fallback persists a cited, interconnected mutation; a raw source change is rejected until superseded.
 - Contradictory evidence remains visible with reciprocal graph connections.

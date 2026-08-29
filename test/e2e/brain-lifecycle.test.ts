@@ -225,6 +225,35 @@ async function writeEverySupportedFormat(root: string): Promise<void> {
   });
   await writeFile(path.join(root, "sources", "pulsars.pdf"), await pdf.save());
 
+  const docx = new JSZip();
+  docx.file(
+    "[Content_Types].xml",
+    '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>',
+  );
+  docx.file(
+    "_rels/.rels",
+    '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+  );
+  docx.file(
+    "word/_rels/document.xml.rels",
+    '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+  );
+  docx.file(
+    "word/styles.xml",
+    '<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>',
+  );
+  docx.file(
+    "word/document.xml",
+    '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Orbital Resonance</w:t></w:r></w:p><w:p><w:r><w:t>Orbital resonance occurs when orbiting bodies exert regular gravitational influence.</w:t></w:r></w:p></w:body></w:document>',
+  );
+  await writeFile(
+    path.join(root, "sources", "resonance.docx"),
+    await docx.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+    }),
+  );
+
   const epub = new JSZip();
   epub.file("mimetype", "application/epub+zip");
   epub.file(
@@ -254,7 +283,7 @@ describe("portable second-brain fake host", () => {
       root,
       "Astronomy concepts and observations",
     );
-    expect(initialSources).toHaveLength(9);
+    expect(initialSources).toHaveLength(10);
     expect(
       new Set(initialSources.map((item) => item.record.mediaType)),
     ).toEqual(
@@ -267,9 +296,14 @@ describe("portable second-brain fake host", () => {
         "text/csv",
         "text/tab-separated-values",
         "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/epub+zip",
       ]),
     );
+    expect(
+      initialSources.find((item) => item.record.path.endsWith("resonance.docx"))
+        ?.extracted?.chunks[0],
+    ).toMatchObject({ locator: "heading=orbital-resonance" });
     const session = await beginQuery(root, "What is periapsis?");
     expect(session.currentTier).toBe("wiki");
     expect(session.setup.status).toBe("completed");

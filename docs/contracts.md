@@ -20,7 +20,7 @@ Regenerate them with `pnpm schemas:generate`; CI rejects drift.
 
 A source ID is derived from SHA-256 content. Once registered, the bytes at that path may not change or disappear. A replacement is a new source record linked through `supersedes`, leaving both versions inspectable.
 
-Extracted chunks retain deterministic locators such as `page=4`, `chapter=2`, `heading=method`, `lines=10-18`, `$.results[0]`, or `row=7`.
+Extracted chunks retain deterministic locators such as `page=4`, `chapter=2`, `heading=method`, `lines=10-18`, `$.results[0]`, or `row=7`. Text PDFs use page locators; DOCX documents retain semantic heading/section locators and require a separate extraction step when no usable text exists.
 Each ready source record also tracks the SHA-256 hash of its canonical extracted payload. Disposable cache contents must match that tracked hash or they are rebuilt from the immutable source before search, reading, bootstrap, or citation validation can use them.
 
 ## Wiki page identity

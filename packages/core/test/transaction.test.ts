@@ -35,7 +35,7 @@ async function git(root: string, args: string[]): Promise<string> {
 async function waitForOwnedIndexLock(
   filePath: string,
   operationId: string,
-  timeoutMs = 3_000,
+  timeoutMs = 10_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -72,7 +72,7 @@ async function waitForProcessExit(
 async function waitForIndexPublicationLock(
   lockPath: string,
   journalPath: string,
-  timeoutMs = 3_000,
+  timeoutMs = 10_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

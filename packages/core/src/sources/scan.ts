@@ -7,6 +7,7 @@ import { loadBrainConfig } from "../config.js";
 import { calculateExtractedSourceSha256 } from "./cache-integrity.js";
 import {
   extractCsv,
+  extractDocx,
   extractEpub,
   extractHtml,
   extractJson,
@@ -176,6 +177,7 @@ export async function scanSources(
       const csv = extension === ".csv";
       const tsv = extension === ".tsv";
       const pdf = extension === ".pdf";
+      const docx = extension === ".docx";
       const epub = extension === ".epub";
       let extracted: ExtractedSourceV1 | undefined;
       let extractionError = exceedsSizeLimit
@@ -215,13 +217,20 @@ export async function scanSources(
                             relativePath,
                             new Uint8Array(content ?? []),
                           )
-                        : epub
-                          ? await extractEpub(
+                        : docx
+                          ? await extractDocx(
                               id,
                               relativePath,
                               new Uint8Array(content ?? []),
+                              config.sources.maxFileBytes,
                             )
-                          : undefined;
+                          : epub
+                            ? await extractEpub(
+                                id,
+                                relativePath,
+                                new Uint8Array(content ?? []),
+                              )
+                            : undefined;
       } catch (error) {
         extractionError =
           error instanceof Error
@@ -251,15 +260,17 @@ export async function scanSources(
                       ? "text/tab-separated-values"
                       : pdf
                         ? "application/pdf"
-                        : epub
-                          ? "application/epub+zip"
-                          : "application/octet-stream",
+                        : docx
+                          ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                          : epub
+                            ? "application/epub+zip"
+                            : "application/octet-stream",
         bytes: content?.byteLength ?? fileStats.size,
         discoveredAt: new Date().toISOString(),
         extractionStatus: extractionError
           ? "failed"
           : extracted
-            ? pdf && extracted.chunks.length === 0
+            ? (pdf || docx) && extracted.chunks.length === 0
               ? "extraction-required"
               : "ready"
             : "unsupported",
@@ -279,9 +290,11 @@ export async function scanSources(
                       ? "delimited-v1"
                       : pdf
                         ? "pdf-v1"
-                        : epub
-                          ? "epub-v1"
-                          : "none",
+                        : docx
+                          ? "docx-v1"
+                          : epub
+                            ? "epub-v1"
+                            : "none",
         ...(extracted
           ? { extractedSha256: calculateExtractedSourceSha256(extracted) }
           : {}),

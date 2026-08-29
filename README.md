@@ -92,12 +92,13 @@ The core then pushes only a normal fast-forward composed entirely of its own man
 | Plain text | line range |
 | HTML | extracted heading/section |
 | Text PDF | page |
+| Word DOCX | heading/section |
 | EPUB | spine chapter |
 | JSON | JSON path |
 | JSONL | line |
 | CSV / TSV | row |
 
-Scanned PDFs, images/OCR, Office files, audio, and video are reported as unsupported or extraction-required; they are never silently ignored. To replace registered bytes, add a new file, scan it, then use `brain source supersede <old-id> <new-id>`.
+DOCX extraction preserves usable text structure from headings, paragraphs, lists, tables, footnotes, and text boxes; embedded images are not OCRed. Scanned PDFs, legacy `.doc` files, other Office formats, images/OCR, audio, and video are reported as unsupported or extraction-required; they are never silently ignored. To replace registered bytes, add a new file, scan it, then use `brain source supersede <old-id> <new-id>`.
 
 ## Hosted OpenClaw gateway
 

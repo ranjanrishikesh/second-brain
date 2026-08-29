@@ -275,6 +275,78 @@ export async function extractPdf(
   };
 }
 
+export async function extractDocx(
+  sourceId: string,
+  filePath: string,
+  bytes: Uint8Array,
+  maxExpandedBytes: number,
+): Promise<ExtractedSourceV1> {
+  let archive: JSZip;
+  try {
+    archive = await JSZip.loadAsync(bytes);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid DOCX archive: ${detail}`, { cause: error });
+  }
+  const entries = Object.values(archive.files);
+  if (entries.length > 1_000)
+    throw new Error("DOCX contains too many archive entries");
+  let expandedBytes = 0;
+  for (const entry of entries) {
+    const metadata = entry as typeof entry & {
+      unsafeOriginalName?: string;
+      _data?: { uncompressedSize?: number };
+    };
+    const originalName = metadata.unsafeOriginalName ?? entry.name;
+    if (originalName.includes("\\"))
+      throw new Error(`Unsafe DOCX path: ${originalName}`);
+    const normalized = path.posix.normalize(originalName);
+    if (
+      normalized.startsWith("../") ||
+      normalized.startsWith("/") ||
+      normalized === ".."
+    ) {
+      throw new Error(`Unsafe DOCX path: ${originalName}`);
+    }
+    if (
+      !entry.dir &&
+      (normalized === "[Content_Types].xml" ||
+        normalized.endsWith(".xml") ||
+        normalized.endsWith(".rels"))
+    ) {
+      const uncompressedSize = metadata._data?.uncompressedSize;
+      if (
+        typeof uncompressedSize !== "number" ||
+        !Number.isSafeInteger(uncompressedSize) ||
+        uncompressedSize < 0
+      )
+        throw new Error(`DOCX entry has an invalid size: ${normalized}`);
+      expandedBytes += uncompressedSize;
+      if (expandedBytes > maxExpandedBytes) {
+        throw new Error(
+          `Expanded DOCX content exceeds configured maximum of ${maxExpandedBytes} bytes`,
+        );
+      }
+    }
+  }
+  const { default: mammoth } = await import("mammoth");
+  const converted = await mammoth.convertToHtml(
+    { buffer: Buffer.from(bytes) },
+    {
+      externalFileAccess: false,
+      includeEmbeddedStyleMap: false,
+      convertImage: mammoth.images.imgElement(async () => ({ src: "" })),
+    },
+  );
+  const html = extractHtml(
+    sourceId,
+    filePath,
+    `<html><body>${converted.value}</body></html>`,
+  );
+  const structured = extractMarkdown(sourceId, filePath, html.text);
+  return { ...structured, title: html.title };
+}
+
 function xmlChild(value: unknown, name: string): unknown {
   if (!value || typeof value !== "object") return undefined;
   const entry = Object.entries(value).find(
