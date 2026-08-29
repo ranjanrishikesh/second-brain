@@ -15,7 +15,7 @@ export default defineConfig({
       "adapters/**/*.test.ts",
       "test/**/*.test.ts",
     ],
-    maxWorkers: 2,
+    maxWorkers: 1,
     testTimeout: 20_000,
   },
 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "../config.js";
+import { validateDocxArchive } from "./docx-archive.js";
 import {
   extractCsv,
   extractDocx,
@@ -16,10 +17,10 @@ import {
 import { assertCanonicalExtractedSource } from "./cache-integrity.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./types.js";
 
-export async function rebuildExtractedSourceCache(
+async function readCanonicalSourceContent(
   root: string,
   source: SourceRecordV1,
-): Promise<ExtractedSourceV1> {
+): Promise<Buffer> {
   const sourcePath = path.resolve(root, source.path);
   const relativePath = path.relative(root, sourcePath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
@@ -30,6 +31,14 @@ export async function rebuildExtractedSourceCache(
   if (actualHash !== source.sha256) {
     throw new Error(`Immutable source violation: ${source.path}`);
   }
+  return content;
+}
+
+export async function rebuildExtractedSourceCache(
+  root: string,
+  source: SourceRecordV1,
+): Promise<ExtractedSourceV1> {
+  const content = await readCanonicalSourceContent(root, source);
 
   const text = content.toString("utf8");
   const extracted =
@@ -93,8 +102,9 @@ export async function loadExtractedSourceCache(
   root: string,
   source: SourceRecordV1,
 ): Promise<ExtractedSourceV1> {
+  let cached: ExtractedSourceV1;
   try {
-    return assertCanonicalExtractedSource(
+    cached = assertCanonicalExtractedSource(
       JSON.parse(
         await readFile(
           path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
@@ -106,4 +116,15 @@ export async function loadExtractedSourceCache(
   } catch {
     return await rebuildExtractedSourceCache(root, source);
   }
+  if (source.extractor === "docx-v1") {
+    const [content, config] = await Promise.all([
+      readCanonicalSourceContent(root, source),
+      loadBrainConfig(root),
+    ]);
+    await validateDocxArchive(
+      new Uint8Array(content),
+      config.sources.maxFileBytes,
+    );
+  }
+  return cached;
 }

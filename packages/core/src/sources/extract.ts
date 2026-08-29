@@ -4,6 +4,7 @@ import { XMLParser } from "fast-xml-parser";
 import JSZip from "jszip";
 import { parseHTML } from "linkedom";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { validateDocxArchive } from "./docx-archive.js";
 import type { ExtractedSourceV1 } from "./types.js";
 
 function titleFromMarkdown(text: string, filePath: string): string {
@@ -281,49 +282,7 @@ export async function extractDocx(
   bytes: Uint8Array,
   maxExpandedBytes: number,
 ): Promise<ExtractedSourceV1> {
-  let archive: JSZip;
-  try {
-    archive = await JSZip.loadAsync(bytes);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid DOCX archive: ${detail}`, { cause: error });
-  }
-  const entries = Object.values(archive.files);
-  if (entries.length > 1_000)
-    throw new Error("DOCX contains too many archive entries");
-  let expandedBytes = 0;
-  for (const entry of entries) {
-    const metadata = entry as typeof entry & {
-      unsafeOriginalName?: string;
-      _data?: { uncompressedSize?: number };
-    };
-    const originalName = metadata.unsafeOriginalName ?? entry.name;
-    if (originalName.includes("\\"))
-      throw new Error(`Unsafe DOCX path: ${originalName}`);
-    const normalized = path.posix.normalize(originalName);
-    if (
-      normalized.startsWith("../") ||
-      normalized.startsWith("/") ||
-      normalized === ".."
-    ) {
-      throw new Error(`Unsafe DOCX path: ${originalName}`);
-    }
-    if (!entry.dir) {
-      const uncompressedSize = metadata._data?.uncompressedSize;
-      if (
-        typeof uncompressedSize !== "number" ||
-        !Number.isSafeInteger(uncompressedSize) ||
-        uncompressedSize < 0
-      )
-        throw new Error(`DOCX entry has an invalid size: ${normalized}`);
-      if (uncompressedSize > maxExpandedBytes - expandedBytes) {
-        throw new Error(
-          `Expanded DOCX content exceeds configured maximum of ${maxExpandedBytes} bytes`,
-        );
-      }
-      expandedBytes += uncompressedSize;
-    }
-  }
+  await validateDocxArchive(bytes, maxExpandedBytes);
   const { default: mammoth } = await import("mammoth");
   const converted = await mammoth.convertToHtml(
     { buffer: Buffer.from(bytes) },

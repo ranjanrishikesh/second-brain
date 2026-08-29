@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -7,7 +7,12 @@ import JSZip from "jszip";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { describe, expect, test } from "vitest";
 import { parse, stringify } from "yaml";
-import { initBrain, scanSources, supersedeSource } from "../src/index.js";
+import {
+  initBrain,
+  readBrainItem,
+  scanSources,
+  supersedeSource,
+} from "../src/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +53,110 @@ async function createDocx(
     type: "uint8array",
     compression: "DEFLATE",
   });
+}
+
+interface CentralDirectoryEntryLocation {
+  centralOffset: number;
+  centralSize: number;
+  eocdOffset: number;
+  entryCount: number;
+  recordOffset: number;
+  recordLength: number;
+  localHeaderOffset: number;
+}
+
+function findCentralDirectoryEntry(
+  bytes: Uint8Array,
+  entryName: string,
+): { buffer: Buffer; location: CentralDirectoryEntryLocation } {
+  const buffer = Buffer.from(bytes);
+  const eocdSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const eocdOffset = buffer.lastIndexOf(eocdSignature);
+  if (eocdOffset < 0) throw new Error("Test DOCX has no ZIP directory");
+  const entryCount = buffer.readUInt16LE(eocdOffset + 10);
+  const centralSize = buffer.readUInt32LE(eocdOffset + 12);
+  const centralOffset = buffer.readUInt32LE(eocdOffset + 16);
+  const centralEnd = centralOffset + centralSize;
+  let recordOffset = centralOffset;
+  while (recordOffset < centralEnd) {
+    if (buffer.readUInt32LE(recordOffset) !== 0x02014b50)
+      throw new Error("Test DOCX has an invalid central record");
+    const fileNameLength = buffer.readUInt16LE(recordOffset + 28);
+    const extraFieldLength = buffer.readUInt16LE(recordOffset + 30);
+    const commentLength = buffer.readUInt16LE(recordOffset + 32);
+    const recordLength = 46 + fileNameLength + extraFieldLength + commentLength;
+    const currentName = buffer
+      .subarray(recordOffset + 46, recordOffset + 46 + fileNameLength)
+      .toString("utf8");
+    if (currentName === entryName) {
+      return {
+        buffer,
+        location: {
+          centralOffset,
+          centralSize,
+          eocdOffset,
+          entryCount,
+          recordOffset,
+          recordLength,
+          localHeaderOffset: buffer.readUInt32LE(recordOffset + 42),
+        },
+      };
+    }
+    recordOffset += recordLength;
+  }
+  throw new Error(`Test DOCX entry is missing: ${entryName}`);
+}
+
+function duplicateCentralDirectoryEntry(
+  bytes: Uint8Array,
+  entryName: string,
+  additionalCopies: number,
+): Uint8Array {
+  const { buffer, location } = findCentralDirectoryEntry(bytes, entryName);
+  const centralEnd = location.centralOffset + location.centralSize;
+  const record = buffer.subarray(
+    location.recordOffset,
+    location.recordOffset + location.recordLength,
+  );
+  const duplicates = Buffer.alloc(record.length * additionalCopies);
+  for (let index = 0; index < additionalCopies; index += 1) {
+    record.copy(duplicates, index * record.length);
+  }
+  const output = Buffer.concat([
+    buffer.subarray(0, centralEnd),
+    duplicates,
+    buffer.subarray(centralEnd),
+  ]);
+  const shiftedEocd = location.eocdOffset + duplicates.length;
+  const updatedCount = location.entryCount + additionalCopies;
+  output.writeUInt16LE(updatedCount, shiftedEocd + 8);
+  output.writeUInt16LE(updatedCount, shiftedEocd + 10);
+  output.writeUInt32LE(
+    location.centralSize + duplicates.length,
+    shiftedEocd + 12,
+  );
+  return output;
+}
+
+function overrideCentralDirectorySize(
+  bytes: Uint8Array,
+  entryName: string,
+  declaredBytes: number,
+): Uint8Array {
+  const { buffer, location } = findCentralDirectoryEntry(bytes, entryName);
+  buffer.writeUInt32LE(declaredBytes, location.recordOffset + 24);
+  buffer.writeUInt32LE(declaredBytes, location.localHeaderOffset + 22);
+  return buffer;
+}
+
+function corruptCentralDirectoryCrc(
+  bytes: Uint8Array,
+  entryName: string,
+): Uint8Array {
+  const { buffer, location } = findCentralDirectoryEntry(bytes, entryName);
+  const crcOffset = location.recordOffset + 16;
+  buffer.writeUInt32LE((buffer.readUInt32LE(crcOffset) ^ 1) >>> 0, crcOffset);
+  return buffer;
 }
 
 describe("scanSources", () => {
@@ -473,6 +582,142 @@ describe("scanSources", () => {
     expect(result.added[0]?.error).toMatch(
       /expanded docx content exceeds.*4096 bytes/i,
     );
+  });
+
+  test("counts duplicate physical DOCX directory records", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-duplicate-docx-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Duplicate DOCX record test",
+    });
+    const original = await createDocx(
+      "<w:p><w:r><w:t>Visible text</w:t></w:r></w:p>",
+      { "custom/duplicate.bin": "duplicate" },
+    );
+    const bytes = duplicateCentralDirectoryEntry(
+      original,
+      "custom/duplicate.bin",
+      1_000,
+    );
+    await writeFile(path.join(root, "sources", "duplicates.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(/too many archive entries/i);
+  });
+
+  test("rejects ambiguous duplicate DOCX entry names below the entry limit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-ambiguous-docx-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Ambiguous DOCX record test",
+    });
+    const original = await createDocx(
+      "<w:p><w:r><w:t>Visible text</w:t></w:r></w:p>",
+      { "custom/duplicate.bin": "duplicate" },
+    );
+    const bytes = duplicateCentralDirectoryEntry(
+      original,
+      "custom/duplicate.bin",
+      1,
+    );
+    await writeFile(path.join(root, "sources", "ambiguous.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(/duplicate docx archive entry/i);
+  });
+
+  test("rejects DOCX content whose actual size exceeds its declaration", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-forged-docx-size-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Forged DOCX size test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4_096;
+    await writeFile(configPath, stringify(config));
+    const original = await createDocx(
+      `<w:p><w:r><w:t>${"A".repeat(2_000_000)}</w:t></w:r></w:p>`,
+    );
+    const bytes = overrideCentralDirectorySize(
+      original,
+      "word/document.xml",
+      512,
+    );
+    expect(bytes.byteLength).toBeLessThan(4_096);
+    await writeFile(path.join(root, "sources", "forged-size.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(
+      /DOCX entry size does not match its declaration/i,
+    );
+  });
+
+  test("rejects DOCX entries with mismatched CRC checksums", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-docx-crc-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "DOCX CRC test",
+    });
+    const original = await createDocx(
+      "<w:p><w:r><w:t>CRC mismatch accepted</w:t></w:r></w:p>",
+    );
+    const bytes = corruptCentralDirectoryCrc(original, "word/document.xml");
+    await writeFile(path.join(root, "sources", "bad-crc.docx"), bytes);
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "docx-v1",
+    });
+    expect(result.added[0]?.error).toMatch(/DOCX entry CRC mismatch/i);
+  });
+
+  test("enforces a lowered DOCX limit equally with and without cache", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-docx-cache-policy-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "DOCX cache policy test",
+    });
+    const bytes = await createDocx(
+      `<w:p><w:r><w:t>${"A".repeat(20_000)}</w:t></w:r></w:p>`,
+    );
+    await writeFile(path.join(root, "sources", "policy.docx"), bytes);
+    const scan = await scanSources(root);
+    const source = scan.added[0];
+    expect(source).toMatchObject({
+      extractionStatus: "ready",
+      extractor: "docx-v1",
+    });
+    if (!source) throw new Error("Expected the DOCX source to be registered");
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4_096;
+    await writeFile(configPath, stringify(config));
+    const expectedError = /expanded docx content exceeds.*4096 bytes/i;
+
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
+    await rm(
+      path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+    );
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(expectedError);
   });
 
   test("reports malformed DOCX archives as extraction failures", async () => {

@@ -10,7 +10,7 @@
 ## Sources and bootstrap
 
 - `sources.roots`: repository-relative immutable source roots. The default is `sources`.
-- `sources.maxFileBytes`: maximum source-file size read in-process. For DOCX, the same limit also caps the sum of every archive entry's declared uncompressed size. Oversized files are registered with a visible failure.
+- `sources.maxFileBytes`: maximum source-file size read in-process. For DOCX, the same limit also caps both declared and streamed cumulative uncompressed content; physical entries, paths, sizes, and CRC checksums are validated before extraction. Oversized files are registered with a visible failure.
 - `bootstrap.mode`: `catalog-map` in v1.
 - `bootstrap.batchSize`: maximum source contexts returned by `brain bootstrap next`.
 
