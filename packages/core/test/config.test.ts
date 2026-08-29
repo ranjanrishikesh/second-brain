@@ -298,6 +298,26 @@ describe("initBrain", () => {
     expect(await git(root, ["status", "--short"])).toBe("");
   });
 
+  test("creates the first managed identity commit in an unborn SHA-256 Git repository", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-init-sha256-"));
+    await git(root, ["init", "--object-format=sha256", "-b", "main"]);
+    await git(root, ["config", "user.name", "Second Brain Init Test"]);
+    await git(root, ["config", "user.email", "brain-init@example.invalid"]);
+
+    const result = await initBrain(root, {
+      name: "SHA-256 Astronomy",
+      description: "A source-backed astronomy brain in SHA-256 Git.",
+    });
+
+    expect(result).toMatchObject({
+      mode: "template-replaced",
+      operationId: expect.stringMatching(/^op_identity_/),
+      commit: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(await git(root, ["rev-parse", "HEAD"])).toHaveLength(64);
+    expect(await git(root, ["status", "--short"])).toBe("");
+  });
+
   test("adds a managed identity commit to an existing uninitialized repository", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-init-existing-git-"));
     await git(root, ["init", "-b", "main"]);

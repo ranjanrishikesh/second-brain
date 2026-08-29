@@ -1384,7 +1384,7 @@ export async function runCanonicalWrite<T>(
           "update-ref",
           headRef,
           commit,
-          preHead || "0000000000000000000000000000000000000000",
+          preHead || "0".repeat(commit.length),
         ]);
         headUpdated = true;
 
