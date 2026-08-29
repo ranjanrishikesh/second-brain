@@ -15,31 +15,44 @@ initial shallow catalog → wiki → raw sources → approved, captured web evid
 
 If the wiki already supports the answer, the query is logged without creating a duplicate page. If raw or web evidence is used, the agent must persist cited, interconnected knowledge before answering. If evidence remains insufficient, it records an honest question/gap page instead of guessing.
 
-The initial catalog is automatic agent work, not a surprise background process: a clone still needs its identity and domain charter, and setup runs only in response to the first domain question. It is resumable if interrupted.
+The initial catalog is automatic agent work, not a surprise background process. An explicit onboarding request completes it as soon as usable sources are available; if onboarding was never requested, the first domain question remains the fallback trigger. Every stage is resumable.
 
-## Create a brain from the template
+## Start a brain without routine commands
 
-Requirements: Git, Node.js 22.22.3 or a compatible newer release, and pnpm 10.9.
+The normal path is:
+
+1. Create a new repository from this template, or clone it into a newly named folder.
+2. Open that repository root in Codex or Claude Code.
+3. Say “Initialize this second brain.”
+4. If the agent reports that `sources/` is empty, add your PDF, DOCX, Markdown, text, HTML, EPUB, JSON/JSONL, CSV, or TSV files there. Then say “sources added” or simply ask your first domain question.
+
+That is the entire routine user workflow. The agent checks Node and dependencies, recovers interrupted work, initializes from the repository name, scans sources, infers and persists a broad source-backed charter, completes the initial cited catalog and map, audits and rebuilds search, runs a smoke search, commits managed changes, and reports final readiness. If Node is missing or too old, installation is denied, or dependency installation fails, it reports that genuine environment blocker instead of pretending setup completed.
+
+You may add sources before the first prompt; the agent then continues without the waiting step. A mixed corpus receives an inclusive charter that you can correct later. Scanned PDFs, legacy `.doc` files, and other unusable inputs are identified by filename and block readiness only when no source can be extracted successfully.
+
+See [zero-command onboarding](docs/onboarding.md) for the lifecycle, interruption behavior, and approval boundaries.
+
+## Use it locally with an agent
+
+Codex reads `AGENTS.md`. Claude Code reads the one-line `CLAUDE.md`, which imports that same canonical contract, so the two hosts cannot drift. Both route onboarding and domain questions through `.agents/skills/second-brain/SKILL.md`; engineering requests remain ordinary code work and do not pollute the wiki.
+
+Normally you speak to the agent in plain language. Onboarding handles the base setup; a domain question then drives `brain query begin`, tier expansion, evidence capture, reconciled persistence, audits, and `brain query finish`. Direct writes to canonical wiki/state files are forbidden by the agent contract.
+
+## Manual CLI reference
+
+These commands are for troubleshooting, automation, and template development—not the normal owner workflow. The Codex or Claude host should run them for you.
+
+Requirements: Git, Node.js 22.13 or newer, and pnpm 10.9.
 
 ```bash
-git clone <your-template-repository> astronomy-brain
-cd astronomy-brain
 pnpm install --frozen-lockfile
-pnpm brain init \
-  --name "Astronomy Brain" \
-  --description "My source-backed astronomy research and explanations"
+pnpm brain init
+pnpm brain doctor
+pnpm brain status
+pnpm brain source scan
 ```
 
-Then edit `BRAIN.md` to define the domain, exclusions, terminology, and evidence preferences. Commit that identity once:
-
-```bash
-git add BRAIN.md brain.config.yaml wiki/home.md
-git commit -m "chore: initialize astronomy brain"
-```
-
-`brain init` safely replaces the pristine template identity, is idempotent with the same identity, and refuses an accidental rename after initialization.
-
-Example independent clones need no code changes:
+Explicit initialization remains compatible when automation needs fixed identity values:
 
 ```bash
 pnpm brain init --name "Growth and AI" --description "Marketing experiments, growth systems, and applied AI"
@@ -47,13 +60,7 @@ pnpm brain init --name "Fiction Worlds" --description "Characters, places, event
 pnpm brain init --name "Physics Notes" --description "Simple physics concepts, derivations, and worked explanations"
 ```
 
-Run each command in a separate clone. One repository always represents one brain.
-
-## Use it locally with an agent
-
-Open the repository in Codex or Claude Code. Codex reads `AGENTS.md`; Claude Code reads `CLAUDE.md`, which imports the same contract. Both route domain questions through `.agents/skills/second-brain/SKILL.md`, while engineering requests remain normal code work and do not pollute the wiki.
-
-Useful checks:
+Each clone is one independent brain. Useful diagnostics include:
 
 ```bash
 pnpm brain doctor
@@ -61,8 +68,6 @@ pnpm brain status
 pnpm brain search --query "orbital resonance" --scope all
 pnpm brain audit
 ```
-
-Normally you ask the agent a question in plain language. On the first question it completes the base setup, then drives `brain query begin`, tier expansion, evidence capture, reconciled `brain apply`, audits, and `brain query finish`. Direct writes to canonical wiki/state files are forbidden by the agent contract.
 
 ### Web research is per-question and approved
 

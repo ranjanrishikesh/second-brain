@@ -1,6 +1,6 @@
 ---
 name: second-brain
-description: Use when answering or maintaining domain knowledge in a portable second-brain repository, including questions over its wiki or sources, source ingestion, web research, graph changes, contradictions, gaps, setup, reconciliation, audits, or sync state.
+description: Use when initializing or onboarding a portable second-brain repository, or when answering and maintaining domain knowledge through its wiki, sources, setup, reconciliation, audits, web research, or sync state.
 ---
 
 # Second Brain
@@ -8,6 +8,26 @@ description: Use when answering or maintaining domain knowledge in a portable se
 ## Core contract
 
 The repository is durable memory. The `brain` CLI is its only write boundary. Treat a domain question as a query session; treat code, configuration, and test work as ordinary repository work unless `BRAIN.md` explicitly makes them domain knowledge.
+
+## Onboarding lifecycle
+
+“Initialize this second brain.”, “set up this second brain”, and “onboard this second brain” start an agent-executed workflow, not a command tutorial. Run these stages in order; after an interruption, run status and continue from its deterministic next action:
+
+1. **Check runtime and dependencies.** Require Node.js 22.13 or newer. If dependencies are missing or broken, run `pnpm install --frozen-lockfile`. If `pnpm` is absent, try `corepack pnpm install --frozen-lockfile`. Report a blocker only for missing/old Node, denied execution permission, or a real install failure.
+2. **Recover.** Run `brain recover` before changing state.
+3. **Doctor and status.** Run both; route from `status.onboarding.nextAction` rather than guessing.
+4. **Initialize identity.** When requested, run bare `brain init`. It derives the Git repository name without GitHub access.
+5. **Add sources.** If no source is present, tell the user to add supported files under `sources/`, then pause. Resume when they say “sources added” or ask a domain question; require no special phrase.
+6. **Scan sources.** Run `brain source scan`, report each unusable file accurately, and require at least one ready extraction.
+7. **Infer and persist the charter.** Use, in order, existing identity; optional authenticated repository metadata already available to the host; Git common-directory name; all source titles; and deterministic representative chunks from up to 50 evenly distributed ready sources. For mixed material, describe an inclusive corpus and do not silently exclude a domain. Write the versioned JSON input in disposable runtime space and invoke `brain charter set`.
+8. **Complete or resume setup.** Finish checkpointed setup batches, cited shallow source pages, graph reconciliation, and the initial map.
+9. **Complete the semantic audit.** Resolve every due checkpoint before claiming readiness.
+10. **Rebuild and smoke-search.** Rebuild disposable search state and run representative charter/source-derived queries.
+11. **Final doctor and status.** Require healthy structure and onboarding phase `ready`.
+12. **Safe sync.** Sync only to an existing owner-confirmed target; request explicit confirmation for a new or changed destination.
+13. **Report readiness.** Include identity, inferred charter, source diagnostics, setup/audit/search outcome, local commit state, and synchronization state.
+
+Never ask the user to run routine init, scan, doctor, status, search, rebuild, audit, recover, setup, commit, or eligible sync commands. The agent operates the CLI even if the host asks for execution approval. Never broadly allowlist `pnpm brain *`; the exact-question web gate and new sync-target confirmation remain human decisions.
 
 ## Decision ladder
 
