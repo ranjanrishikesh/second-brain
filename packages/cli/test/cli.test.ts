@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -23,6 +23,32 @@ async function git(root: string, args: string[]): Promise<string> {
 }
 
 describe("brain CLI", () => {
+  test("initializes from repository-derived defaults and returns onboarding JSON", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "brain-cli-bare-"));
+    const root = path.join(parent, "second-brain-smoke");
+    await mkdir(root);
+    const output: string[] = [];
+
+    const exitCode = await runCli(["init", "--root", root, "--json"], {
+      write: (value) => output.push(value),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      initialization: {
+        mode: "template-replaced",
+        name: "Second Brain Smoke",
+        description: "A source-backed knowledge brain for Second Brain Smoke.",
+      },
+      status: {
+        onboarding: {
+          phase: "awaiting-sources",
+          nextAction: "add-sources",
+        },
+      },
+    });
+  });
+
   test("initializes a brain from explicit arguments", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-cli-"));
     const output: string[] = [];
@@ -931,6 +957,76 @@ describe("brain CLI", () => {
         }),
       ]),
     });
+
+    const humanOutput: string[] = [];
+    const humanExitCode = await runCli(["doctor", "--root", root], {
+      write: (value) => humanOutput.push(value),
+    });
+    expect(humanExitCode).toBe(0);
+    expect(humanOutput.join(" ")).toContain("[warning] SOURCES_EMPTY");
+    expect(humanOutput.join(" ")).toContain("[warning] SETUP_INCOMPLETE");
+    expect(humanOutput.at(-1)).toBe("Brain is healthy with warnings.\n");
+  });
+
+  test("sets a validated charter from JSON through the CLI", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "brain-cli-charter-"));
+    const root = path.join(parent, "astronomy-brain");
+    await mkdir(root);
+    await runCli(["init", "--root", root], { write: () => undefined });
+    await writeFile(
+      path.join(root, "sources", "orbits.md"),
+      "# Orbits\n\nBodies follow orbital paths.\n",
+    );
+    await runCli(["source", "scan", "--root", root, "--json"], {
+      write: () => undefined,
+    });
+    const charterPath = path.join(root, "charter.json");
+    await writeFile(
+      charterPath,
+      `${JSON.stringify({
+        version: 1,
+        description: "Astronomy observations and orbital mechanics.",
+        purpose: "Answer source-backed astronomy questions.",
+        boundaries: ["Include registered astronomy sources."],
+        domainConventions: ["Preserve astronomical terminology."],
+        evidencePreferences: ["Prefer primary evidence."],
+        origin: "inferred",
+      })}\n`,
+    );
+    const output: string[] = [];
+
+    const exitCode = await runCli(
+      ["charter", "set", charterPath, "--root", root, "--json"],
+      { write: (value) => output.push(value) },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(output.join(""))).toMatchObject({
+      version: 1,
+      charter: { origin: "inferred" },
+      operationId: expect.stringMatching(/^op_charter_/),
+    });
+    expect(await readFile(path.join(root, "BRAIN.md"), "utf8")).toContain(
+      "brainCharter: 1",
+    );
+  });
+
+  test("prints the onboarding phase and next action in human status", async () => {
+    const parent = await mkdtemp(
+      path.join(tmpdir(), "brain-cli-status-human-"),
+    );
+    const root = path.join(parent, "physics-brain");
+    await mkdir(root);
+    await runCli(["init", "--root", root], { write: () => undefined });
+    const output: string[] = [];
+
+    const exitCode = await runCli(["status", "--root", root], {
+      write: (value) => output.push(value),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(output.join("")).toContain("Onboarding: awaiting-sources");
+    expect(output.join("")).toContain("Next: add-sources");
   });
 
   test("scans sources and emits machine-readable results", async () => {
