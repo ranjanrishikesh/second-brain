@@ -71,7 +71,7 @@ async function git(root: string, args: string[]): Promise<string> {
 }
 
 function isPristineTemplateSoftwarePath(relativePath: string): boolean {
-  const [firstPathSegment] = relativePath.split(path.sep);
+  const [firstPathSegment] = relativePath.split("/");
   return ![
     ".brain",
     "BRAIN.md",
@@ -80,6 +80,21 @@ function isPristineTemplateSoftwarePath(relativePath: string): boolean {
     "wiki",
   ].includes(firstPathSegment);
 }
+
+describe("pristine template tracked-file filtering", () => {
+  test("excludes Git-style canonical paths when the host separator is Windows", () => {
+    const originalSeparator = path.sep;
+    Object.defineProperty(path, "sep", { value: "\\", configurable: true });
+    try {
+      expect(isPristineTemplateSoftwarePath(".brain/state.json")).toBe(false);
+    } finally {
+      Object.defineProperty(path, "sep", {
+        value: originalSeparator,
+        configurable: true,
+      });
+    }
+  });
+});
 
 async function materializePristineTemplate(
   folderName: string,
