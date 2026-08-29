@@ -31,7 +31,10 @@ type Workflow = {
 describe("derived-brain CI workflow", () => {
   test("runs the supported CI contract without requiring a full Git checkout", async () => {
     const workflow = parse(
-      await readFile(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8"),
+      await readFile(
+        resolve(repositoryRoot, ".github/workflows/ci.yml"),
+        "utf8",
+      ),
     ) as Workflow;
     const job = workflow.jobs?.["core-and-cli"];
     const steps = job?.steps ?? [];
@@ -39,12 +42,12 @@ describe("derived-brain CI workflow", () => {
       typeof step.run === "string" ? [step.run] : [],
     );
 
-    expect(workflow.on).toHaveProperty("pull_request");
+    expect(workflow.on?.pull_request).toBeNull();
     expect(workflow.on?.push).toEqual({ branches: ["main"] });
     expect(job?.strategy?.matrix?.node).toEqual(["22.22.3", "24.15.0"]);
-    expect(steps.find((step) => step.uses === "actions/checkout@v4")).toEqual({
-      uses: "actions/checkout@v4",
-    });
+    expect(steps.filter((step) => step.uses === "actions/checkout@v4")).toEqual(
+      [{ uses: "actions/checkout@v4" }],
+    );
     expect(runSteps).toEqual([
       "pnpm install --frozen-lockfile",
       "pnpm verify",
