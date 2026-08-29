@@ -24,6 +24,7 @@ import {
   configureSyncTarget,
   doctorBrain,
   finishSetup,
+  initBrain,
   loadWikiPages,
   nextSemanticAuditBatch,
   nextSetupBatch,
@@ -69,22 +70,67 @@ async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
 }
 
-async function cloneTemplate(folderName: string): Promise<{
+function isPristineTemplateSoftwarePath(relativePath: string): boolean {
+  const [firstPathSegment] = relativePath.split(path.sep);
+  return ![
+    ".brain",
+    "BRAIN.md",
+    "brain.config.yaml",
+    "sources",
+    "wiki",
+  ].includes(firstPathSegment);
+}
+
+async function materializePristineTemplate(
+  folderName: string,
+  sourceRoot = repositoryRoot,
+): Promise<{
   root: string;
   sandbox: string;
 }> {
   const sandbox = await mkdtemp(path.join(tmpdir(), "brain-onboarding-e2e-"));
   temporaryRoots.push(sandbox);
   const root = path.join(sandbox, folderName);
+  const trackedFiles = (await git(sourceRoot, ["ls-files"]))
+    .split("\n")
+    .filter(isPristineTemplateSoftwarePath);
+  for (const relativePath of trackedFiles) {
+    const destination = path.join(root, relativePath);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await cp(path.join(sourceRoot, relativePath), destination);
+  }
+
+  await git(root, ["init", "--quiet", "--initial-branch=main"]);
+  await git(root, ["config", "user.name", "Zero Command E2E"]);
+  await git(root, ["config", "user.email", "onboarding@example.invalid"]);
+  await git(root, ["add", "--all"]);
+  await git(root, ["commit", "--quiet", "-m", "initial template software"]);
+  await initBrain(root, {
+    name: "Portable Second Brain",
+    description: "A self-maintaining personal knowledge base.",
+  });
+  return { root, sandbox };
+}
+
+async function configuredShallowDetachedHost(folderName: string): Promise<{
+  root: string;
+  sandbox: string;
+}> {
+  const { root: configuredRoot, sandbox } = await materializePristineTemplate(
+    `${folderName}-configured`,
+  );
+  await runCliJson<InitCliResult>(["init", "--root", configuredRoot, "--json"]);
+
+  const root = path.join(sandbox, `${folderName}-shallow-detached`);
   await git(sandbox, [
     "clone",
     "--quiet",
-    "--no-hardlinks",
-    repositoryRoot,
+    "--depth",
+    "1",
+    `file://${configuredRoot}`,
     root,
   ]);
-  await git(root, ["config", "user.name", "Zero Command E2E"]);
-  await git(root, ["config", "user.email", "onboarding@example.invalid"]);
+  await git(root, ["checkout", "--quiet", "--detach"]);
   return { root, sandbox };
 }
 
@@ -280,22 +326,60 @@ afterEach(async () => {
 });
 
 describe("zero-command onboarding fake host", () => {
-  test("runs the brain CLI after a locked install without prebuilt artifacts", async () => {
-    const sandbox = await mkdtemp(
-      path.join(tmpdir(), "brain-unbuilt-cli-e2e-"),
+  test("materializes a pristine fixture from a configured shallow detached host", async () => {
+    const { root: hostRoot } = await configuredShallowDetachedHost(
+      "second-brain-isolated-fixture",
     );
-    temporaryRoots.push(sandbox);
-    const root = path.join(sandbox, "second-brain-unbuilt");
-    await cp(repositoryRoot, root, {
-      recursive: true,
-      filter: (source) => {
-        const relative = path.relative(repositoryRoot, source);
-        const parts = relative.split(path.sep);
-        return !parts.some((part) =>
-          [".git", ".context", "node_modules", "dist"].includes(part),
-        );
-      },
+    expect((await statusBrain(hostRoot)).onboarding).toMatchObject({
+      phase: "awaiting-sources",
+      nextAction: "add-sources",
     });
+    expect(await git(hostRoot, ["rev-parse", "--is-shallow-repository"])).toBe(
+      "true",
+    );
+    expect(await git(hostRoot, ["branch", "--show-current"])).toBe("");
+
+    const { root } = await materializePristineTemplate(
+      "second-brain-isolated-fixture",
+      hostRoot,
+    );
+
+    expect((await statusBrain(root)).onboarding).toMatchObject({
+      phase: "needs-initialization",
+      nextAction: "initialize",
+    });
+    expect(await git(root, ["rev-parse", "--is-shallow-repository"])).toBe(
+      "false",
+    );
+    expect(await git(root, ["branch", "--show-current"])).toBe("main");
+
+    const initialized = await runCliJson<InitCliResult>([
+      "init",
+      "--root",
+      root,
+      "--json",
+    ]);
+    expect(initialized.status.onboarding).toMatchObject({
+      phase: "awaiting-sources",
+      nextAction: "add-sources",
+    });
+    for (const canonicalPath of [
+      "BRAIN.md",
+      "brain.config.yaml",
+      ".brain/source-manifest.json",
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+      "sources/.gitkeep",
+      "wiki/home.md",
+    ]) {
+      await expect(
+        access(path.join(root, canonicalPath)),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  test("runs the brain CLI after a locked install without prebuilt artifacts", async () => {
+    const { root } = await materializePristineTemplate("second-brain-unbuilt");
     await expect(
       access(path.join(root, "packages", "core", "dist", "index.js")),
     ).rejects.toThrow();
@@ -314,7 +398,9 @@ describe("zero-command onboarding fake host", () => {
   }, 30_000);
 
   test("resumes pre-semantic onboarding across installed CLI processes", async () => {
-    const { root } = await cloneTemplate("second-brain-process-resume");
+    const { root } = await materializePristineTemplate(
+      "second-brain-process-resume",
+    );
     await execFile("pnpm", ["install", "--offline", "--frozen-lockfile"], {
       cwd: root,
     });
@@ -388,10 +474,11 @@ describe("zero-command onboarding fake host", () => {
   }, 120_000);
 
   test("resumes a cloned brain from empty identity through cited ready state and safe sync", async () => {
-    const { root, sandbox } = await cloneTemplate("second-brain-smoke");
+    const { root, sandbox } =
+      await materializePristineTemplate("second-brain-smoke");
     const remote = path.join(sandbox, "confirmed.git");
     await git(sandbox, ["init", "--bare", remote]);
-    await git(root, ["remote", "set-url", "origin", remote]);
+    await git(root, ["remote", "add", "origin", remote]);
     const branch = await git(root, ["branch", "--show-current"]);
     await git(root, ["push", "-u", "origin", `${branch}:${branch}`]);
 
@@ -665,7 +752,9 @@ describe("zero-command onboarding fake host", () => {
   }, 90_000);
 
   test("pre-added sources skip the empty-source pause", async () => {
-    const { root } = await cloneTemplate("second-brain-preloaded");
+    const { root } = await materializePristineTemplate(
+      "second-brain-preloaded",
+    );
     await writeFile(
       path.join(root, "sources", "preloaded.md"),
       "# Preloaded evidence\n\nA source was added before onboarding began.\n",
