@@ -38,9 +38,10 @@ describe("shared Codex and Claude onboarding contract", () => {
       let previousIndex = -1;
       for (const marker of orderedMarkers) {
         const index = contract.indexOf(marker);
-        expect(index, `missing or out-of-order marker: ${marker}`).toBeGreaterThan(
-          previousIndex,
-        );
+        expect(
+          index,
+          `missing or out-of-order marker: ${marker}`,
+        ).toBeGreaterThan(previousIndex);
         previousIndex = index;
       }
     },
@@ -74,10 +75,24 @@ describe("shared Codex and Claude onboarding contract", () => {
 
   it("documents the zero-command path before manual CLI reference", async () => {
     const readme = (await readRepositoryFile("README.md")).toLowerCase();
-    const zeroCommand = readme.indexOf('say “initialize this second brain.”');
+    const zeroCommand = readme.indexOf("say “initialize this second brain.”");
     const manualReference = readme.indexOf("## manual cli reference");
 
     expect(zeroCommand).toBeGreaterThan(-1);
     expect(manualReference).toBeGreaterThan(zeroCommand);
+  });
+
+  it("starts both live-host smokes from pristine clones with only the onboarding prompt", async () => {
+    const checklist = (
+      await readRepositoryFile("docs/V1_EXIT_CHECKLIST.md")
+    ).toLowerCase();
+
+    expect(checklist).toContain("initialize this second brain.");
+    expect(checklist).toContain("empty `sources/`");
+    expect(checklist).toContain("pdf and docx");
+    expect(checklist).toContain("second disposable pristine clone");
+    expect(checklist).toContain(
+      "do not infer claude code success from codex success",
+    );
   });
 });

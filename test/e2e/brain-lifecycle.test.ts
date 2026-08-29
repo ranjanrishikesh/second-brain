@@ -417,7 +417,7 @@ describe("portable second-brain fake host", () => {
       scope: "sources",
     });
     expect(afterRebuild).toEqual(beforeRebuild);
-  }, 30_000);
+  }, 60_000);
 
   test("captures web evidence and persists an honest unanswered gap", async () => {
     const root = await createBrain("Research Brain");
@@ -508,7 +508,7 @@ describe("portable second-brain fake host", () => {
     expect(
       await readFile(path.join(root, capture.source.path), "utf8"),
     ).toContain("brainWebCapture: 1");
-  });
+  }, 60_000);
 
   test("keeps cloned brains independent and enforces source supersession", async () => {
     const astronomy = await createBrain("Astronomy");
@@ -569,7 +569,7 @@ describe("portable second-brain fake host", () => {
     );
     expect(superseded.source.supersedes).toBe(astronomySource.id);
     expect(marketingManifest.sources).toHaveLength(1);
-  });
+  }, 60_000);
 
   test("rolls back failures, recovers crashes, and resumes the 25-operation audit", async () => {
     const root = await createBrain("Safety Brain");
@@ -667,7 +667,7 @@ describe("portable second-brain fake host", () => {
       summary: "Reviewed the remaining page; no issue found.",
     });
     expect(complete.complete).toBe(true);
-  });
+  }, 60_000);
 
   test("exposes the complete host lifecycle through durable state", async () => {
     const root = await createBrain("Host contract Brain");

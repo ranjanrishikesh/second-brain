@@ -33,28 +33,39 @@ pnpm brain doctor
 
 ## 2. Codex live smoke
 
-Run this only in a disposable clone with test material and a test remote, never against an irreplaceable personal brain:
+Run this only in a disposable pristine clone with a test remote, never against an irreplaceable personal brain. Do not initialize it, edit `BRAIN.md`, install dependencies, or run a `brain` command yourself.
 
-1. Initialize the clone and give `BRAIN.md` a real domain purpose and boundary.
-2. Drop supported sources into `sources/` and ask a domain question. Confirm the agent performs the automatic initial setup, including the verified local model download.
-3. Ask a source-backed question; confirm cited wiki persistence and whole-graph reconciliation.
-4. Ask the same question again; confirm the answer is wiki-only.
-5. Exercise a raw-source gap, denied web approval, approved/captured web evidence, and a durable question gap.
-6. Confirm a safe push to the test remote, then deliberately reject a test push and confirm the answer includes the exact sync-pending warning.
+1. Confirm the clone starts with empty `sources/`, open its repository root in Codex, and use only this onboarding prompt:
+
+   ```text
+   Initialize this second brain.
+   ```
+
+2. Confirm Codex checks dependencies, runs recovery/doctor/status, derives and commits identity from the repository name, and pauses with add-source guidance without starting setup.
+3. Add representative text PDF and DOCX material under `sources/`, including at least one source that exercises an interconnection. Say “sources added” (or ask the first domain question) and confirm Codex resumes without asking you to type routine CLI commands.
+4. Confirm it scans sources, infers and shows an inclusive charter, persists it through the CLI, builds a cited shallow page for every ready source and the initial map, completes the semantic audit, rebuilds search, runs a representative smoke search, and ends with healthy doctor plus `ready` status.
+5. Restart Codex once during onboarding and confirm status resumes the correct next action without conversational memory or a magic phrase.
+6. Ask a source-backed question; confirm cited wiki persistence and whole-graph reconciliation. Ask it again and confirm the repeat is wiki-only.
+7. Exercise a raw-source gap, denied web approval, approved/captured web evidence, and a durable question gap.
+8. Confirm an owner-approved safe push to the test remote, then deliberately reject a test push and confirm the answer includes the exact sync-pending warning.
 
 Record the commit and whether every step passed. A personal-brain pilot comes after this and measures usefulness, not basic template safety.
 
 ## 3. Claude Code live smoke
 
-Run this in a second disposable clone with test material and a test remote:
+Run this in a second disposable pristine clone with empty `sources/` and a separate test remote. Do not reuse the Codex clone or its state.
 
-1. Start Claude Code from the repository root and use `/memory` to confirm `CLAUDE.md` loaded the shared `AGENTS.md` contract.
-2. Drop supported sources into `sources/` and ask a domain question. Confirm the automatic initial setup and verified local model download complete.
-3. Ask a source-backed question, then repeat it. Confirm the first answer persists cited, reconciled knowledge and the repeat is wiki-only.
-4. Exercise a raw-source gap, denied web approval, approved/captured web evidence, and a durable question gap.
-5. Confirm a safe push to the test remote, then reject a test push and confirm the exact sync-pending warning is shown.
+1. Start Claude Code from the repository root and use `/memory` to confirm the one-line `CLAUDE.md` imported the shared `AGENTS.md` contract.
+2. Use the same and only initial onboarding prompt:
 
-Record the commit and whether every step passed. Do not treat a Codex-only smoke as proof that Claude Code loaded and followed its project instructions, or vice versa.
+   ```text
+   Initialize this second brain.
+   ```
+
+3. Confirm the empty-source pause, then add representative PDF and DOCX sources, say “sources added” or ask a domain question, and verify the same identity → scan → inferred charter → setup → audit → rebuild/search → doctor/status route completes without manual CLI delegation.
+4. Restart Claude Code during one checkpoint and confirm deterministic resumption. Then repeat the source-backed, wiki-only repeat, raw fallback, web approval/capture, gap, safe-push, and rejected-push checks from the Codex smoke.
+
+Record the commit and whether every step passed. Do not infer Claude Code success from Codex success, and do not infer Codex success from Claude Code success.
 
 ## 4. Explicit v2 handoff
 
