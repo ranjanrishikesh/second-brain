@@ -285,7 +285,7 @@ export async function scanSources(
         extractionStatus: extractionError
           ? "failed"
           : extracted
-            ? (pdf || docx) && extracted.chunks.length === 0
+            ? !extracted.chunks.some((chunk) => chunk.text.trim().length > 0)
               ? "extraction-required"
               : "ready"
             : "unsupported",

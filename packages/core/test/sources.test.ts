@@ -484,6 +484,61 @@ describe("scanSources", () => {
     });
   });
 
+  test("requires extraction for every supported format without a usable chunk", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-empty-formats-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Empty supported format test",
+    });
+    const emptyEpub = new JSZip();
+    emptyEpub.file("mimetype", "application/epub+zip");
+    emptyEpub.file(
+      "META-INF/container.xml",
+      '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+    );
+    emptyEpub.file(
+      "OEBPS/content.opf",
+      '<?xml version="1.0"?><package><metadata><title>Empty Book</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>',
+    );
+    emptyEpub.file(
+      "OEBPS/chapter.xhtml",
+      "<html><body><script>ignored()</script></body></html>",
+    );
+    const fixtures: Array<[string, string | Uint8Array, string]> = [
+      ["empty.md", " \n", "markdown-v1"],
+      ["empty.txt", "\t\n", "text-v1"],
+      [
+        "empty.html",
+        "<html><body><script>ignored()</script></body></html>",
+        "html-v1",
+      ],
+      ["empty.json", "{}", "json-v1"],
+      ["empty.jsonl", "\n\n", "jsonl-v1"],
+      ["empty.csv", "name,value\n", "delimited-v1"],
+      ["empty.tsv", "name\tvalue\n", "delimited-v1"],
+      [
+        "empty.epub",
+        await emptyEpub.generateAsync({ type: "uint8array" }),
+        "epub-v1",
+      ],
+    ];
+    for (const [fileName, bytes] of fixtures) {
+      await writeFile(path.join(root, "sources", fileName), bytes);
+    }
+
+    const result = await scanSources(root);
+
+    expect(result.added).toHaveLength(fixtures.length);
+    for (const [fileName, , extractor] of fixtures) {
+      expect(
+        result.added.find((source) => source.path.endsWith(`/${fileName}`)),
+      ).toMatchObject({
+        extractionStatus: "extraction-required",
+        extractor,
+      });
+    }
+  });
+
   test("rejects DOCX archives containing traversal entry names", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-unsafe-docx-"));
     await initBrain(root, { name: "Test", description: "Unsafe DOCX test" });
