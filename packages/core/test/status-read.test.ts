@@ -107,6 +107,10 @@ describe("brain status and reading", () => {
 
     const pendingRoot = await initializedBrain("Pending charter");
     await writeFile(
+      path.join(pendingRoot, "BRAIN.md"),
+      "# Pending charter\n\nPending charter source material.\n\n## Purpose\n\nReplace this section after cloning with the domain this brain should support.\n",
+    );
+    await writeFile(
       path.join(pendingRoot, "sources", "stars.md"),
       "# Stars\n\nStellar evidence.\n",
     );

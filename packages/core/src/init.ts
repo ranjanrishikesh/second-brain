@@ -172,7 +172,7 @@ async function ensureScaffold(
   await writeIfMissing(
     path.join(root, "BRAIN.md"),
     initialIdentity
-      ? `# ${initialIdentity.name}\n\n${initialIdentity.description}\n\n## Boundaries\n\nDocument what belongs in this brain and what does not.\n`
+      ? `# ${initialIdentity.name}\n\n${initialIdentity.description}\n\n## Purpose\n\n${initialIdentity.description}\n\n## Boundaries\n\nInclude source material relevant to ${initialIdentity.name}.\n`
       : templateCharter,
   );
   await writeIfMissing(

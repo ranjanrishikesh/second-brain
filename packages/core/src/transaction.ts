@@ -55,6 +55,7 @@ export const operationRecordV1Schema = z.object({
     "audit",
     "web-capture",
     "identity",
+    "charter",
   ]),
   status: z.enum(["completed", "unanswered", "partial"]),
   startedAt: z.iso.datetime(),

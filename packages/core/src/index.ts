@@ -35,6 +35,8 @@ export type {
 } from "./state.js";
 export { initBrain } from "./init.js";
 export type { InitBrainOptions, InitBrainResultV1 } from "./init.js";
+export { renderBrainCharter, setBrainCharter } from "./charter.js";
+export type { BrainCharterResultV1 } from "./charter.js";
 export {
   brainCharterV1Schema,
   inspectOnboarding,

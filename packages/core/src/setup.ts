@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
+import { inspectBrainCharter } from "./onboarding.js";
 import { prepareSemanticModel, type BrainRuntimeServices } from "./semantic.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
 import {
@@ -64,15 +65,9 @@ export interface SetupBatchV1 {
 }
 
 async function assertUsableBrainCharter(root: string): Promise<void> {
-  let charter: string;
-  try {
-    charter = await readFile(path.join(root, "BRAIN.md"), "utf8");
-  } catch {
-    throw new Error("BRAIN.md is required before initial setup can begin");
-  }
-  if (/replace\s+this\s+section\s+after\s+cloning/i.test(charter)) {
+  if (!(await inspectBrainCharter(root)).configured) {
     throw new Error(
-      "BRAIN.md still contains its placeholder charter; define the brain purpose before setup",
+      "BRAIN.md still contains a placeholder or provisional charter; define the brain purpose before setup",
     );
   }
 }

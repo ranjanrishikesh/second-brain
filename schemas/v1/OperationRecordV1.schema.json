@@ -20,7 +20,8 @@
         "bootstrap",
         "audit",
         "web-capture",
-        "identity"
+        "identity",
+        "charter"
       ]
     },
     "status": {
