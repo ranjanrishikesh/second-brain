@@ -9,6 +9,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,12 +21,14 @@ import { describe, expect, test } from "vitest";
 import { parse, stringify } from "yaml";
 import {
   beginQuery,
+  calculateQuestionHash,
   captureWebEvidence,
   expandQuery,
   initBrain,
   readBrainState,
   readQuerySession,
   recoverBrain,
+  renderWebArtifactSidecar,
   requestWebApproval,
   resolveWebApproval,
   scanAndRegisterSources,
@@ -39,6 +42,37 @@ const encoder = new TextEncoder();
 
 function sha256(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function preparedArtifactSidecar(input: {
+  sourcePath: string;
+  content: Uint8Array;
+  title: string;
+  retrievedAt: string;
+  queryId: string;
+  question: string;
+  originalUrl: string;
+}) {
+  return {
+    brainWebArtifact: 1 as const,
+    sourcePath: input.sourcePath,
+    artifactSha256: sha256(input.content),
+    artifactBytes: input.content.byteLength,
+    title: input.title,
+    format: "text" as const,
+    mediaType: "text/plain",
+    discovery: {
+      originalUrl: input.originalUrl,
+      finalUrl: input.originalUrl,
+      redirectChain: [],
+      retrievedAt: input.retrievedAt,
+      queryId: input.queryId,
+      questionHash: calculateQuestionHash(input.question),
+      query: input.question,
+      representation: "artifact" as const,
+      completeness: "complete" as const,
+    },
+  };
 }
 
 async function git(root: string, args: string[]): Promise<string> {
@@ -1556,39 +1590,186 @@ describe("durable web evidence capture", () => {
     );
   });
 
-  test("fails closed on incomplete or mismatched prepared artifact pairs", async () => {
-    const cases = ["artifact-only", "sidecar-only", "mismatched"] as const;
-    for (const failure of cases) {
-      const { root, queryId } = await approvedBrain(`Prepared ${failure}?`);
-      const bytes = encoder.encode("prepared bytes\n");
-      const digest = sha256(bytes).slice(0, 12);
-      const sourcePath = `sources/web/2026/08/prepared-${digest}.txt`;
-      const sidecarPath = `sources/web/2026/08/.prepared-${digest}.txt.web.json`;
+  test.each([
+    ["artifact", "explicit", "08"],
+    ["sidecar", "explicit", "08"],
+    ["artifact", "omitted-same-month", "08"],
+    ["sidecar", "omitted-same-month", "08"],
+    ["artifact", "omitted-different-month", "07"],
+    ["sidecar", "omitted-different-month", "07"],
+  ] as const)(
+    "resumes a matching %s-only pair with %s retrieval time in month %s",
+    async (existing, timestampMode, month) => {
+      const { root, queryId, question } = await approvedBrain(
+        `Resume ${existing} ${timestampMode}?`,
+      );
+      const content = encoder.encode("prepared bytes\n");
+      const digest = sha256(content).slice(0, 12);
+      const retrievedAt = `2026-${month}-15T09:00:00.000Z`;
+      const sourcePath = `sources/web/2026/${month}/prepared-${digest}.txt`;
+      const sidecarPath = `sources/web/2026/${month}/.prepared-${digest}.txt.web.json`;
+      const sidecar = renderWebArtifactSidecar(
+        preparedArtifactSidecar({
+          sourcePath,
+          content,
+          title: "Prepared",
+          retrievedAt,
+          queryId,
+          question,
+          originalUrl: "https://example.test/prepared.txt",
+        }),
+      );
       await mkdir(path.dirname(path.join(root, sourcePath)), {
         recursive: true,
       });
-      if (failure !== "sidecar-only")
-        await writeFile(
-          path.join(root, sourcePath),
-          failure === "mismatched" ? "wrong\n" : bytes,
-        );
-      if (failure !== "artifact-only")
-        await writeFile(path.join(root, sidecarPath), "{}\n");
+      if (existing === "artifact") {
+        await writeFile(path.join(root, sourcePath), content);
+        if (timestampMode !== "explicit") {
+          await utimes(
+            path.join(root, sourcePath),
+            new Date(retrievedAt),
+            new Date(retrievedAt),
+          );
+        }
+      } else {
+        await writeFile(path.join(root, sidecarPath), sidecar);
+      }
+
+      const result = await captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: "https://example.test/prepared.txt",
+        title: "Prepared",
+        fileName: "prepared.txt",
+        responseComplete: true,
+        content,
+        ...(timestampMode === "explicit" ? { retrievedAt } : {}),
+      });
+
+      expect(result).toMatchObject({
+        created: true,
+        source: { path: sourcePath },
+      });
+      expect(result.session.webEvidenceSourceIds).toEqual([result.source.id]);
+      expect(await readFile(path.join(root, sourcePath))).toEqual(
+        Buffer.from(content),
+      );
+      expect(await readFile(path.join(root, sidecarPath), "utf8")).toBe(
+        sidecar,
+      );
+      expect(await webFiles(root)).toEqual([sidecarPath, sourcePath].sort());
+    },
+  );
+
+  test.each(["artifact", "sidecar"] as const)(
+    "fails closed without creating a companion for mismatched %s-only preparation",
+    async (existing) => {
+      const { root, queryId, question } = await approvedBrain(
+        `Mismatched ${existing}?`,
+      );
+      const content = encoder.encode("prepared bytes\n");
+      const digest = sha256(content).slice(0, 12);
+      const retrievedAt = "2026-08-30T09:05:00.000Z";
+      const sourcePath = `sources/web/2026/08/mismatch-${digest}.txt`;
+      const sidecarPath = `sources/web/2026/08/.mismatch-${digest}.txt.web.json`;
+      const wrongArtifact = Buffer.from("wrong prepared bytes\n");
+      const wrongSidecar = renderWebArtifactSidecar({
+        ...preparedArtifactSidecar({
+          sourcePath,
+          content,
+          title: "Mismatched prepared title",
+          retrievedAt,
+          queryId,
+          question,
+          originalUrl: "https://example.test/mismatch.txt",
+        }),
+      });
+      await mkdir(path.dirname(path.join(root, sourcePath)), {
+        recursive: true,
+      });
+      if (existing === "artifact") {
+        await writeFile(path.join(root, sourcePath), wrongArtifact);
+      } else {
+        await writeFile(path.join(root, sidecarPath), wrongSidecar);
+      }
+
       await expect(
         captureWebEvidence(root, queryId, {
           representation: "artifact",
-          originalUrl: "https://example.test/prepared.txt",
-          title: "Prepared",
-          fileName: "prepared.txt",
+          originalUrl: "https://example.test/mismatch.txt",
+          title: "Mismatch",
+          fileName: "mismatch.txt",
           responseComplete: true,
-          content: bytes,
-          retrievedAt: "2026-08-30T09:00:00.000Z",
+          content,
+          retrievedAt,
         }),
-      ).rejects.toThrow(/prepared|pair|bytes|sidecar/i);
-      expect(await webFiles(root)).toContain(
-        failure === "sidecar-only" ? sidecarPath : sourcePath,
+      ).rejects.toThrow(/prepared|pair|bytes|sidecar|length/i);
+      expect(await webFiles(root)).toEqual([
+        existing === "artifact" ? sourcePath : sidecarPath,
+      ]);
+      expect(
+        await readFile(
+          path.join(root, existing === "artifact" ? sourcePath : sidecarPath),
+        ),
+      ).toEqual(
+        existing === "artifact" ? wrongArtifact : Buffer.from(wrongSidecar),
       );
-    }
+      expect(
+        (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+      ).toEqual([]);
+    },
+  );
+
+  test("resumes crashes after each prepared artifact-pair write before query linkage", async () => {
+    const { root, queryId } = await approvedBrain("Crash-resumable pair?");
+    const content = encoder.encode("crash-resumable bytes\n");
+    const digest = sha256(content).slice(0, 12);
+    const sourcePath = `sources/web/2026/08/crash-resumable-${digest}.txt`;
+    const sidecarPath = `sources/web/2026/08/.crash-resumable-${digest}.txt.web.json`;
+    const input = {
+      representation: "artifact" as const,
+      originalUrl: "https://example.test/crash-resumable.txt",
+      title: "Crash resumable",
+      fileName: "crash-resumable.txt",
+      responseComplete: true as const,
+      content,
+      retrievedAt: "2026-08-30T09:10:00.000Z",
+    };
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      captureWebEvidence(root, queryId, input, {
+        afterArtifactPairWrite(kind) {
+          throw new Error(`Simulated crash after ${kind}`);
+        },
+      }),
+    ).rejects.toThrow(/simulated crash after sidecar/i);
+    expect(await webFiles(root)).toEqual([sidecarPath]);
+    expect(
+      (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+    ).toEqual([]);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+
+    await expect(
+      captureWebEvidence(root, queryId, input, {
+        afterArtifactPairWrite(kind) {
+          if (kind === "artifact") {
+            throw new Error("Simulated crash after artifact");
+          }
+        },
+      }),
+    ).rejects.toThrow(/simulated crash after artifact/i);
+    expect(await webFiles(root)).toEqual([sidecarPath, sourcePath].sort());
+    expect(
+      (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+    ).toEqual([]);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+
+    const resumed = await captureWebEvidence(root, queryId, input);
+    expect(resumed).toMatchObject({
+      created: true,
+      source: { path: sourcePath },
+    });
+    expect(resumed.session.webEvidenceSourceIds).toEqual([resumed.source.id]);
   });
 
   test("retries omitted timestamps, writer locks, crashes, and session writes deterministically", async () => {

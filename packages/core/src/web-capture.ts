@@ -155,6 +155,10 @@ export interface WebCaptureTestOptions {
     relativePath: string,
     bytesRead: number,
   ) => Promise<void> | void;
+  /** Simulates interruption after one newly prepared artifact-pair file. */
+  afterArtifactPairWrite?: (
+    kind: "artifact" | "sidecar",
+  ) => Promise<void> | void;
 }
 
 function sha256(value: Uint8Array | string): string {
@@ -205,6 +209,29 @@ async function filesNamed(
       matches.push(absolutePath);
   }
   return matches;
+}
+
+async function preparedArtifactSourcePaths(
+  root: string,
+  fileName: string,
+): Promise<string[]> {
+  const directory = path.join(root, "sources", "web");
+  const [artifactPaths, sidecarPaths] = await Promise.all([
+    filesNamed(directory, fileName),
+    filesNamed(directory, `.${fileName}.web.json`),
+  ]);
+  return [
+    ...new Set([
+      ...artifactPaths,
+      ...sidecarPaths.map((sidecarPath) =>
+        path.join(path.dirname(sidecarPath), fileName),
+      ),
+    ]),
+  ]
+    .map((absolutePath) =>
+      path.relative(root, absolutePath).split(path.sep).join("/"),
+    )
+    .sort();
 }
 
 function captureRelativePath(retrievedAt: string, fileName: string): string {
@@ -557,6 +584,11 @@ async function ensureWebPreparationParent(
   return { paths, absolutePath };
 }
 
+interface PreparedWebFile {
+  content: Buffer;
+  modifiedAt: string;
+}
+
 async function readContainedOptional(
   paths: WebPreparationPaths,
   relativePath: string,
@@ -565,7 +597,7 @@ async function readContainedOptional(
     relativePath: string,
     bytesRead: number,
   ) => Promise<void> | void,
-): Promise<Buffer | undefined> {
+): Promise<PreparedWebFile | undefined> {
   const absolutePath = webPreparationAbsolutePath(paths, relativePath);
   await assertWebDirectoryChain(paths, path.dirname(absolutePath));
   let metadata: BigIntStats;
@@ -641,7 +673,12 @@ async function readContainedOptional(
     ) {
       throw new Error(`Prepared web capture path changed: ${relativePath}`);
     }
-    return content;
+    return {
+      content,
+      modifiedAt: new Date(
+        Number(finalOpened.mtimeNs / 1_000_000n),
+      ).toISOString(),
+    };
   } finally {
     await handle.close();
   }
@@ -717,13 +754,14 @@ async function prepareArtifactPair(
     relativePath: string,
     bytesRead: number,
   ) => Promise<void> | void,
+  afterWrite?: (kind: "artifact" | "sidecar") => Promise<void> | void,
 ): Promise<void> {
   const { paths } = await ensureWebPreparationParent(root, sourcePath);
   const companion = await ensureWebPreparationParent(root, sidecarPath);
   if (companion.paths.realSources !== paths.realSources) {
     throw new Error("Web artifact pair parents changed during preparation");
   }
-  const assertExistingPair = async () => {
+  const readPair = async () => {
     const [existingArtifact, existingSidecar] = await Promise.all([
       readContainedOptional(
         paths,
@@ -738,33 +776,31 @@ async function prepareArtifactPair(
         afterReadProgress,
       ),
     ]);
+    return { existingArtifact, existingSidecar };
+  };
+  const assertExistingPair = async () => {
+    const { existingArtifact, existingSidecar } = await readPair();
     if (
       !existingArtifact ||
       !existingSidecar ||
-      !bytesEqual(existingArtifact, artifact) ||
-      !bytesEqual(existingSidecar, sidecar)
+      !bytesEqual(existingArtifact.content, artifact) ||
+      !bytesEqual(existingSidecar.content, sidecar)
     ) {
       throw new Error(
         `Prepared web artifact pair bytes do not match the requested capture: ${sourcePath}, ${sidecarPath}`,
       );
     }
   };
-  const [existingArtifact, existingSidecar] = await Promise.all([
-    readContainedOptional(
-      paths,
-      sourcePath,
-      artifact.byteLength,
-      afterReadProgress,
-    ),
-    readContainedOptional(
-      paths,
-      sidecarPath,
-      sidecar.byteLength,
-      afterReadProgress,
-    ),
-  ]);
-  if (existingArtifact || existingSidecar) {
-    await assertExistingPair();
+  const { existingArtifact, existingSidecar } = await readPair();
+  if (
+    (existingArtifact && !bytesEqual(existingArtifact.content, artifact)) ||
+    (existingSidecar && !bytesEqual(existingSidecar.content, sidecar))
+  ) {
+    throw new Error(
+      `Prepared web artifact pair bytes do not match the requested capture: ${sourcePath}, ${sidecarPath}`,
+    );
+  }
+  if (existingArtifact && existingSidecar) {
     return;
   }
   await beforeCreate?.();
@@ -773,12 +809,18 @@ async function prepareArtifactPair(
     path.dirname(webPreparationAbsolutePath(paths, sourcePath)),
   );
   try {
-    await createContainedFile(paths, sourcePath, artifact);
-    await assertWebDirectoryChain(
-      paths,
-      path.dirname(webPreparationAbsolutePath(paths, sidecarPath)),
-    );
-    await createContainedFile(paths, sidecarPath, sidecar);
+    if (!existingSidecar) {
+      await createContainedFile(paths, sidecarPath, sidecar);
+      await afterWrite?.("sidecar");
+    }
+    if (!existingArtifact) {
+      await assertWebDirectoryChain(
+        paths,
+        path.dirname(webPreparationAbsolutePath(paths, sourcePath)),
+      );
+      await createContainedFile(paths, sourcePath, artifact);
+      await afterWrite?.("artifact");
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     await assertExistingPair();
@@ -804,7 +846,7 @@ async function prepareText(
     afterReadProgress,
   );
   if (existing) {
-    if (existing.toString("utf8") !== content) {
+    if (existing.content.toString("utf8") !== content) {
       throw new Error(
         `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
       );
@@ -828,7 +870,7 @@ async function prepareText(
           contentBytes.byteLength,
           afterReadProgress,
         )
-      )?.toString("utf8") !== content
+      )?.content.toString("utf8") !== content
     ) {
       throw new Error(
         `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
@@ -960,28 +1002,50 @@ export async function captureWebEvidence(
         let retrievedAt = input.retrievedAt ?? new Date().toISOString();
         let sourcePath = captureRelativePath(retrievedAt, fileName);
         if (!input.retrievedAt) {
-          const preparedPaths = await filesNamed(
-            path.join(root, "sources", "web"),
+          const preparedPaths = await preparedArtifactSourcePaths(
+            root,
             fileName,
           );
           if (preparedPaths.length > 1)
             throw new Error(
               `Multiple prepared web captures exist: ${fileName}`,
             );
-          const preparedPath = preparedPaths[0];
-          if (preparedPath) {
-            sourcePath = path
-              .relative(root, preparedPath)
-              .split(path.sep)
-              .join("/");
-            const sidecar = parseWebArtifactSidecar(
-              await readFile(
-                path.join(root, webArtifactSidecarPath(sourcePath)),
-                "utf8",
-              ),
+          const preparedSourcePath = preparedPaths[0];
+          if (preparedSourcePath) {
+            sourcePath = preparedSourcePath;
+            const sidecarPath = webArtifactSidecarPath(sourcePath);
+            const { paths } = await ensureWebPreparationParent(
+              root,
               sourcePath,
             );
-            retrievedAt = sidecar.discovery.retrievedAt;
+            const preparedSidecar = await readContainedOptional(
+              paths,
+              sidecarPath,
+              config.sources.maxFileBytes,
+              testOptions.afterPreparedReadProgress,
+            );
+            if (preparedSidecar) {
+              retrievedAt = parseWebArtifactSidecar(
+                preparedSidecar.content.toString("utf8"),
+                sourcePath,
+              ).discovery.retrievedAt;
+            } else {
+              const preparedArtifact = await readContainedOptional(
+                paths,
+                sourcePath,
+                artifactContent.byteLength,
+                testOptions.afterPreparedReadProgress,
+              );
+              if (
+                !preparedArtifact ||
+                !bytesEqual(preparedArtifact.content, artifactContent)
+              ) {
+                throw new Error(
+                  `Prepared web artifact bytes do not match the requested capture: ${sourcePath}`,
+                );
+              }
+              retrievedAt = preparedArtifact.modifiedAt;
+            }
             if (captureRelativePath(retrievedAt, fileName) !== sourcePath) {
               throw new Error(
                 `Prepared web evidence path does not match its retrieval time: ${sourcePath}`,
@@ -1020,6 +1084,7 @@ export async function captureWebEvidence(
           sidecarBytes,
           testOptions.beforePreparationCreate,
           testOptions.afterPreparedReadProgress,
+          testOptions.afterArtifactPairWrite,
         );
         return { sourcePath, discovery };
       },
