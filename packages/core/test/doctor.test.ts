@@ -1,6 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  mkdir,
   mkdtemp,
   open,
   readdir,
@@ -64,6 +65,13 @@ async function setMaxFileBytes(root: string, maxFileBytes: number) {
   const configPath = path.join(root, "brain.config.yaml");
   const config = parse(await readFile(configPath, "utf8"));
   config.sources.maxFileBytes = maxFileBytes;
+  await writeFile(configPath, stringify(config));
+}
+
+async function setSourceRoots(root: string, roots: string[]) {
+  const configPath = path.join(root, "brain.config.yaml");
+  const config = parse(await readFile(configPath, "utf8"));
+  config.sources.roots = roots;
   await writeFile(configPath, stringify(config));
 }
 
@@ -322,5 +330,118 @@ describe("doctor registered-source integrity", () => {
       }),
     );
     expect(readProgress).toEqual([0]);
+  });
+});
+
+describe("doctor source-root safety", () => {
+  test("reports a default sources symlink as a controlled fatal issue without reading outside", async () => {
+    const root = await initializedBrain();
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-doctor-root-outside-"),
+    );
+    await writeFile(
+      path.join(outside, "private.md"),
+      "# Private\n\nOutside.\n",
+    );
+    await rm(path.join(root, "sources"), { recursive: true });
+    await symlink(outside, path.join(root, "sources"), "dir");
+    const outsideBefore = await treeSnapshot(outside);
+    const cacheBefore = await treeSnapshot(path.join(root, ".brain", "cache"));
+
+    const report = await doctorBrain(root);
+
+    expect(report).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_ROOT_UNSAFE",
+          severity: "error",
+          path: "sources",
+        }),
+      ]),
+    });
+    expect(await treeSnapshot(outside)).toEqual(outsideBefore);
+    expect(await treeSnapshot(path.join(root, ".brain", "cache"))).toEqual(
+      cacheBefore,
+    );
+  });
+
+  test("reports an intermediate configured-root symlink without reading outside", async () => {
+    const root = await initializedBrain();
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-doctor-ancestor-outside-"),
+    );
+    await mkdir(path.join(outside, "nested"));
+    await writeFile(
+      path.join(outside, "nested", "private.md"),
+      "# Private\n\nOutside.\n",
+    );
+    await setSourceRoots(root, ["imports/raw/nested"]);
+    await symlink(outside, path.join(root, "imports"), "dir");
+    const outsideBefore = await treeSnapshot(outside);
+    const cacheBefore = await treeSnapshot(path.join(root, ".brain", "cache"));
+
+    const report = await doctorBrain(root);
+
+    expect(report).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_ROOT_UNSAFE",
+          severity: "error",
+          path: "imports/raw/nested",
+        }),
+      ]),
+    });
+    expect(await treeSnapshot(outside)).toEqual(outsideBefore);
+    expect(await treeSnapshot(path.join(root, ".brain", "cache"))).toEqual(
+      cacheBefore,
+    );
+  });
+
+  test("keeps a missing required sources directory as LAYOUT_MISSING", async () => {
+    const root = await initializedBrain();
+    await rm(path.join(root, "sources"), { recursive: true });
+
+    const report = await doctorBrain(root);
+
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "LAYOUT_MISSING",
+        severity: "error",
+        path: "sources",
+      }),
+    );
+    expect(report.issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCE_ROOT_UNSAFE" }),
+      ]),
+    );
+  });
+
+  test("keeps an absent optional configured root nonfatal and onboarding warnings ordinary", async () => {
+    const root = await initializedBrain();
+    await setSourceRoots(root, ["optional/evidence"]);
+
+    const report = await doctorBrain(root);
+
+    expect(report.ok).toBe(true);
+    expect(report.issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCE_ROOT_UNSAFE" }),
+      ]),
+    );
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCES_EMPTY",
+          severity: "warning",
+        }),
+        expect.objectContaining({
+          code: "SETUP_INCOMPLETE",
+          severity: "warning",
+        }),
+      ]),
+    );
   });
 });

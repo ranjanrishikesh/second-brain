@@ -5,13 +5,17 @@ import { access, lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { ZodError, z } from "zod";
-import { loadBrainConfig } from "./config.js";
+import { type BrainConfigV1, loadBrainConfig } from "./config.js";
 import {
   inspectBrainCharter,
   inspectOnboarding,
   inspectSetupCompletionIntegrity,
   inspectSourceDuplicateAcknowledgements,
 } from "./onboarding.js";
+import {
+  effectiveSourceRoots,
+  inspectRepositoryEntry,
+} from "./sources/path-safety.js";
 import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import { brainStateV1Schema } from "./state.js";
 import { syncStatus } from "./sync.js";
@@ -82,6 +86,39 @@ function sourceIssue(
     message,
     path: source.path,
   };
+}
+
+function unsafeSourceRootIssue(
+  sourceRoot: string,
+  error: unknown,
+): DoctorIssue {
+  return {
+    code: "SOURCE_ROOT_UNSAFE",
+    severity: "error",
+    message: `Configured source root is unsafe: ${errorMessage(error)}`,
+    path: sourceRoot,
+  };
+}
+
+async function inspectConfiguredSourceRoots(
+  root: string,
+  sourceRoots: readonly string[],
+): Promise<DoctorIssue[]> {
+  const issues: DoctorIssue[] = [];
+  for (const sourceRoot of effectiveSourceRoots(sourceRoots)) {
+    try {
+      await inspectRepositoryEntry(
+        root,
+        sourceRoot,
+        "directory",
+        `Source root ${sourceRoot}`,
+        true,
+      );
+    } catch (error) {
+      issues.push(unsafeSourceRootIssue(sourceRoot, error));
+    }
+  }
+  return issues;
 }
 
 function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
@@ -265,9 +302,10 @@ export async function doctorBrain(
   testOptions: DoctorTestOptions = {},
 ): Promise<DoctorReport> {
   const issues: DoctorIssue[] = [];
+  let config: BrainConfigV1 | undefined;
   let maxFileBytes = 0;
   try {
-    const config = await loadBrainConfig(root);
+    config = await loadBrainConfig(root);
     maxFileBytes = config.sources.maxFileBytes;
   } catch (error) {
     const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -559,8 +597,14 @@ export async function doctorBrain(
       });
     }
   } catch {
+    if (config) {
+      issues.push(
+        ...(await inspectConfiguredSourceRoots(root, config.sources.roots)),
+      );
+    }
     // Existing fatal configuration, manifest, or state issues already explain
-    // why derived onboarding diagnostics are unavailable.
+    // other unavailable derived onboarding diagnostics. Unsafe source roots
+    // are classified above by the canonical source-path validator.
   }
 
   return { ok: issues.every((issue) => issue.severity !== "error"), issues };
