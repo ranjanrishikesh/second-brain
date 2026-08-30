@@ -71,7 +71,7 @@ Classify the situation before proposing an external issue:
 
 Use the configured support destination, not the cloned repository's `origin`. Before any external issue is created, prepare a concise draft; remove source bytes, source excerpts, personal filenames, absolute local paths, credentials, secrets, and private brain content; show the exact destination and sanitized draft; and obtain explicit approval for that issue. Only then may authenticated host tooling create it. If authenticated tooling is unavailable, provide the canonical link and sanitized draft for the owner.
 
-Say: **“This request may be considered for a future release.”** Never promise acceptance, a version, a date, or inclusion in the “next release.” Issue creation is never automatic during onboarding, queries, source scanning, or diagnostics.
+Say: **“This request may be considered for a future release.”** only when offering an unsupported-capability request. Never use it for a knowledge gap or an unexpected failure. Never promise acceptance, a version, a date, or inclusion in the “next release.” Issue creation is never automatic during onboarding, queries, source scanning, or diagnostics.
 
 ## Synchronization and final answer
 

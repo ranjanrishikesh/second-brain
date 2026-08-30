@@ -120,6 +120,20 @@ describe("shared Codex and Claude onboarding contract", () => {
     },
   );
 
+  it.each(["AGENTS.md", ".agents/skills/second-brain/SKILL.md"])(
+    "%s limits future-release wording to unsupported-capability requests",
+    async (path) => {
+      const contract = await readRepositoryFile(path);
+
+      expect(contract).toContain(
+        "only when offering an unsupported-capability request",
+      );
+      expect(contract).toContain(
+        "Never use it for a knowledge gap or an unexpected failure.",
+      );
+    },
+  );
+
   it("provides a privacy-safe capability request form", async () => {
     const form = parse(
       await readRepositoryFile(
