@@ -596,7 +596,16 @@ describe("query lifecycle", () => {
       content: "The concurrent survey found a candidate.",
     };
     const digest = createHash("sha256")
-      .update(`${input.url}\0${input.content}`)
+      .update(
+        JSON.stringify([
+          input.url,
+          input.url,
+          [],
+          input.captureKind,
+          "complete",
+          input.content,
+        ]),
+      )
       .digest("hex")
       .slice(0, 12);
     const evidenceName = `concurrent-capture-${digest}.md`;

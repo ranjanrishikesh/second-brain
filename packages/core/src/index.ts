@@ -207,15 +207,23 @@ export type {
   ConfigureSyncTargetResult,
 } from "./sync.js";
 export {
+  enrichSourceWebDiscovery,
   scanAndRegisterSources,
   supersedeRegisteredSource,
 } from "./source-transaction.js";
-export type { SourceSupersessionResult } from "./source-transaction.js";
+export type {
+  SourceSupersessionResult,
+  SourceWebDiscoveryEnrichmentResult,
+} from "./source-transaction.js";
 export { captureWebEvidence } from "./web-capture.js";
 export type {
   WebCaptureInput,
+  WebCaptureProvenanceV1,
   WebCaptureResult,
   WebCaptureTestOptions,
+  WebArtifactCaptureInputV1,
+  WebTextCaptureInputV1,
+  LegacyWebCaptureInput,
 } from "./web-capture.js";
 export { attachQueryChange, finishQuery } from "./query-finish.js";
 export type {

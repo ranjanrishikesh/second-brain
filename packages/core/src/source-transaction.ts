@@ -6,7 +6,11 @@ import path from "node:path";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
-import type { SourceRecordV1 } from "./sources/types.js";
+import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import {
+  webDiscoveryV1Schema,
+  type WebDiscoveryV1,
+} from "./sources/web-evidence.js";
 import { readBrainState } from "./state.js";
 import {
   runCanonicalWrite,
@@ -394,6 +398,127 @@ export async function scanAndRegisterSources(
     },
   );
   return transaction.value;
+}
+
+export interface SourceWebDiscoveryEnrichmentResult {
+  source: SourceRecordV1;
+  operationId?: string;
+  commit?: string;
+  changed: boolean;
+}
+
+function compareWebDiscoveries(
+  left: WebDiscoveryV1,
+  right: WebDiscoveryV1,
+): number {
+  return (
+    left.retrievedAt.localeCompare(right.retrievedAt) ||
+    left.originalUrl.localeCompare(right.originalUrl) ||
+    left.queryId.localeCompare(right.queryId) ||
+    left.finalUrl.localeCompare(right.finalUrl) ||
+    JSON.stringify(left.redirectChain).localeCompare(
+      JSON.stringify(right.redirectChain),
+    )
+  );
+}
+
+/**
+ * Adds one immutable evidence discovery without changing the source or its
+ * sealed artifact sidecar. The manifest is re-read only after the canonical
+ * writer lock is held, so concurrent enrichments cannot replace one another.
+ */
+export async function enrichSourceWebDiscovery(
+  root: string,
+  sourceId: string,
+  rawDiscovery: WebDiscoveryV1,
+  testOptions: TransactionTestOptions = {},
+): Promise<SourceWebDiscoveryEnrichmentResult> {
+  const discovery = webDiscoveryV1Schema.parse(rawDiscovery);
+  const operationId = `op_web_capture_${randomUUID().replaceAll("-", "")}`;
+  const transaction = await runCanonicalWrite<{
+    source: SourceRecordV1;
+    changed: boolean;
+  }>(
+    root,
+    {
+      operationId,
+      commitMessage: `brain(web): record discovery for ${sourceId} [op:${operationId}]`,
+      testOptions,
+    },
+    async (writer) => {
+      const manifestPath = path.join(root, ".brain", "source-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        version: 1;
+        sources: unknown[];
+      };
+      const sources = manifest.sources.map((item) =>
+        sourceRecordV1Schema.parse(item),
+      );
+      const index = sources.findIndex((source) => source.id === sourceId);
+      if (index < 0) throw new Error(`Unknown source: ${sourceId}`);
+      const current = sources[index] as SourceRecordV1;
+      const existing = current.provenance.webDiscoveries ?? [];
+      if (
+        existing.some(
+          (candidate) =>
+            JSON.stringify(candidate) === JSON.stringify(discovery),
+        )
+      ) {
+        return {
+          value: { source: current, changed: false },
+          stagePaths: [],
+        };
+      }
+      const updated = sourceRecordV1Schema.parse({
+        ...current,
+        provenance: {
+          ...current.provenance,
+          webDiscoveries: [...existing, discovery].sort(compareWebDiscoveries),
+        },
+      });
+      sources[index] = updated;
+      await writer.writeText(
+        ".brain/source-manifest.json",
+        `${JSON.stringify({ version: 1, sources }, null, 2)}\n`,
+      );
+      const now = new Date().toISOString();
+      const operation: OperationRecordV1 = {
+        version: 1,
+        id: operationId,
+        kind: "web-capture",
+        status: "completed",
+        startedAt: now,
+        completedAt: now,
+        summary: `Recorded web discovery for ${sourceId}`,
+        pageIds: [],
+        tiersUsed: ["web"],
+        queryId: discovery.queryId,
+      };
+      const operationsPath = path.join(root, ".brain", "operations.jsonl");
+      await writer.writeText(
+        ".brain/operations.jsonl",
+        `${await readFile(operationsPath, "utf8")}${JSON.stringify(operation)}\n`,
+      );
+      const logPath = path.join(root, "wiki", "log.md");
+      await writer.writeText(
+        "wiki/log.md",
+        `${(await readFile(logPath, "utf8")).trimEnd()}\n\n## [${now}] web-capture | Recorded discovery\n\n- Operation: \`${operationId}\`\n- Source: \`${sourceId}\`\n- Query: \`${discovery.queryId}\`\n- URL: ${discovery.originalUrl}\n`,
+      );
+      return {
+        value: { source: updated, changed: true },
+        stagePaths: [
+          ".brain/source-manifest.json",
+          ".brain/operations.jsonl",
+          "wiki/log.md",
+        ],
+      };
+    },
+  );
+  return {
+    ...transaction.value,
+    ...(transaction.value.changed ? { operationId } : {}),
+    ...(transaction.commit ? { commit: transaction.commit } : {}),
+  };
 }
 
 export interface SourceSupersessionResult {
