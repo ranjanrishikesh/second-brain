@@ -1,6 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -638,6 +646,56 @@ describe("scanSources", () => {
     await expect(scanSources(root)).rejects.toThrow(/sidecar.*missing/i);
   });
 
+  test("rejects a web artifact sidecar symlink outside the sources tree", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-sidecar-link-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Sidecar symlink test",
+    });
+    const bytes = await textPdf();
+    const { sidecarPath } = await writeWebArtifact(
+      root,
+      "orbits-0123456789ab.pdf",
+      bytes,
+    );
+    const sidecarBytes = await readFile(path.join(root, sidecarPath));
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-web-sidecar-outside-"),
+    );
+    const outsideSidecar = path.join(outside, "sidecar.json");
+    await writeFile(outsideSidecar, sidecarBytes);
+    await rm(path.join(root, sidecarPath));
+    await symlink(outsideSidecar, path.join(root, sidecarPath));
+
+    await expect(scanSources(root)).rejects.toThrow(
+      /sidecar.*(?:regular|symlink|sources tree)/i,
+    );
+  });
+
+  test("rejects an oversized web artifact sidecar before reading it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-sidecar-size-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Sidecar size test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 1_024;
+    await writeFile(configPath, stringify(config));
+    const bytes = new TextEncoder().encode("Small artifact.\n");
+    const sourcePath = `${webArtifactDirectory}/orbits-0123456789ab.txt`;
+    await writeWebArtifact(root, "orbits-0123456789ab.txt", bytes, {
+      ...artifactSidecar(sourcePath, bytes),
+      title: "A".repeat(2_000),
+      format: "text",
+      mediaType: "text/plain",
+    });
+
+    await expect(scanSources(root)).rejects.toThrow(
+      /sidecar exceeds.*1024 bytes/i,
+    );
+  });
+
   test.each([
     [
       "a different source path",
@@ -733,6 +791,37 @@ describe("scanSources", () => {
     expect(await readFile(manifestPath, "utf8")).toBe(before);
   });
 
+  test("rejects an oversized web artifact before reading it for hashing", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-size-order-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Web size validation order test",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 16;
+    await writeFile(configPath, stringify(config));
+    const bytes = new TextEncoder().encode(
+      "This artifact exceeds the configured maximum.\n",
+    );
+    const { sourcePath } = await writeWebArtifact(
+      root,
+      "orbits-0123456789ab.txt",
+      bytes,
+      {
+        ...artifactSidecar(
+          `${webArtifactDirectory}/orbits-0123456789ab.txt`,
+          bytes,
+        ),
+        format: "text",
+        mediaType: "text/plain",
+      },
+    );
+    await chmod(path.join(root, sourcePath), 0o000);
+
+    await expect(scanSources(root)).rejects.toThrow(/exceeds.*16 bytes/i);
+  });
+
   test.each([
     ["spoofed", new TextEncoder().encode("not a PDF"), /PDF.*signature/i],
     ["malformed", new TextEncoder().encode("%PDF-1.7\nmalformed"), /pdf/i],
@@ -752,6 +841,121 @@ describe("scanSources", () => {
       expect(await readFile(manifestPath, "utf8")).toBe(before);
     },
   );
+
+  test("rejects a malformed web artifact before duplicate classification", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-duplicate-pdf-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Malformed duplicate web PDF test",
+    });
+    const bytes = new TextEncoder().encode("%PDF-1.7\nmalformed");
+    await writeFile(path.join(root, "sources", "malformed.pdf"), bytes);
+    await scanSources(root);
+    await writeWebArtifact(root, "orbits-0123456789ab.pdf", bytes);
+
+    await expect(scanSources(root)).rejects.toThrow(
+      /Invalid web artifact.*PDF/i,
+    );
+  });
+
+  test.each([
+    ["JSON", "json", "application/json", new TextEncoder().encode("{not-json")],
+    [
+      "DOCX",
+      "docx",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00]),
+    ],
+    [
+      "EPUB",
+      "epub",
+      "application/epub+zip",
+      new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00]),
+    ],
+  ])(
+    "rejects malformed %s before web duplicate classification",
+    async (_label, extension, mediaType, bytes) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "brain-web-duplicate-structure-"),
+      );
+      await initBrain(root, {
+        name: "Test",
+        description: "Malformed duplicate web structure test",
+      });
+      await writeFile(
+        path.join(root, "sources", `malformed.${extension}`),
+        bytes,
+      );
+      await scanSources(root);
+      const fileName = `orbits-0123456789ab.${extension}`;
+      const sourcePath = `${webArtifactDirectory}/${fileName}`;
+      await writeWebArtifact(root, fileName, bytes, {
+        ...artifactSidecar(sourcePath, bytes),
+        format: extension,
+        mediaType,
+      });
+
+      await expect(scanSources(root)).rejects.toThrow(/Invalid web artifact/i);
+    },
+  );
+
+  test("rejects a malformed web artifact before registered-path classification", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-web-registered-pdf-"),
+    );
+    await initBrain(root, {
+      name: "Test",
+      description: "Malformed registered web PDF test",
+    });
+    const bytes = new TextEncoder().encode("%PDF-1.7\nmalformed");
+    const { sourcePath, sidecarPath } = await writeWebArtifact(
+      root,
+      "orbits-0123456789ab.pdf",
+      bytes,
+    );
+    const artifactSha256 = sha256(bytes);
+    const sidecarBytes = await readFile(path.join(root, sidecarPath));
+    await writeFile(
+      path.join(root, ".brain", "source-manifest.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          sources: [
+            {
+              version: 1,
+              id: `src_${artifactSha256.slice(0, 16)}`,
+              sha256: artifactSha256,
+              path: sourcePath,
+              title: "Orbital Report",
+              mediaType: "application/pdf",
+              bytes: bytes.byteLength,
+              discoveredAt: "2026-08-30T00:00:00.000Z",
+              extractionStatus: "failed",
+              extractor: "pdf-v1",
+              error: "Legacy malformed artifact",
+              provenance: {
+                kind: "web",
+                url: "https://example.com/orbits.pdf",
+                retrievedAt: "2026-08-30T00:00:00.000Z",
+                query: "What does the orbit report conclude?",
+                completeness: "complete",
+                representation: "artifact",
+                sidecarPath,
+                sidecarSha256: sha256(sidecarBytes),
+                sidecarBytes: sidecarBytes.byteLength,
+              },
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await expect(scanSources(root)).rejects.toThrow(
+      /Invalid web artifact.*PDF/i,
+    );
+  });
 
   test("registers an image-only web PDF as extraction-required", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-web-image-pdf-"));

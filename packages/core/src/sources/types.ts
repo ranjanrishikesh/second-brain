@@ -128,5 +128,8 @@ export interface SourceScanResult {
     sourceId: string;
     sha256: string;
     bytes: number;
+    sidecarPath?: string;
+    sidecarSha256?: string;
+    sidecarBytes?: number;
   }>;
 }

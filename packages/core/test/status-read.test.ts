@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -195,6 +203,110 @@ describe("brain status and reading", () => {
       expect.objectContaining({ path: "sources/copy.md" }),
     ]);
     expect((await readBrainState(root)).sourceDuplicates).toEqual([]);
+  });
+
+  test.each(["mutated", "deleted", "redirected outside"] as const)(
+    "reports a %s duplicate web sidecar through duplicate integrity",
+    async (condition) => {
+      const root = await initializedBrain("Duplicate web sources");
+      const artifactBytes = new TextEncoder().encode(
+        "Shared web artifact evidence.\n",
+      );
+      await writeFile(
+        path.join(root, "sources", "original.txt"),
+        artifactBytes,
+      );
+      await scanAndRegisterSources(root);
+      const sourcePath = "sources/web/2026/08/copy.txt";
+      const sidecarPath = "sources/web/2026/08/.copy.txt.web.json";
+      await mkdir(path.join(root, path.dirname(sourcePath)), {
+        recursive: true,
+      });
+      await writeFile(path.join(root, sourcePath), artifactBytes);
+      const sidecar = {
+        brainWebArtifact: 1,
+        sourcePath,
+        artifactSha256: createHash("sha256")
+          .update(artifactBytes)
+          .digest("hex"),
+        artifactBytes: artifactBytes.byteLength,
+        title: "Alpha",
+        format: "text",
+        mediaType: "text/plain",
+        discovery: {
+          originalUrl: "https://example.com/copy.txt",
+          finalUrl: "https://example.com/copy.txt",
+          redirectChain: [],
+          retrievedAt: "2026-08-30T00:00:00.000Z",
+          queryId: "qry_0123456789abcdef0123456789abcdef",
+          questionHash: "c".repeat(64),
+          query: "What does the shared evidence say?",
+          representation: "artifact",
+          completeness: "complete",
+        },
+      };
+      await writeFile(
+        path.join(root, sidecarPath),
+        `${JSON.stringify(sidecar, null, 2)}\n`,
+      );
+      await scanAndRegisterSources(root);
+      if (condition === "mutated") {
+        sidecar.title = "Bravo";
+        await writeFile(
+          path.join(root, sidecarPath),
+          `${JSON.stringify(sidecar, null, 2)}\n`,
+        );
+      } else if (condition === "deleted") {
+        await rm(path.join(root, sidecarPath));
+        expect(await inspectOnboarding(root)).toMatchObject({
+          phase: "sources-unregistered",
+          nextAction: "scan-sources",
+        });
+      } else {
+        const outside = await mkdtemp(
+          path.join(tmpdir(), "brain-duplicate-sidecar-outside-"),
+        );
+        await writeFile(
+          path.join(outside, "sidecar.json"),
+          await readFile(path.join(root, sidecarPath)),
+        );
+        await symlink(outside, path.join(root, "sources", "sidecar-link"));
+        const statePath = path.join(root, ".brain", "state.json");
+        const state = JSON.parse(await readFile(statePath, "utf8"));
+        state.sourceDuplicates[0].sidecarPath =
+          "sources/sidecar-link/sidecar.json";
+        await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+      }
+
+      expect(await doctorBrain(root)).toMatchObject({
+        ok: false,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "SOURCE_DUPLICATE_MISMATCH",
+            severity: "error",
+            path: sourcePath,
+          }),
+        ]),
+      });
+    },
+  );
+
+  test("rejects a partial duplicate sidecar acknowledgement", async () => {
+    const root = await initializedBrain("Partial duplicate sidecar");
+    const statePath = path.join(root, ".brain", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.sourceDuplicates = [
+      {
+        path: "sources/web/2026/08/copy.txt",
+        sourceId: "src_0123456789abcdef",
+        sha256: "a".repeat(64),
+        bytes: 12,
+        sidecarPath: "sources/web/2026/08/.copy.txt.web.json",
+      },
+    ];
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    await expect(readBrainState(root)).rejects.toThrow(/sidecar/i);
   });
 
   test("reports blocked extraction, pending charter, active setup, and completed setup", async () => {

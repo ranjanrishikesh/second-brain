@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "../config.js";
 import { calculateExtractedSourceSha256 } from "./cache-integrity.js";
@@ -64,6 +73,84 @@ async function sha256File(filePath: string): Promise<string> {
   });
 }
 
+async function readBoundedWebSidecar(
+  root: string,
+  relativePath: string,
+  maxFileBytes: number,
+): Promise<Buffer | undefined> {
+  const absolutePath = path.join(root, relativePath);
+  let metadata: Awaited<ReturnType<typeof lstat>>;
+  try {
+    metadata = await lstat(absolutePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(
+      `Web artifact sidecar must be a regular non-symlink file: ${relativePath}`,
+    );
+  }
+  if (metadata.size > maxFileBytes) {
+    throw new Error(
+      `Web artifact sidecar exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
+    );
+  }
+  const [realRoot, realSources, realSidecar] = await Promise.all([
+    realpath(root),
+    realpath(path.join(root, "sources")),
+    realpath(absolutePath),
+  ]);
+  if (
+    !realSources.startsWith(`${realRoot}${path.sep}`) ||
+    !realSidecar.startsWith(`${realSources}${path.sep}`)
+  ) {
+    throw new Error(
+      `Web artifact sidecar must stay inside the brain sources tree: ${relativePath}`,
+    );
+  }
+  const handle = await open(
+    absolutePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const openedMetadata = await handle.stat();
+    if (!openedMetadata.isFile()) {
+      throw new Error(
+        `Web artifact sidecar must be a regular file: ${relativePath}`,
+      );
+    }
+    if (openedMetadata.size > maxFileBytes) {
+      throw new Error(
+        `Web artifact sidecar exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
+      );
+    }
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    while (bytes <= maxFileBytes) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, maxFileBytes + 1 - bytes));
+      const result = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (result.bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, result.bytesRead));
+      bytes += result.bytesRead;
+    }
+    if (bytes > maxFileBytes) {
+      throw new Error(
+        `Web artifact sidecar exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
+      );
+    }
+    const finalMetadata = await handle.stat();
+    if (finalMetadata.size !== bytes) {
+      throw new Error(
+        `Web artifact sidecar changed while scanning: ${relativePath}`,
+      );
+    }
+    return Buffer.concat(chunks, bytes);
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readManifest(root: string): Promise<SourceManifestV1> {
   const raw = JSON.parse(
     await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
@@ -108,39 +195,51 @@ export async function scanSources(
       seenPaths.add(relativePath);
       const fileStats = await stat(absolutePath);
       const exceedsSizeLimit = fileStats.size > config.sources.maxFileBytes;
+      const sourceFormat = sourceFormatForPath(absolutePath);
+      const markdown = sourceFormat === "markdown";
+      const isManagedWebEvidence = relativePath.startsWith("sources/web/");
+      if (isManagedWebEvidence && exceedsSizeLimit) {
+        throw new Error(
+          `Web artifact ${relativePath} exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
+        );
+      }
       const content = exceedsSizeLimit
         ? undefined
         : await readFile(absolutePath);
       const digest = content ? sha256(content) : await sha256File(absolutePath);
-      const sourceFormat = sourceFormatForPath(absolutePath);
-      const markdown = sourceFormat === "markdown";
-      const isManagedWebEvidence = relativePath.startsWith("sources/web/");
       let webArtifact: ValidatedWebArtifactV1 | undefined;
       let webCapture: ReturnType<typeof parseWebCaptureMetadata>;
       if (isManagedWebEvidence) {
         const relativeSidecarPath = webArtifactSidecarPath(relativePath);
-        let sidecarContent: Buffer | undefined;
-        try {
-          sidecarContent = await readFile(path.join(root, relativeSidecarPath));
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        }
+        const sidecarContent = await readBoundedWebSidecar(
+          root,
+          relativeSidecarPath,
+          config.sources.maxFileBytes,
+        );
         if (sidecarContent) {
-          parseWebArtifactSidecar(
-            sidecarContent.toString("utf8"),
-            relativePath,
-          );
-          if (exceedsSizeLimit || !content) {
+          try {
+            parseWebArtifactSidecar(
+              sidecarContent.toString("utf8"),
+              relativePath,
+            );
+            if (exceedsSizeLimit || !content) {
+              throw new Error(
+                `Web artifact exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
+              );
+            }
+            webArtifact = validateWebArtifact({
+              sourcePath: relativePath,
+              artifactContent: content,
+              sidecarContent,
+              maxFileBytes: config.sources.maxFileBytes,
+            });
+          } catch (error) {
             throw new Error(
-              `Web artifact exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
+              `Invalid web artifact ${relativePath}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
             );
           }
-          webArtifact = validateWebArtifact({
-            sourcePath: relativePath,
-            artifactContent: content,
-            sidecarContent,
-            maxFileBytes: config.sources.maxFileBytes,
-          });
         } else {
           webCapture = markdown
             ? parseWebCaptureMetadata(content?.toString("utf8") ?? "")
@@ -156,6 +255,101 @@ export async function scanSources(
           ? parseWebCaptureMetadata(content?.toString("utf8") ?? "")
           : undefined;
       }
+      const id = `src_${digest.slice(0, 16)}`;
+      const plainText = sourceFormat === "text";
+      const html = sourceFormat === "html";
+      const json = sourceFormat === "json";
+      const jsonLines = sourceFormat === "jsonl";
+      const csv = sourceFormat === "csv";
+      const tsv = sourceFormat === "tsv";
+      const pdf = sourceFormat === "pdf";
+      const docx = sourceFormat === "docx";
+      const epub = sourceFormat === "epub";
+      let extracted: ExtractedSourceV1 | undefined;
+      let docxOutputPolicy: DocxOutputPolicyV1 | undefined;
+      let extractionError = exceedsSizeLimit
+        ? `Source exceeds configured maximum of ${config.sources.maxFileBytes} bytes`
+        : undefined;
+      const extractCurrentSource = async (failClosed: boolean) => {
+        try {
+          if (!exceedsSizeLimit && docx) {
+            const docxResult = await extractDocxWithPolicy(
+              id,
+              relativePath,
+              new Uint8Array(content ?? []),
+              config.sources.maxFileBytes,
+            );
+            extracted = docxResult.extracted;
+            docxOutputPolicy = docxResult.outputPolicy;
+          } else {
+            extracted = exceedsSizeLimit
+              ? undefined
+              : markdown
+                ? extractMarkdown(
+                    id,
+                    relativePath,
+                    content?.toString("utf8") ?? "",
+                  )
+                : plainText
+                  ? extractText(
+                      id,
+                      relativePath,
+                      content?.toString("utf8") ?? "",
+                    )
+                  : html
+                    ? extractHtml(
+                        id,
+                        relativePath,
+                        content?.toString("utf8") ?? "",
+                      )
+                    : json
+                      ? extractJson(
+                          id,
+                          relativePath,
+                          content?.toString("utf8") ?? "",
+                        )
+                      : jsonLines
+                        ? extractJsonLines(
+                            id,
+                            relativePath,
+                            content?.toString("utf8") ?? "",
+                          )
+                        : csv || tsv
+                          ? extractCsv(
+                              id,
+                              relativePath,
+                              content?.toString("utf8") ?? "",
+                              tsv ? "\t" : ",",
+                            )
+                          : pdf
+                            ? await extractPdf(
+                                id,
+                                relativePath,
+                                new Uint8Array(content ?? []),
+                              )
+                            : epub
+                              ? await extractEpub(
+                                  id,
+                                  relativePath,
+                                  new Uint8Array(content ?? []),
+                                )
+                              : undefined;
+          }
+        } catch (error) {
+          if (failClosed) {
+            throw new Error(
+              `Invalid web artifact ${relativePath}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          extractionError =
+            error instanceof Error
+              ? `${error.name}: ${error.message}`
+              : String(error);
+        }
+      };
+      if (webArtifact) await extractCurrentSource(true);
       const registered = registeredByPath.get(relativePath);
       if (registered) {
         if (registered.sha256 !== digest) {
@@ -188,98 +382,17 @@ export async function scanSources(
           sourceId: duplicate.id,
           sha256: digest,
           bytes: fileStats.size,
+          ...(webArtifact
+            ? {
+                sidecarPath: webArtifactSidecarPath(relativePath),
+                sidecarSha256: webArtifact.sidecarSha256,
+                sidecarBytes: webArtifact.sidecarBytes,
+              }
+            : {}),
         });
         continue;
       }
-
-      const id = `src_${digest.slice(0, 16)}`;
-      const plainText = sourceFormat === "text";
-      const html = sourceFormat === "html";
-      const json = sourceFormat === "json";
-      const jsonLines = sourceFormat === "jsonl";
-      const csv = sourceFormat === "csv";
-      const tsv = sourceFormat === "tsv";
-      const pdf = sourceFormat === "pdf";
-      const docx = sourceFormat === "docx";
-      const epub = sourceFormat === "epub";
-      let extracted: ExtractedSourceV1 | undefined;
-      let docxOutputPolicy: DocxOutputPolicyV1 | undefined;
-      let extractionError = exceedsSizeLimit
-        ? `Source exceeds configured maximum of ${config.sources.maxFileBytes} bytes`
-        : undefined;
-      try {
-        if (!exceedsSizeLimit && docx) {
-          const docxResult = await extractDocxWithPolicy(
-            id,
-            relativePath,
-            new Uint8Array(content ?? []),
-            config.sources.maxFileBytes,
-          );
-          extracted = docxResult.extracted;
-          docxOutputPolicy = docxResult.outputPolicy;
-        } else {
-          extracted = exceedsSizeLimit
-            ? undefined
-            : markdown
-              ? extractMarkdown(
-                  id,
-                  relativePath,
-                  content?.toString("utf8") ?? "",
-                )
-              : plainText
-                ? extractText(id, relativePath, content?.toString("utf8") ?? "")
-                : html
-                  ? extractHtml(
-                      id,
-                      relativePath,
-                      content?.toString("utf8") ?? "",
-                    )
-                  : json
-                    ? extractJson(
-                        id,
-                        relativePath,
-                        content?.toString("utf8") ?? "",
-                      )
-                    : jsonLines
-                      ? extractJsonLines(
-                          id,
-                          relativePath,
-                          content?.toString("utf8") ?? "",
-                        )
-                      : csv || tsv
-                        ? extractCsv(
-                            id,
-                            relativePath,
-                            content?.toString("utf8") ?? "",
-                            tsv ? "\t" : ",",
-                          )
-                        : pdf
-                          ? await extractPdf(
-                              id,
-                              relativePath,
-                              new Uint8Array(content ?? []),
-                            )
-                          : epub
-                            ? await extractEpub(
-                                id,
-                                relativePath,
-                                new Uint8Array(content ?? []),
-                              )
-                            : undefined;
-        }
-      } catch (error) {
-        if (webArtifact) {
-          throw new Error(
-            `Invalid web artifact ${relativePath}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-        extractionError =
-          error instanceof Error
-            ? `${error.name}: ${error.message}`
-            : String(error);
-      }
+      if (!webArtifact) await extractCurrentSource(false);
       const record = sourceRecordV1Schema.parse({
         version: 1,
         id,

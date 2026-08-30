@@ -7,6 +7,7 @@ import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
 import type { SourceRecordV1 } from "./sources/types.js";
+import { readBrainState } from "./state.js";
 import {
   runCanonicalWrite,
   type OperationRecordV1,
@@ -20,6 +21,13 @@ interface SourceDigest {
 
 interface ImmutableSourceInput extends SourceDigest {
   path: string;
+}
+
+interface DuplicateSourceInput extends ImmutableSourceInput {
+  sourceId: string;
+  sidecarPath?: string;
+  sidecarSha256?: string;
+  sidecarBytes?: number;
 }
 
 function immutableInputs(source: SourceRecordV1): ImmutableSourceInput[] {
@@ -37,6 +45,31 @@ function immutableInputs(source: SourceRecordV1): ImmutableSourceInput[] {
       : [];
   return [
     { path: source.path, bytes: source.bytes, sha256: source.sha256 },
+    ...sidecar,
+  ];
+}
+
+function duplicateImmutableInputs(
+  duplicate: DuplicateSourceInput,
+): ImmutableSourceInput[] {
+  const sidecar =
+    duplicate.sidecarPath &&
+    duplicate.sidecarSha256 &&
+    duplicate.sidecarBytes !== undefined
+      ? [
+          {
+            path: duplicate.sidecarPath,
+            bytes: duplicate.sidecarBytes,
+            sha256: duplicate.sidecarSha256,
+          },
+        ]
+      : [];
+  return [
+    {
+      path: duplicate.path,
+      bytes: duplicate.bytes,
+      sha256: duplicate.sha256,
+    },
     ...sidecar,
   ];
 }
@@ -152,11 +185,65 @@ export async function scanAndRegisterSources(
       testOptions,
     },
     async (writer) => {
+      const state = await readBrainState(root);
+      const protectedWebDuplicates = state.sourceDuplicates.filter(
+        (duplicate) =>
+          duplicate.sidecarPath !== undefined &&
+          duplicate.sidecarSha256 !== undefined &&
+          duplicate.sidecarBytes !== undefined,
+      );
       let manifestChanged = false;
-      const result = await scanSources(root, async (content) => {
-        manifestChanged = true;
-        await writer.writeText(".brain/source-manifest.json", content);
-      });
+      let result: SourceScanResult;
+      try {
+        result = await scanSources(root, async (content) => {
+          manifestChanged = true;
+          await writer.writeText(".brain/source-manifest.json", content);
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const affected = protectedWebDuplicates.find(
+          (duplicate) =>
+            message.includes(duplicate.path) ||
+            (duplicate.sidecarPath
+              ? message.includes(duplicate.sidecarPath)
+              : false),
+        );
+        if (affected) {
+          throw new Error(
+            `Immutable source violation: ${affected.path}${
+              affected.sidecarPath ? `, ${affected.sidecarPath}` : ""
+            }`,
+          );
+        }
+        throw error;
+      }
+      const currentDuplicatesByPath = new Map(
+        result.duplicates.map((duplicate) => [duplicate.path, duplicate]),
+      );
+      const changedAcknowledgements = protectedWebDuplicates.filter(
+        (previous) => {
+          const current = currentDuplicatesByPath.get(previous.path);
+          return (
+            !current ||
+            current.sourceId !== previous.sourceId ||
+            current.sha256 !== previous.sha256 ||
+            current.bytes !== previous.bytes ||
+            current.sidecarPath !== previous.sidecarPath ||
+            current.sidecarSha256 !== previous.sidecarSha256 ||
+            current.sidecarBytes !== previous.sidecarBytes
+          );
+        },
+      );
+      if (changedAcknowledgements.length > 0) {
+        throw new Error(
+          `Immutable source violation: ${changedAcknowledgements
+            .flatMap((duplicate) => [
+              duplicate.path,
+              ...(duplicate.sidecarPath ? [duplicate.sidecarPath] : []),
+            ])
+            .join(", ")}`,
+        );
+      }
       if (result.modified.length || result.deleted.length) {
         throw new Error(
           `Immutable source violation: ${[
@@ -174,31 +261,21 @@ export async function scanAndRegisterSources(
       }
 
       const now = new Date().toISOString();
-      const statePath = path.join(root, ".brain", "state.json");
-      const state = JSON.parse(await readFile(statePath, "utf8")) as Record<
-        string,
-        unknown
-      > & {
-        bootstrap?: { status?: string; pendingSourceIds?: string[] };
-        setup?: {
-          status?: string;
-          initialSourceIds?: string[];
-          pendingSourceIds?: string[];
-        };
-        sourceDuplicates?: Array<{
-          path: string;
-          sourceId: string;
-          sha256?: string;
-          bytes?: number;
-        }>;
-        semanticAuditDue?: boolean;
-      };
       const sourceDuplicates = result.duplicates
         .map((duplicate) => ({
           path: duplicate.path,
           sourceId: duplicate.sourceId,
           sha256: duplicate.sha256,
           bytes: duplicate.bytes,
+          ...(duplicate.sidecarPath &&
+          duplicate.sidecarSha256 &&
+          duplicate.sidecarBytes !== undefined
+            ? {
+                sidecarPath: duplicate.sidecarPath,
+                sidecarSha256: duplicate.sidecarSha256,
+                sidecarBytes: duplicate.sidecarBytes,
+              }
+            : {}),
         }))
         .sort((left, right) => left.path.localeCompare(right.path));
       const duplicateAcknowledgementsChanged =
@@ -212,7 +289,9 @@ export async function scanAndRegisterSources(
         return { value: result, stagePaths: [] };
       }
       if (duplicateAcknowledgementsChanged) {
-        for (const duplicate of result.duplicates) {
+        for (const duplicate of result.duplicates.flatMap(
+          duplicateImmutableInputs,
+        )) {
           await writer.sealExisting(duplicate.path, {
             bytes: duplicate.bytes,
             sha256: duplicate.sha256,
@@ -293,7 +372,9 @@ export async function scanAndRegisterSources(
         stagePaths: [
           ...addedInputs.map((source) => source.path),
           ...(duplicateAcknowledgementsChanged
-            ? result.duplicates.map((duplicate) => duplicate.path)
+            ? result.duplicates
+                .flatMap(duplicateImmutableInputs)
+                .map((duplicate) => duplicate.path)
             : []),
           ...(manifestChanged ? [canonicalPaths[0]] : []),
           ...canonicalPaths.slice(1),
@@ -303,7 +384,9 @@ export async function scanAndRegisterSources(
             root,
             [
               ...addedInputs,
-              ...(duplicateAcknowledgementsChanged ? result.duplicates : []),
+              ...(duplicateAcknowledgementsChanged
+                ? result.duplicates.flatMap(duplicateImmutableInputs)
+                : []),
             ],
             context,
           ),

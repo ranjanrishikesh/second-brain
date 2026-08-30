@@ -1,6 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -22,27 +29,29 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function createArtifactFiles(root: string): Promise<{
-  artifactBytes: Uint8Array;
-  sidecarBytes: Uint8Array;
-}> {
-  const document = await PDFDocument.create();
-  const page = document.addPage();
-  const font = await document.embedFont(StandardFonts.Helvetica);
-  page.drawText("Orbital mechanics", { x: 40, y: 700, size: 14, font });
-  const artifactBytes = await document.save();
+async function writeArtifactFiles(
+  root: string,
+  sourcePath: string,
+  artifactBytes: Uint8Array,
+): Promise<Uint8Array> {
+  const companionPath = path.posix.join(
+    path.posix.dirname(sourcePath),
+    `.${path.posix.basename(sourcePath)}.web.json`,
+  );
+  const fileName = path.posix.basename(sourcePath);
+  const originalUrl = `https://example.com/${fileName}`;
   const sidecar = {
     brainWebArtifact: 1,
-    sourcePath: artifactPath,
+    sourcePath,
     artifactSha256: sha256(artifactBytes),
     artifactBytes: artifactBytes.byteLength,
     title: "Orbital Report",
     format: "pdf",
     mediaType: "application/pdf",
     discovery: {
-      originalUrl: "https://example.com/orbits.pdf",
-      finalUrl: "https://cdn.example.com/orbits.pdf",
-      redirectChain: ["https://cdn.example.com/orbits.pdf"],
+      originalUrl,
+      finalUrl: originalUrl,
+      redirectChain: [],
       retrievedAt: "2026-08-30T00:00:00.000Z",
       queryId: "qry_0123456789abcdef0123456789abcdef",
       questionHash: "c".repeat(64),
@@ -54,10 +63,31 @@ async function createArtifactFiles(root: string): Promise<{
   const sidecarBytes = new TextEncoder().encode(
     `${JSON.stringify(sidecar, null, 2)}\n`,
   );
-  await mkdir(path.join(root, path.dirname(artifactPath)), { recursive: true });
-  await writeFile(path.join(root, artifactPath), artifactBytes);
-  await writeFile(path.join(root, sidecarPath), sidecarBytes);
+  await mkdir(path.join(root, path.dirname(sourcePath)), { recursive: true });
+  await writeFile(path.join(root, sourcePath), artifactBytes);
+  await writeFile(path.join(root, companionPath), sidecarBytes);
+  return sidecarBytes;
+}
+
+async function createArtifactFiles(root: string): Promise<{
+  artifactBytes: Uint8Array;
+  sidecarBytes: Uint8Array;
+}> {
+  const artifactBytes = await createPdfBytes("Orbital mechanics");
+  const sidecarBytes = await writeArtifactFiles(
+    root,
+    artifactPath,
+    artifactBytes,
+  );
   return { artifactBytes, sidecarBytes };
+}
+
+async function createPdfBytes(text: string): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  page.drawText(text, { x: 40, y: 700, size: 14, font });
+  return await document.save();
 }
 
 async function initGitBrain(root: string, description: string): Promise<void> {
@@ -78,6 +108,30 @@ async function git(root: string, args: string[]): Promise<string> {
 }
 
 describe("registered source transactions", () => {
+  test("rejects partial duplicate companion state before scanning", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-duplicate-state-"));
+    await initBrain(root, {
+      name: "Sources",
+      description: "Partial duplicate state test",
+    });
+    const statePath = path.join(root, ".brain", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.sourceDuplicates = [
+      {
+        path: "sources/web/2026/08/copy.txt",
+        sourceId: "src_0123456789abcdef",
+        sha256: "a".repeat(64),
+        bytes: 12,
+        sidecarPath: "sources/web/2026/08/.copy.txt.web.json",
+      },
+    ];
+    const partialState = `${JSON.stringify(state, null, 2)}\n`;
+    await writeFile(statePath, partialState);
+
+    await expect(scanAndRegisterSources(root)).rejects.toThrow(/sidecar/i);
+    expect(await readFile(statePath, "utf8")).toBe(partialState);
+  });
+
   test("shares the canonical writer lock with wiki mutations", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-source-lock-"));
     await initBrain(root, { name: "Sources", description: "Lock test" });
@@ -256,6 +310,129 @@ describe("registered source transactions", () => {
       ].sort(),
     );
   });
+
+  test("acknowledges a duplicate web artifact with its immutable sidecar", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-duplicate-"));
+    await initGitBrain(root, "Web duplicate test");
+    const { artifactBytes } = await createArtifactFiles(root);
+    await scanAndRegisterSources(root);
+    const duplicatePath = "sources/web/2026/08/orbits-copy.pdf";
+    const duplicateSidecarPath =
+      "sources/web/2026/08/.orbits-copy.pdf.web.json";
+    const duplicateSidecarBytes = await writeArtifactFiles(
+      root,
+      duplicatePath,
+      artifactBytes,
+    );
+
+    const result = await scanAndRegisterSources(root);
+
+    expect(result.duplicates).toEqual([
+      expect.objectContaining({
+        path: duplicatePath,
+        sidecarPath: duplicateSidecarPath,
+        sidecarSha256: sha256(duplicateSidecarBytes),
+        sidecarBytes: duplicateSidecarBytes.byteLength,
+      }),
+    ]);
+    const state = JSON.parse(
+      await readFile(path.join(root, ".brain", "state.json"), "utf8"),
+    );
+    expect(state.sourceDuplicates).toEqual([
+      expect.objectContaining({
+        path: duplicatePath,
+        sidecarPath: duplicateSidecarPath,
+        sidecarSha256: sha256(duplicateSidecarBytes),
+        sidecarBytes: duplicateSidecarBytes.byteLength,
+      }),
+    ]);
+    expect(
+      (
+        await git(root, [
+          "diff-tree",
+          "--no-commit-id",
+          "--name-only",
+          "-r",
+          "HEAD",
+        ])
+      )
+        .split("\n")
+        .sort(),
+    ).toEqual(
+      [
+        ".brain/operations.jsonl",
+        ".brain/state.json",
+        duplicatePath,
+        duplicateSidecarPath,
+        "wiki/log.md",
+      ].sort(),
+    );
+
+    const cloneParent = await mkdtemp(
+      path.join(tmpdir(), "brain-web-duplicate-clone-"),
+    );
+    const checkout = path.join(cloneParent, "checkout");
+    await git(root, ["clone", "--quiet", root, checkout]);
+    await expect(scanAndRegisterSources(checkout)).resolves.toMatchObject({
+      duplicates: [{ path: duplicatePath }],
+    });
+    expect(await git(checkout, ["status", "--short"])).toBe("");
+  });
+
+  test.each([
+    "changed artifact and sidecar",
+    "changed artifact only",
+    "deleted artifact",
+    "changed sidecar",
+    "deleted sidecar",
+  ] as const)(
+    "rejects a previously acknowledged duplicate web %s as immutable",
+    async (mutation) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "brain-web-duplicate-mutation-"),
+      );
+      await initGitBrain(root, "Web duplicate mutation test");
+      const { artifactBytes } = await createArtifactFiles(root);
+      await scanAndRegisterSources(root);
+      const duplicatePath = "sources/web/2026/08/orbits-copy.pdf";
+      const duplicateSidecarPath =
+        "sources/web/2026/08/.orbits-copy.pdf.web.json";
+      await writeArtifactFiles(root, duplicatePath, artifactBytes);
+      await scanAndRegisterSources(root);
+      const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+      if (mutation === "changed artifact and sidecar") {
+        await writeArtifactFiles(
+          root,
+          duplicatePath,
+          await createPdfBytes("Changed orbital mechanics"),
+        );
+      } else if (mutation === "changed artifact only") {
+        await writeFile(
+          path.join(root, duplicatePath),
+          await createPdfBytes("Changed orbital mechanics"),
+        );
+      } else if (mutation === "deleted artifact") {
+        await rm(path.join(root, duplicatePath));
+      } else if (mutation === "changed sidecar") {
+        const sidecar = JSON.parse(
+          await readFile(path.join(root, duplicateSidecarPath), "utf8"),
+        );
+        sidecar.title = "Changed sidecar title";
+        await writeFile(
+          path.join(root, duplicateSidecarPath),
+          `${JSON.stringify(sidecar, null, 2)}\n`,
+        );
+      } else {
+        await rm(path.join(root, duplicateSidecarPath));
+      }
+
+      await expect(scanAndRegisterSources(root)).rejects.toThrow(
+        /Immutable source violation/,
+      );
+      expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    },
+  );
 
   test.each([
     ["artifact", artifactPath, "afterMutationBeforeSeal"],
