@@ -47,6 +47,13 @@ export const defaultTextExtractionPolicyV1 = {
   maxChunks: 10_000,
 } as const;
 
+export const sourceRootV1Schema = z
+  .string()
+  .regex(
+    /^(?!\s*$)(?![A-Za-z]:)(?!\/)(?!.*\\)(?!(?:.*\/)?\.{1,2}(?:\/|$))[^/]+(?:\/[^/]+)*$/,
+    "sources.roots entries must be canonical repository-relative paths",
+  );
+
 export const brainConfigV1Schema = z.object({
   version: z.literal(1),
   brain: z.object({
@@ -64,7 +71,7 @@ export const brainConfigV1Schema = z.object({
     .default({ issueTrackerUrl: defaultIssueTrackerUrl }),
   sources: z
     .object({
-      roots: z.array(z.string().trim().min(1)).min(1).default(["sources"]),
+      roots: z.array(sourceRootV1Schema).min(1).default(["sources"]),
       maxFileBytes: z.number().int().positive().default(104_857_600),
       textExtraction: z
         .object({
