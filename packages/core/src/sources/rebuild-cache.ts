@@ -1,16 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
+import { type FileHandle, mkdir, open, writeFile } from "node:fs/promises";
 import path from "node:path";
-import {
-  type BrainConfigV1,
-  defaultTextExtractionPolicyV1,
-  loadBrainConfig,
-} from "../config.js";
+import { type BrainConfigV1, loadBrainConfig } from "../config.js";
 import { assertCanonicalExtractedSource } from "./cache-integrity.js";
 import { validateDocxArchive } from "./docx-archive.js";
 import {
   assertDocxOutputPolicy,
   assertDocxOutputSize,
+  maximumDocxLogicalBlocks,
 } from "./docx-output-budget.js";
 import {
   extractCsv,
@@ -75,7 +72,7 @@ async function readCanonicalSourceContent(
   return content;
 }
 
-const extractionPolicyRevisionV1 = 3;
+const extractionPolicyRevisionV1 = 4;
 
 const cacheDirectoryRelativePath = path.join(".brain", "cache", "extracted");
 
@@ -116,15 +113,74 @@ function currentExtractionPolicyRevision(
 async function readCachedPolicyRevision(
   root: string,
   sourceId: string,
+  testOptions: ExtractedCacheReadTestOptions,
 ): Promise<string | undefined> {
   const policyPath = cachePolicyPath(root, sourceId);
   try {
-    const metadata = await stat(policyPath);
-    if (!metadata.isFile() || metadata.size > 256) return undefined;
-    const revision = (await readFile(policyPath, "utf8")).trim();
+    const content = await readBoundedOpenedFile(
+      policyPath,
+      256,
+      "policy",
+      testOptions,
+    );
+    if (!content) return undefined;
+    const revision = content.toString("utf8").trim();
     return /^[a-f0-9]{64}$/.test(revision) ? revision : undefined;
   } catch {
     return undefined;
+  }
+}
+
+export interface ExtractedCacheReadTestOptions {
+  afterFileOpen?: (
+    kind: "policy" | "cache",
+    filePath: string,
+  ) => Promise<void> | void;
+}
+
+async function readBoundedOpenedFile(
+  filePath: string,
+  maxBytes: number,
+  kind: "policy" | "cache",
+  testOptions: ExtractedCacheReadTestOptions,
+): Promise<Buffer | undefined> {
+  let handle: FileHandle;
+  try {
+    handle = await open(filePath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const initial = await handle.stat();
+    if (!initial.isFile() || initial.size > maxBytes) return undefined;
+    await testOptions.afterFileOpen?.(kind, filePath);
+
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    while (bytes <= maxBytes) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, maxBytes + 1 - bytes));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      bytes += bytesRead;
+    }
+    if (bytes > maxBytes) return undefined;
+
+    const final = await handle.stat();
+    if (
+      !final.isFile() ||
+      final.dev !== initial.dev ||
+      final.ino !== initial.ino ||
+      final.size !== initial.size ||
+      final.mtimeMs !== initial.mtimeMs ||
+      final.size !== bytes
+    ) {
+      return undefined;
+    }
+    return Buffer.concat(chunks, bytes);
+  } finally {
+    await handle.close();
   }
 }
 
@@ -143,7 +199,7 @@ function maximumCacheBytes(
         : source.extractor === "docx-v1"
           ? [
               config.sources.maxFileBytes,
-              defaultTextExtractionPolicyV1.maxChunks,
+              maximumDocxLogicalBlocks(config.sources.maxFileBytes),
             ]
           : [
               config.sources.textExtraction.maxExtractedBytes,
@@ -302,6 +358,7 @@ export async function rebuildExtractedSourceCache(
 export async function loadExtractedSourceCache(
   root: string,
   source: SourceRecordV1,
+  testOptions: ExtractedCacheReadTestOptions = {},
 ): Promise<ExtractedSourceV1> {
   await assertWebEvidenceIntegrity(root, source);
   const config = await loadBrainConfig(root);
@@ -315,19 +372,9 @@ export async function loadExtractedSourceCache(
     config,
   );
   if (
-    (await readCachedPolicyRevision(root, source.id)) !== requiredPolicyRevision
+    (await readCachedPolicyRevision(root, source.id, testOptions)) !==
+    requiredPolicyRevision
   ) {
-    return await rebuildExtractedSourceCache(root, source);
-  }
-  try {
-    const metadata = await stat(cachePath(root, source.id));
-    if (
-      !metadata.isFile() ||
-      metadata.size > maximumCacheBytes(source, config)
-    ) {
-      return await rebuildExtractedSourceCache(root, source);
-    }
-  } catch {
     return await rebuildExtractedSourceCache(root, source);
   }
   const content = await readCanonicalSourceContent(
@@ -337,8 +384,15 @@ export async function loadExtractedSourceCache(
   );
   let cached: ExtractedSourceV1;
   try {
+    const cachedBytes = await readBoundedOpenedFile(
+      cachePath(root, source.id),
+      maximumCacheBytes(source, config),
+      "cache",
+      testOptions,
+    );
+    if (!cachedBytes) return await rebuildExtractedSourceCache(root, source);
     cached = assertCanonicalExtractedSource(
-      JSON.parse(await readFile(cachePath(root, source.id), "utf8")),
+      JSON.parse(cachedBytes.toString("utf8")),
       source,
     );
   } catch {

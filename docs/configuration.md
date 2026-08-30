@@ -21,14 +21,14 @@ never contact GitHub.
 ## Sources and bootstrap
 
 - `sources.roots`: repository-relative immutable source roots. The default is `sources`.
-- `sources.maxFileBytes`: maximum local source-file or downloaded-artifact input size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. An oversized local file found by source scanning is registered with a visible failure. An oversized downloaded web artifact is rejected before capture prepares files or registers a source.
+- `sources.maxFileBytes`: maximum local source-file or downloaded-artifact input size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; its logical-block ceiling is derived from that semantic byte budget rather than the general text-family chunk default. Physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. An oversized local file found by source scanning is registered with a visible failure. An oversized downloaded web artifact is rejected before capture prepares files or registers a source.
 - `sources.textExtraction.maxExtractedBytes`: maximum cumulative UTF-8 retained across the title, primary text, chunk locators, and chunk text for Markdown, text, HTML, JSON/JSONL, CSV, and TSV extraction; default `8388608` bytes.
 - `sources.textExtraction.maxChunks`: maximum retained chunks or structured entries for those text-family extractors; default `10000`.
 - `sources.pdf.maxPages`: maximum PDF page count; default `2000`.
 - `sources.pdf.maxExtractedBytes`: cumulative normalized PDF text budget; default `104857600` bytes.
-- `sources.epub.maxEntries`: maximum physical/decoded archive entries; default `1000`.
+- `sources.epub.maxEntries`: maximum physical/decoded archive entries and logical spine items; default `1000`.
 - `sources.epub.maxExpandedBytes`: cumulative EPUB expanded-byte budget; default `104857600` bytes.
-- `sources.epub.maxExtractedBytes`: cumulative normalized EPUB text budget; default `104857600` bytes.
+- `sources.epub.maxExtractedBytes`: cumulative UTF-8 budget across the normalized EPUB title and retained chapter text; default `104857600` bytes.
 
 Text-family output and entry limits are enforced while parsing, before an
 unbounded chunk list or joined output can be retained. HTML blocks are

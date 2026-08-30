@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -59,6 +66,46 @@ async function registeredWebTextArtifact(
 }
 
 describe("brain search", () => {
+  test.each(["policy", "cache"] as const)(
+    "reads the extracted %s through its bounded opened handle",
+    async (kind) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), `brain-search-open-${kind}-`),
+      );
+      await initBrain(root, { name: "Search", description: "Opened cache" });
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.textExtraction = {
+        maxExtractedBytes: 1_024,
+        maxChunks: 10,
+      };
+      await writeFile(configPath, stringify(config));
+      await writeFile(
+        path.join(root, "sources", "opened.md"),
+        "# Opened cache\n\nStable evidence.\n",
+      );
+      const source = (await scanSources(root)).added[0];
+      if (!source) throw new Error("Expected registered source");
+      await loadExtractedSourceCache(root, source);
+
+      let replaced = false;
+      await expect(
+        loadExtractedSourceCache(root, source, {
+          async afterFileOpen(openedKind, filePath) {
+            if (openedKind !== kind) return;
+            replaced = true;
+            await rename(filePath, `${filePath}.opened`);
+            await writeFile(
+              filePath,
+              kind === "policy" ? "x".repeat(257) : "x".repeat(100_000),
+            );
+          },
+        }),
+      ).resolves.toMatchObject({ sourceId: source.id });
+      expect(replaced).toBe(true);
+    },
+  );
+
   test.each([
     ["cached extraction", false],
     ["rebuilt extraction", true],

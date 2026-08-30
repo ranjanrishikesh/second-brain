@@ -948,6 +948,41 @@ describe("durable web evidence capture", () => {
     expect(await webFiles(root)).toEqual([]);
   });
 
+  test("rejects an ordinary page that exceeds extraction policy before preparation", async () => {
+    const { root, queryId } = await approvedBrain("Bound page extraction?");
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.textExtraction = {
+      maxExtractedBytes: 128,
+      maxChunks: 10,
+    };
+    await writeFile(configPath, stringify(config));
+    let preparationAttempted = false;
+
+    await expect(
+      captureWebEvidence(
+        root,
+        queryId,
+        {
+          representation: "text",
+          originalUrl: "https://example.test/oversized-page",
+          title: "Oversized page",
+          captureKind: "page",
+          completeness: "complete",
+          content: "This page is retained verbatim as web evidence.",
+          retrievedAt: "2026-08-30T03:00:45.000Z",
+        },
+        {
+          beforePreparationCreate() {
+            preparationAttempted = true;
+          },
+        },
+      ),
+    ).rejects.toThrow(/extracted Markdown content exceeds.*128 bytes/i);
+    expect(preparationAttempted).toBe(false);
+    expect(await webFiles(root)).toEqual([]);
+  });
+
   test("rejects an EPUB amplification before preparing canonical artifacts", async () => {
     const { root, queryId } = await approvedBrain("EPUB amplification?");
     const configPath = path.join(root, "brain.config.yaml");

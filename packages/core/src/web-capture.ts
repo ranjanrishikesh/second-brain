@@ -1189,13 +1189,21 @@ export async function captureWebEvidence(
         ...(previous ? { supersedes: previous.id } : {}),
       };
       const captureMarkdown = `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${normalizedBody}${normalizedBody.endsWith("\n") ? "" : "\n"}`;
+      const currentConfig = await loadBrainConfig(root);
       if (
-        Buffer.byteLength(captureMarkdown, "utf8") > config.sources.maxFileBytes
+        Buffer.byteLength(captureMarkdown, "utf8") >
+        currentConfig.sources.maxFileBytes
       ) {
         throw new Error(
-          `Web capture exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
+          `Web capture exceeds configured maximum of ${currentConfig.sources.maxFileBytes} bytes`,
         );
       }
+      extractMarkdown(
+        "src_0000000000000000",
+        relativePath,
+        captureMarkdown,
+        currentConfig.sources.textExtraction,
+      );
       await prepareText(
         root,
         relativePath,

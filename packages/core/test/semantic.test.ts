@@ -3,14 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import {
-  initBrain,
+  type BrainRuntimeServices,
   createLocalEmbeddingProvider,
+  initBrain,
   renderWikiPage,
   scanSources,
   searchBrain,
   semanticSearch,
-  type BrainRuntimeServices,
   type WikiPageV1,
 } from "../src/index.js";
 import { streamVerifiedResponse } from "../src/semantic.js";
@@ -191,6 +192,40 @@ describe("local semantic search", () => {
 
     expect(before[0]?.id).toBe(sourceId);
     expect(after).toEqual(before);
+  });
+
+  test("invalidates semantic source search when extraction policy changes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-semantic-policy-"));
+    await initBrain(root, { name: "Semantic", description: "Semantic test" });
+    await writeFile(
+      path.join(root, "sources", "policy.md"),
+      "# Alpha\n\nFirst retained block.\n\n## Beta\n\nSecond retained block.\n",
+    );
+    await scanSources(root);
+    const services = {
+      embeddings: {
+        modelId: "test/policy-aware",
+        modelRevision: "test-revision",
+        async embed(texts: readonly string[]) {
+          return texts.map(() => [1, 0]);
+        },
+      },
+    };
+
+    await expect(
+      semanticSearch(root, "retained", "sources", 10, services),
+    ).resolves.not.toHaveLength(0);
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8")) as {
+      sources: { textExtraction: { maxChunks: number } };
+    };
+    config.sources.textExtraction.maxChunks = 1;
+    await writeFile(configPath, stringify(config), "utf8");
+
+    await expect(
+      semanticSearch(root, "retained", "sources", 10, services),
+    ).rejects.toThrow(/Markdown content exceeds.*1 chunks/i);
   });
 
   test("retries a semantic rebuild when the corpus changes during embedding", async () => {

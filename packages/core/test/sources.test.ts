@@ -26,6 +26,7 @@ import {
 import { calculateExtractedSourceSha256 } from "../src/sources/cache-integrity.js";
 import {
   extractCsv,
+  extractDocxWithPolicy,
   extractEpub,
   extractHtml,
   extractJson,
@@ -483,6 +484,102 @@ describe("bounded text extraction", () => {
         maxExtractedBytes: 64,
       }),
     ).rejects.toThrow(/extracted EPUB content exceeds.*64 bytes/i);
+  });
+
+  test("counts the EPUB title and chapter text in one cumulative output budget", async () => {
+    const epub = await createEpub("A".repeat(30), {}, "T".repeat(40));
+
+    await expect(
+      extractEpub("src_0000000000000000", "combined.epub", epub, {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 64,
+      }),
+    ).rejects.toThrow(/extracted EPUB content exceeds.*64 bytes/i);
+  });
+
+  test("does not charge discarded chapter titles to the EPUB output budget", async () => {
+    const epub = await createEpub("A".repeat(20), {}, "T".repeat(40));
+
+    await expect(
+      extractEpub("src_0000000000000000", "combined.epub", epub, {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 64,
+      }),
+    ).resolves.toMatchObject({
+      title: "T".repeat(40),
+      text: "A".repeat(20),
+    });
+  });
+
+  test("allows an empty EPUB chapter after the title consumes the output budget", async () => {
+    const epub = await createEpub("", {}, "T".repeat(20));
+
+    await expect(
+      extractEpub("src_0000000000000000", "empty.epub", epub, {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 20,
+      }),
+    ).resolves.toMatchObject({ title: "T".repeat(20), text: "", chunks: [] });
+  });
+
+  test("rejects an EPUB title that alone exceeds the output budget", async () => {
+    const epub = await createEpub("", {}, "T".repeat(21));
+
+    await expect(
+      extractEpub("src_0000000000000000", "title.epub", epub, {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 20,
+      }),
+    ).rejects.toThrow(/extracted EPUB content exceeds.*20 bytes/i);
+  });
+
+  test("rejects EPUB spine amplification beyond the configured entry limit", async () => {
+    const archive = new JSZip();
+    archive.file("mimetype", "application/epub+zip");
+    archive.file(
+      "META-INF/container.xml",
+      '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+    );
+    archive.file(
+      "OEBPS/content.opf",
+      `<?xml version="1.0"?><package><metadata><title>Spine budget</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine>${'<itemref idref="c1"/>'.repeat(11)}</spine></package>`,
+    );
+    archive.file("OEBPS/chapter.xhtml", "<html><body><p>A</p></body></html>");
+    const epub = await archive.generateAsync({
+      type: "uint8array",
+      compression: "DEFLATE",
+    });
+
+    await expect(
+      extractEpub("src_0000000000000000", "spine.epub", epub, {
+        maxEntries: 10,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 1_000_000,
+      }),
+    ).rejects.toThrow(/spine.*maximum of 10/i);
+  });
+
+  test("preserves DOCX files whose logical blocks fit the semantic byte budget", async () => {
+    const paragraph = "<w:p><w:r><w:t>A</w:t></w:r></w:p>";
+    const docx = await createDocx(paragraph.repeat(10_001));
+
+    await expect(
+      extractDocxWithPolicy(
+        "src_0000000000000000",
+        "many-paragraphs.docx",
+        docx,
+        2_000_000,
+      ),
+    ).resolves.toMatchObject({
+      extracted: {
+        sourceId: "src_0000000000000000",
+        chunks: [expect.objectContaining({ locator: "lines=1-20001" })],
+      },
+    });
   });
 });
 

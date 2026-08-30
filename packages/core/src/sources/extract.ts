@@ -9,6 +9,7 @@ import { validateDocxArchive } from "./docx-archive.js";
 import {
   assertDocxOutputSize,
   assertDocxSemanticOutputBudget,
+  maximumDocxLogicalBlocks,
 } from "./docx-output-budget.js";
 import type { DocxOutputPolicyV1, ExtractedSourceV1 } from "./types.js";
 import { validateZipArchiveBudget } from "./zip-archive-budget.js";
@@ -215,6 +216,7 @@ export function extractHtml(
   rawPolicy?: TextExtractionPolicyV1,
   label = "HTML",
   includeChunk = true,
+  includeTitleInBudget = true,
 ): ExtractedSourceV1 {
   const policy = textExtractionPolicy(rawPolicy);
   const { document } = parseHTML(html);
@@ -228,7 +230,11 @@ export function extractHtml(
     path.basename(filePath, path.extname(filePath));
   const content = document.querySelector("article,main") ?? document.body;
   const blocks: string[] = [];
-  const budget = new RetainedTextBudget(policy, label, [title]);
+  const budget = new RetainedTextBudget(
+    policy,
+    label,
+    includeTitleInBudget ? [title] : [],
+  );
   for (const element of content.querySelectorAll(
     "h1,h2,h3,h4,h5,h6,p,li,pre,blockquote",
   )) {
@@ -711,20 +717,21 @@ export async function extractDocxWithPolicy(
     converted.value,
     maxExpandedBytes,
   );
+  const maxLogicalBlocks = maximumDocxLogicalBlocks(maxExpandedBytes);
   const html = extractHtml(
     sourceId,
     filePath,
     `<html><body>${converted.value}</body></html>`,
     {
       maxExtractedBytes: maxExpandedBytes,
-      maxChunks: defaultTextExtractionPolicyV1.maxChunks,
+      maxChunks: maxLogicalBlocks,
     },
     "DOCX",
     false,
   );
   const structured = extractMarkdown(sourceId, filePath, html.text, {
     maxExtractedBytes: maxExpandedBytes,
-    maxChunks: defaultTextExtractionPolicyV1.maxChunks,
+    maxChunks: maxLogicalBlocks,
   });
   const extractedBytes = assertDocxOutputSize(
     structured.text,
@@ -832,9 +839,14 @@ export async function extractEpub(
   const itemRefs = asArray(xmlChild(spine, "itemref")) as Array<
     Record<string, unknown>
   >;
+  if (itemRefs.length > policy.maxEntries) {
+    throw new Error(
+      `EPUB spine contains ${itemRefs.length} items, exceeding configured maximum of ${policy.maxEntries}`,
+    );
+  }
   const packageDirectory = path.posix.dirname(packagePath);
   const chunks = [];
-  let extractedBytes = 0;
+  let extractedBytes = Buffer.byteLength(normalizedTitle, "utf8");
   for (const [ordinal, itemRef] of itemRefs.entries()) {
     const href = hrefById.get(String(itemRef["@idref"]));
     if (!href) continue;
@@ -842,26 +854,34 @@ export async function extractEpub(
     const chapterHtml = await archive.file(chapterPath)?.async("string");
     if (!chapterHtml)
       throw new Error(`EPUB spine item is missing: ${chapterPath}`);
-    const separatorBytes = chunks.length > 0 ? 2 : 0;
-    const remainingExtractedBytes =
-      policy.maxExtractedBytes - extractedBytes - separatorBytes;
-    if (remainingExtractedBytes <= 0) {
-      throw new Error(
-        `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+    const remainingExtractedBytes = policy.maxExtractedBytes - extractedBytes;
+    let chapter: ExtractedSourceV1;
+    try {
+      chapter = extractHtml(
+        sourceId,
+        chapterPath,
+        chapterHtml,
+        {
+          maxExtractedBytes: Math.max(1, remainingExtractedBytes),
+          maxChunks: defaultTextExtractionPolicyV1.maxChunks,
+        },
+        "EPUB",
+        false,
+        false,
       );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith("Extracted EPUB content exceeds")
+      ) {
+        throw new Error(
+          `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+        );
+      }
+      throw error;
     }
-    const chapter = extractHtml(
-      sourceId,
-      chapterPath,
-      chapterHtml,
-      {
-        maxExtractedBytes: remainingExtractedBytes,
-        maxChunks: defaultTextExtractionPolicyV1.maxChunks,
-      },
-      "EPUB",
-      false,
-    );
     if (!chapter.text) continue;
+    const separatorBytes = chunks.length > 0 ? 2 : 0;
     const chapterBytes = Buffer.byteLength(chapter.text, "utf8");
     if (
       chapterBytes + separatorBytes >
