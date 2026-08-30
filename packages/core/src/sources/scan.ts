@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
-import { type BigIntStats, constants, createReadStream } from "node:fs";
+import { type BigIntStats, constants } from "node:fs";
 import {
   lstat,
   mkdir,
   open,
-  readdir,
   readFile,
   realpath,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +23,15 @@ import {
   extractText,
 } from "./extract.js";
 import { sourceFormatForPath } from "./format.js";
+import {
+  effectiveSourceRoots,
+  type InspectedRepositoryEntry,
+  inspectRepositoryEntry,
+  openStableRepositoryFile,
+  sameFileIdentity,
+  unchangedRepositoryEntry,
+  walkSourceFiles,
+} from "./path-safety.js";
 import {
   type DocxOutputPolicyV1,
   type ExtractedSourceV1,
@@ -53,45 +60,110 @@ export interface SourceScanTestOptions {
     kind: "artifact" | "sidecar",
     relativePath: string,
   ) => Promise<void> | void;
-}
-
-async function walk(directory: string): Promise<string[]> {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry.name.startsWith(".")) continue;
-    const absolute = path.join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...(await walk(absolute)));
-    if (entry.isFile()) files.push(absolute);
-  }
-  return files;
+  /** Deterministic seam for replacing an ordinary source after discovery. */
+  beforeLocalSourceRead?: (relativePath: string) => Promise<void> | void;
 }
 
 function sha256(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-async function sha256File(filePath: string): Promise<string> {
-  return await new Promise((resolve, reject) => {
+async function readOrdinarySource(
+  root: string,
+  relativePath: string,
+  discovered: InspectedRepositoryEntry,
+  maxFileBytes: number,
+  testOptions: SourceScanTestOptions,
+): Promise<{ bytes: number; digest: string; content?: Buffer }> {
+  await testOptions.beforeLocalSourceRead?.(relativePath);
+  let inspected: InspectedRepositoryEntry | undefined;
+  try {
+    inspected = await inspectRepositoryEntry(
+      root,
+      relativePath,
+      "file",
+      `Source path ${relativePath}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/symbolic link|outside the brain root/i.test(message)) throw error;
+    throw new Error(
+      `Source changed while scanning ${relativePath}; retry after its bytes are stable`,
+    );
+  }
+  if (
+    !inspected ||
+    !unchangedRepositoryEntry(discovered.metadata, inspected.metadata) ||
+    discovered.realPath !== inspected.realPath
+  ) {
+    throw new Error(
+      `Source changed while scanning ${relativePath}; retry after its bytes are stable`,
+    );
+  }
+  let openedFile: Awaited<ReturnType<typeof openStableRepositoryFile>>;
+  try {
+    openedFile = await openStableRepositoryFile(inspected);
+  } catch {
+    throw new Error(
+      `Source changed while scanning ${relativePath}; retry after its bytes are stable`,
+    );
+  }
+  const { handle, metadata: opened } = openedFile;
+  try {
     const hash = createHash("sha256");
-    const stream = createReadStream(filePath);
-    stream.on("error", reject);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("hex")));
-  });
-}
-
-function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-function unchangedOpenFile(left: BigIntStats, right: BigIntStats): boolean {
-  return (
-    sameFileIdentity(left, right) &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs
-  );
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    const retainContent = opened.size <= BigInt(maxFileBytes);
+    const readLimit = retainContent
+      ? maxFileBytes + 1
+      : Number.MAX_SAFE_INTEGER;
+    while (bytes <= readLimit) {
+      const chunk = Buffer.alloc(
+        retainContent ? Math.min(64 * 1024, readLimit - bytes) : 64 * 1024,
+      );
+      if (chunk.byteLength === 0) break;
+      const result = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (result.bytesRead === 0) break;
+      const readChunk = chunk.subarray(0, result.bytesRead);
+      bytes += result.bytesRead;
+      hash.update(readChunk);
+      if (retainContent) chunks.push(readChunk);
+      if (retainContent && bytes > maxFileBytes) break;
+    }
+    const finalOpened = await handle.stat({ bigint: true });
+    let finalPath: InspectedRepositoryEntry | undefined;
+    try {
+      finalPath = await inspectRepositoryEntry(
+        root,
+        relativePath,
+        "file",
+        `Source path ${relativePath}`,
+      );
+    } catch {
+      throw new Error(
+        `Source changed while scanning ${relativePath}; retry after its bytes are stable`,
+      );
+    }
+    if (
+      (retainContent && bytes > maxFileBytes) ||
+      finalOpened.size !== BigInt(bytes) ||
+      !unchangedRepositoryEntry(opened, finalOpened) ||
+      !finalPath ||
+      !unchangedRepositoryEntry(opened, finalPath.metadata) ||
+      finalPath.realPath !== inspected.realPath
+    ) {
+      throw new Error(
+        `Source changed while scanning ${relativePath}; retry after its bytes are stable`,
+      );
+    }
+    return {
+      bytes,
+      digest: hash.digest("hex"),
+      ...(retainContent ? { content: Buffer.concat(chunks, bytes) } : {}),
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 async function readBoundedWebEvidenceFile(
@@ -183,7 +255,7 @@ async function readBoundedWebEvidenceFile(
     }
     const finalMetadata = await handle.stat({ bigint: true });
     if (
-      !unchangedOpenFile(openedMetadata, finalMetadata) ||
+      !unchangedRepositoryEntry(openedMetadata, finalMetadata) ||
       finalMetadata.size !== BigInt(bytes)
     ) {
       throw new Error(`${label} changed while scanning: ${relativePath}`);
@@ -246,31 +318,12 @@ export async function scanSources(
     duplicates: [],
   };
 
-  const candidates = new Map<string, string>();
-  for (const sourceRoot of [
-    ...config.sources.roots,
-    ...(config.sources.roots.includes("sources") ? [] : ["sources/web"]),
-  ]) {
-    const absoluteRoot = path.join(root, sourceRoot);
-    let files: string[];
-    try {
-      files = await walk(absoluteRoot);
-    } catch (error) {
-      if (
-        sourceRoot === "sources/web" &&
-        (error as NodeJS.ErrnoException).code === "ENOENT"
-      ) {
-        continue;
-      }
-      throw error;
-    }
-    for (const absolutePath of files) {
-      const relativePath = path
-        .relative(root, absolutePath)
-        .split(path.sep)
-        .join("/");
-      candidates.set(relativePath, absolutePath);
-    }
+  const candidates = new Map<string, InspectedRepositoryEntry>();
+  for (const candidate of await walkSourceFiles(
+    root,
+    effectiveSourceRoots(config.sources.roots),
+  )) {
+    candidates.set(candidate.relativePath, candidate.entry);
   }
 
   const orderedCandidateGroups = [
@@ -284,7 +337,8 @@ export async function scanSources(
     group.sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath)),
   );
   for (const candidateGroup of orderedCandidateGroups) {
-    for (const [relativePath, absolutePath] of candidateGroup) {
+    for (const [relativePath, candidate] of candidateGroup) {
+      const absolutePath = candidate.absolutePath;
       seenPaths.add(relativePath);
       const sourceFormat = sourceFormatForPath(absolutePath);
       const markdown = sourceFormat === "markdown";
@@ -298,15 +352,23 @@ export async function scanSources(
             testOptions,
           )
         : undefined;
-      const fileStats = isManagedWebEvidence
+      const ordinarySource = isManagedWebEvidence
         ? undefined
-        : await stat(absolutePath);
-      const sourceBytes = managedContent?.byteLength ?? fileStats?.size ?? 0;
+        : await readOrdinarySource(
+            root,
+            relativePath,
+            candidate,
+            config.sources.maxFileBytes,
+            testOptions,
+          );
+      const sourceBytes =
+        managedContent?.byteLength ?? ordinarySource?.bytes ?? 0;
       const exceedsSizeLimit = sourceBytes > config.sources.maxFileBytes;
       const content = exceedsSizeLimit
         ? undefined
-        : (managedContent ?? (await readFile(absolutePath)));
-      const digest = content ? sha256(content) : await sha256File(absolutePath);
+        : (managedContent ?? ordinarySource?.content);
+      const digest =
+        ordinarySource?.digest ?? sha256(content ?? new Uint8Array());
       let webArtifact: ValidatedWebArtifactV1 | undefined;
       let webCapture: ReturnType<typeof parseWebCaptureMetadata>;
       if (isManagedWebEvidence) {

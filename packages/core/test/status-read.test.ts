@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   symlink,
@@ -10,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import {
   doctorBrain,
   initBrain,
@@ -24,11 +26,31 @@ import {
   type WikiPageV1,
   writeBrainState,
 } from "../src/index.js";
+import { inspectSourceDuplicateAcknowledgements } from "../src/onboarding.js";
 
 async function initializedBrain(name: string): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-onboarding-"));
   await initBrain(root, { name, description: `${name} source material.` });
   return root;
+}
+
+async function configureSourceRoots(
+  root: string,
+  sourceRoots: string[],
+): Promise<void> {
+  const configPath = path.join(root, "brain.config.yaml");
+  const config = parse(await readFile(configPath, "utf8"));
+  config.sources.roots = sourceRoots;
+  await writeFile(configPath, stringify(config));
+}
+
+async function directoryEntriesOrEmpty(directory: string): Promise<string[]> {
+  try {
+    return (await readdir(directory)).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 describe("brain status and reading", () => {
@@ -172,6 +194,174 @@ describe("brain status and reading", () => {
         ),
       ).sources,
     ).toEqual([]);
+  });
+
+  test.each(["root", "ancestor"] as const)(
+    "rejects a configured source %s symlink before status or scanning reads outside bytes",
+    async (condition) => {
+      const root = await initializedBrain(`Unsafe ${condition} source root`);
+      const outside = await mkdtemp(
+        path.join(tmpdir(), "brain-source-root-outside-"),
+      );
+      await writeFile(
+        path.join(outside, condition === "ancestor" ? "raw" : "outside.md"),
+        condition === "ancestor" ? "placeholder" : "# Outside\n\nPrivate.\n",
+      );
+      if (condition === "root") {
+        await rm(path.join(root, "sources"), { recursive: true });
+        await symlink(outside, path.join(root, "sources"));
+      } else {
+        await rm(path.join(outside, "raw"));
+        await mkdir(path.join(outside, "raw"));
+        await writeFile(
+          path.join(outside, "raw", "outside.md"),
+          "# Outside\n\nPrivate.\n",
+        );
+        await configureSourceRoots(root, ["imports/raw"]);
+        await symlink(outside, path.join(root, "imports"));
+      }
+      const canonicalPaths = [
+        ".brain/source-manifest.json",
+        ".brain/state.json",
+        ".brain/operations.jsonl",
+      ];
+      const before = await Promise.all(
+        canonicalPaths.map((relativePath) =>
+          readFile(path.join(root, relativePath), "utf8"),
+        ),
+      );
+
+      await expect(inspectOnboarding(root)).rejects.toThrow(
+        /source root.*symbolic link|source root.*brain root/i,
+      );
+      await expect(statusBrain(root)).rejects.toThrow(
+        /source root.*symbolic link|source root.*brain root/i,
+      );
+      await expect(scanSources(root)).rejects.toThrow(
+        /source root.*symbolic link|source root.*brain root/i,
+      );
+
+      expect(
+        await Promise.all(
+          canonicalPaths.map((relativePath) =>
+            readFile(path.join(root, relativePath), "utf8"),
+          ),
+        ),
+      ).toEqual(before);
+      expect(
+        await directoryEntriesOrEmpty(
+          path.join(root, ".brain", "cache", "extracted"),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  test("discovers canonical web evidence once alongside nested configured roots", async () => {
+    const root = await initializedBrain("Nested source roots");
+    await configureSourceRoots(root, ["knowledge", "knowledge/raw"]);
+    await mkdir(path.join(root, "knowledge", "raw"), { recursive: true });
+    await writeFile(
+      path.join(root, "knowledge", "raw", "facts.md"),
+      "# Facts\n\nLocal evidence.\n",
+    );
+    await mkdir(path.join(root, "sources", "web", "2026", "08"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(root, "sources", "web", "2026", "08", "capture.txt"),
+      "Captured evidence.\n",
+    );
+
+    await expect(inspectOnboarding(root)).resolves.toMatchObject({
+      sourceFiles: {
+        discovered: 2,
+        samplePaths: [
+          "knowledge/raw/facts.md",
+          "sources/web/2026/08/capture.txt",
+        ],
+      },
+    });
+
+    await configureSourceRoots(root, ["sources", "sources/web"]);
+    await expect(inspectOnboarding(root)).resolves.toMatchObject({
+      sourceFiles: {
+        discovered: 1,
+        samplePaths: ["sources/web/2026/08/capture.txt"],
+      },
+    });
+  });
+
+  test("does not accept a duplicate acknowledgement through an intermediate symlink", async () => {
+    const root = await initializedBrain("Duplicate primary containment");
+    const sourceBytes = "# Evidence\n\nCanonical bytes.\n";
+    await writeFile(path.join(root, "sources", "original.md"), sourceBytes);
+    const source = (await scanAndRegisterSources(root)).added[0];
+    if (!source) throw new Error("Expected a registered source");
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-duplicate-primary-outside-"),
+    );
+    await writeFile(path.join(outside, "copy.md"), sourceBytes);
+    await symlink(outside, path.join(root, "linked"));
+    const state = await readBrainState(root);
+    const duplicateState = {
+      ...state,
+      sourceDuplicates: [
+        {
+          path: "linked/copy.md",
+          sourceId: source.id,
+          sha256: source.sha256,
+          bytes: source.bytes,
+        },
+      ],
+    };
+    await writeBrainState(root, duplicateState);
+    const canonicalPaths = [
+      ".brain/source-manifest.json",
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+    ];
+    const before = await Promise.all(
+      canonicalPaths.map((relativePath) =>
+        readFile(path.join(root, relativePath), "utf8"),
+      ),
+    );
+    const cacheBefore = await directoryEntriesOrEmpty(
+      path.join(root, ".brain", "cache", "extracted"),
+    );
+
+    await expect(
+      inspectSourceDuplicateAcknowledgements(root, duplicateState, [source], {
+        verifyBytes: false,
+      }),
+    ).resolves.toMatchObject({
+      validPaths: new Set(),
+      invalid: [
+        {
+          path: "linked/copy.md",
+          reason: expect.stringMatching(
+            /symbolic link|outside the brain root/i,
+          ),
+        },
+      ],
+    });
+    await expect(statusBrain(root)).resolves.toMatchObject({
+      onboarding: {
+        phase: "ready-for-setup",
+        nextAction: "begin-setup",
+      },
+    });
+    expect(
+      await Promise.all(
+        canonicalPaths.map((relativePath) =>
+          readFile(path.join(root, relativePath), "utf8"),
+        ),
+      ),
+    ).toEqual(before);
+    expect(
+      await directoryEntriesOrEmpty(
+        path.join(root, ".brain", "cache", "extracted"),
+      ),
+    ).toEqual(cacheBefore);
   });
 
   test("treats content-identical source paths as durably acknowledged after scanning", async () => {

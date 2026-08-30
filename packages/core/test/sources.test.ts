@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rename,
   rm,
@@ -53,6 +54,27 @@ const webDiscovery = {
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function git(root: string, args: string[]): Promise<string> {
+  return (await execFileAsync("git", args, { cwd: root })).stdout.trim();
+}
+
+async function initializeGitHistory(root: string): Promise<void> {
+  await git(root, ["init", "-b", "main"]);
+  await git(root, ["config", "user.name", "Source Scan Test"]);
+  await git(root, ["config", "user.email", "source-scan@example.invalid"]);
+  await git(root, ["add", "."]);
+  await git(root, ["commit", "-m", "initial brain"]);
+}
+
+async function directoryEntriesOrEmpty(directory: string): Promise<string[]> {
+  try {
+    return (await readdir(directory)).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 function artifactSidecar(
@@ -774,6 +796,36 @@ describe("scanSources", () => {
       locator: "lines=1-3",
       text: "Alpha\nBeta\nGamma",
     });
+  });
+
+  test("scans overlapping nested roots once and always includes canonical web evidence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-nested-sources-"));
+    await initBrain(root, { name: "Test", description: "Nested roots test" });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.roots = ["knowledge", "knowledge/raw"];
+    await writeFile(configPath, stringify(config));
+    await mkdir(path.join(root, "knowledge", "raw"), { recursive: true });
+    await writeFile(
+      path.join(root, "knowledge", "raw", "facts.md"),
+      "# Facts\n\nNested local evidence.\n",
+    );
+    const webBytes = new TextEncoder().encode("Canonical web evidence.\n");
+    await writeWebArtifact(root, "capture-0123456789ab.txt", webBytes, {
+      ...artifactSidecar(
+        `${webArtifactDirectory}/capture-0123456789ab.txt`,
+        webBytes,
+      ),
+      format: "text",
+      mediaType: "text/plain",
+    });
+
+    const result = await scanSources(root);
+
+    expect(result.added.map((source) => source.path).sort()).toEqual([
+      "knowledge/raw/facts.md",
+      `${webArtifactDirectory}/capture-0123456789ab.txt`,
+    ]);
   });
 
   test("extracts readable HTML without executing or indexing scripts", async () => {
@@ -2762,6 +2814,78 @@ describe("scanSources", () => {
     });
     expect(result.added[0]?.error).toMatch(/exceeds.*16 bytes/i);
   });
+
+  test.each(["grows", "is replaced", "becomes a symlink"] as const)(
+    "rejects when an ordinary source %s after discovery without canonical or cache mutation",
+    async (condition) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "brain-source-read-race-"),
+      );
+      await initBrain(root, {
+        name: "Test",
+        description: "Ordinary source read race test",
+      });
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.maxFileBytes = 16;
+      await writeFile(configPath, stringify(config));
+      const relativePath = "sources/race.txt";
+      const sourcePath = path.join(root, relativePath);
+      await writeFile(sourcePath, "small\n");
+      await initializeGitHistory(root);
+      const outside = await mkdtemp(
+        path.join(tmpdir(), "brain-source-read-race-outside-"),
+      );
+      const outsidePath = path.join(outside, "outside.txt");
+      await writeFile(outsidePath, Buffer.alloc(64, "o"));
+      const canonicalPaths = [
+        ".brain/source-manifest.json",
+        ".brain/state.json",
+        ".brain/operations.jsonl",
+      ];
+      const before = await Promise.all(
+        canonicalPaths.map((candidate) =>
+          readFile(path.join(root, candidate), "utf8"),
+        ),
+      );
+      const headBefore = await git(root, ["rev-parse", "HEAD"]);
+      let mutated = false;
+
+      await expect(
+        scanSources(root, undefined, {
+          beforeLocalSourceRead: async (candidate) => {
+            if (candidate !== relativePath || mutated) return;
+            mutated = true;
+            if (condition === "grows") {
+              await writeFile(sourcePath, Buffer.alloc(64, "g"));
+            } else if (condition === "is replaced") {
+              const replacement = path.join(root, "replacement.txt");
+              await writeFile(replacement, Buffer.alloc(64, "r"));
+              await rename(replacement, sourcePath);
+            } else {
+              await rm(sourcePath);
+              await symlink(outsidePath, sourcePath);
+            }
+          },
+        }),
+      ).rejects.toThrow(/changed while scanning|symbolic link|exceeds.*16/i);
+
+      expect(mutated).toBe(true);
+      expect(
+        await Promise.all(
+          canonicalPaths.map((candidate) =>
+            readFile(path.join(root, candidate), "utf8"),
+          ),
+        ),
+      ).toEqual(before);
+      expect(await git(root, ["rev-parse", "HEAD"])).toBe(headBefore);
+      expect(
+        await directoryEntriesOrEmpty(
+          path.join(root, ".brain", "cache", "extracted"),
+        ),
+      ).toEqual([]);
+    },
+  );
 
   test("rejects EPUB archives containing traversal entry names", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-epub-traversal-"));

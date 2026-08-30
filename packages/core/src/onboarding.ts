@@ -1,7 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { access, lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
@@ -9,6 +8,14 @@ import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { catalogedSourceIds } from "./source-page-coverage.js";
 import { sourceFormatForPath } from "./sources/format.js";
+import {
+  effectiveSourceRoots,
+  type InspectedRepositoryEntry,
+  inspectRepositoryEntry,
+  openStableRepositoryFile,
+  unchangedRepositoryEntry,
+  walkSourceFiles,
+} from "./sources/path-safety.js";
 import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import { type BrainStateV1, readBrainState } from "./state.js";
 import { loadWikiPages } from "./wiki/graph.js";
@@ -153,30 +160,6 @@ export async function suggestBrainName(root: string): Promise<string> {
   }
 }
 
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function walkSourceFiles(directory: string): Promise<string[]> {
-  if (!(await pathExists(directory))) return [];
-  const files: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (entry.name.startsWith(".")) continue;
-    const absolutePath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await walkSourceFiles(absolutePath)));
-    } else if (entry.isFile()) {
-      files.push(absolutePath);
-    }
-  }
-  return files;
-}
-
 async function readSourceRecords(root: string): Promise<SourceRecordV1[]> {
   const manifest = z
     .object({ version: z.literal(1), sources: z.array(sourceRecordV1Schema) })
@@ -196,17 +179,58 @@ export interface InvalidSourceDuplicateV1 {
   reason: string;
 }
 
-async function digestFile(filePath: string): Promise<{
+async function digestInspectedFile(
+  root: string,
+  relativePath: string,
+  inspected: InspectedRepositoryEntry,
+  expectedBytes: number,
+  label: string,
+): Promise<{
   bytes: number;
   sha256: string;
 }> {
-  const hash = createHash("sha256");
-  let bytes = 0;
-  for await (const chunk of createReadStream(filePath)) {
-    bytes += chunk.byteLength;
-    hash.update(chunk);
+  let openedFile: Awaited<ReturnType<typeof openStableRepositoryFile>>;
+  try {
+    openedFile = await openStableRepositoryFile(inspected);
+  } catch {
+    throw new Error(`${label} changed while it was being verified`);
   }
-  return { bytes, sha256: hash.digest("hex") };
+  const { handle, metadata: opened } = openedFile;
+  try {
+    if (BigInt(expectedBytes) !== opened.size) {
+      throw new Error(`${label} changed while it was being verified`);
+    }
+    const hash = createHash("sha256");
+    let bytes = 0;
+    while (bytes <= expectedBytes) {
+      const chunk = Buffer.alloc(
+        Math.min(64 * 1024, expectedBytes + 1 - bytes),
+      );
+      const result = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (result.bytesRead === 0) break;
+      bytes += result.bytesRead;
+      hash.update(chunk.subarray(0, result.bytesRead));
+    }
+    const finalOpened = await handle.stat({ bigint: true });
+    const finalPath = await inspectRepositoryEntry(
+      root,
+      relativePath,
+      "file",
+      label,
+    );
+    if (
+      bytes !== expectedBytes ||
+      !unchangedRepositoryEntry(opened, finalOpened) ||
+      !finalPath ||
+      !unchangedRepositoryEntry(opened, finalPath.metadata) ||
+      finalPath.realPath !== inspected.realPath
+    ) {
+      throw new Error(`${label} changed while it was being verified`);
+    }
+    return { bytes, sha256: hash.digest("hex") };
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function inspectSourceDuplicateAcknowledgements(
@@ -251,13 +275,24 @@ export async function inspectSourceDuplicateAcknowledgements(
       reason = "duplicate acknowledgement does not match its canonical source";
     } else {
       try {
-        const metadata = await lstat(absolutePath);
-        if (!metadata.isFile()) {
-          reason = "duplicate source path is not a regular file";
-        } else if (metadata.size !== duplicate.bytes) {
+        const inspected = await inspectRepositoryEntry(
+          root,
+          duplicate.path,
+          "file",
+          "Duplicate source path",
+        );
+        if (!inspected) {
+          reason = "duplicate source cannot be read";
+        } else if (inspected.metadata.size !== BigInt(duplicate.bytes)) {
           reason = "duplicate source size changed after acknowledgement";
         } else if (options.verifyBytes ?? true) {
-          const actual = await digestFile(absolutePath);
+          const actual = await digestInspectedFile(
+            root,
+            duplicate.path,
+            inspected,
+            duplicate.bytes,
+            "Duplicate source path",
+          );
           if (
             actual.bytes !== duplicate.bytes ||
             actual.sha256 !== duplicate.sha256
@@ -265,8 +300,14 @@ export async function inspectSourceDuplicateAcknowledgements(
             reason = "duplicate source bytes changed after acknowledgement";
           }
         }
-      } catch {
-        reason = "duplicate source cannot be read";
+      } catch (error) {
+        reason =
+          error instanceof Error &&
+          /symbolic link|outside the brain root|non-directory component/i.test(
+            error.message,
+          )
+            ? error.message
+            : "duplicate source cannot be read";
       }
     }
     if (!reason && hasCompanion && !hasCompleteCompanion) {
@@ -279,32 +320,30 @@ export async function inspectSourceDuplicateAcknowledgements(
       duplicate.sidecarSha256 &&
       duplicate.sidecarBytes !== undefined
     ) {
-      const absoluteSidecarPath = path.resolve(root, duplicate.sidecarPath);
-      const sourcesPath = path.resolve(root, "sources");
-      if (!absoluteSidecarPath.startsWith(`${sourcesPath}${path.sep}`)) {
+      if (!duplicate.sidecarPath.startsWith("sources/")) {
         reason = "duplicate sidecar path escapes the brain sources tree";
       } else {
         try {
-          const [realRootPath, realSourcesPath, realSidecarPath] =
-            await Promise.all([
-              realpath(root),
-              realpath(path.join(root, "sources")),
-              realpath(absoluteSidecarPath),
-            ]);
-          if (
-            !realSourcesPath.startsWith(`${realRootPath}${path.sep}`) ||
-            !realSidecarPath.startsWith(`${realSourcesPath}${path.sep}`)
+          const inspected = await inspectRepositoryEntry(
+            root,
+            duplicate.sidecarPath,
+            "file",
+            "Duplicate sidecar path",
+          );
+          if (!inspected) {
+            reason = "duplicate sidecar cannot be read";
+          } else if (
+            inspected.metadata.size !== BigInt(duplicate.sidecarBytes)
           ) {
-            reason =
-              "duplicate sidecar resolves outside the brain sources tree";
-          }
-          const metadata = await lstat(absoluteSidecarPath);
-          if (!reason && !metadata.isFile()) {
-            reason = "duplicate sidecar path is not a regular file";
-          } else if (!reason && metadata.size !== duplicate.sidecarBytes) {
             reason = "duplicate sidecar size changed after acknowledgement";
           } else if (!reason && (options.verifyBytes ?? true)) {
-            const actual = await digestFile(absoluteSidecarPath);
+            const actual = await digestInspectedFile(
+              root,
+              duplicate.sidecarPath,
+              inspected,
+              duplicate.sidecarBytes,
+              "Duplicate sidecar path",
+            );
             if (
               actual.bytes !== duplicate.sidecarBytes ||
               actual.sha256 !== duplicate.sidecarSha256
@@ -312,8 +351,14 @@ export async function inspectSourceDuplicateAcknowledgements(
               reason = "duplicate sidecar bytes changed after acknowledgement";
             }
           }
-        } catch {
-          reason = "duplicate sidecar cannot be read";
+        } catch (error) {
+          reason =
+            error instanceof Error &&
+            /symbolic link|outside the brain root|non-directory component/i.test(
+              error.message,
+            )
+              ? error.message
+              : "duplicate sidecar cannot be read";
         }
       }
     }
@@ -507,12 +552,8 @@ export async function inspectOnboarding(
     suggestBrainName(root),
   ]);
   const discoveredAbsolutePaths = (
-    await Promise.all(
-      config.sources.roots.map((sourceRoot) =>
-        walkSourceFiles(path.join(root, sourceRoot)),
-      ),
-    )
-  ).flat();
+    await walkSourceFiles(root, effectiveSourceRoots(config.sources.roots))
+  ).map((file) => file.entry.absolutePath);
   const discoveredPaths = discoveredAbsolutePaths
     .map((absolutePath) =>
       path.relative(root, absolutePath).split(path.sep).join("/"),
