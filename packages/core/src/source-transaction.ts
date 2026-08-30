@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   type SupportedSourceFormatV1,
   sourceFormatForPath,
 } from "./sources/format.js";
+import { digestStableRepositoryFile } from "./sources/path-safety.js";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
@@ -181,8 +181,11 @@ async function assertSourceInputsAreStable(
       // The worktree is the immutable user input; checking it even for a Git
       // transaction catches a hook (or concurrent process) that changes the
       // file after the private index was initially sealed.
-      const workingDigest = await digestStream(
-        createReadStream(path.join(root, source.path)),
+      const workingDigest = await digestStableRepositoryFile(
+        root,
+        source.path,
+        "Source input",
+        source.bytes,
       );
       if (
         workingDigest.bytes !== source.bytes ||

@@ -5,7 +5,9 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,11 +17,13 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import { describe, expect, test } from "vitest";
 import { parse, stringify } from "yaml";
 import {
+  enrichSourceWebDiscovery,
   initBrain,
   recoverBrain,
   scanAndRegisterSources,
   supersedeRegisteredSource,
 } from "../src/index.js";
+import { registerWebSourceCapture } from "../src/source-transaction.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -216,6 +220,131 @@ describe("registered source transactions", () => {
     expect(
       await git(root, ["status", "--short", "--", "sources/facts.md"]),
     ).toBe("?? sources/facts.md");
+  });
+
+  test("rejects a same-byte source reached through a swapped ancestor symlink without changing canonical state", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-ancestor-"));
+    await initBrain(root, {
+      name: "Sources",
+      description: "Source ancestor containment test",
+    });
+    const sourceBytes = "# Facts\n\nOriginal source bytes.\n";
+    await writeFile(path.join(root, "sources", "facts.md"), sourceBytes);
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-source-ancestor-outside-"),
+    );
+    await writeFile(path.join(outside, "facts.md"), sourceBytes);
+    const canonicalPaths = [
+      ".brain/source-manifest.json",
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+      "wiki/log.md",
+    ];
+    const before = await Promise.all(
+      canonicalPaths.map((relativePath) =>
+        readFile(path.join(root, relativePath), "utf8"),
+      ),
+    );
+
+    await expect(
+      scanAndRegisterSources(root, {
+        afterMutation: async () => {
+          await rename(
+            path.join(root, "sources"),
+            path.join(root, "sources-original"),
+          );
+          await symlink(outside, path.join(root, "sources"));
+        },
+      }),
+    ).rejects.toThrow(/symbolic link|outside.*brain root|changed/i);
+
+    expect(
+      await Promise.all(
+        canonicalPaths.map((relativePath) =>
+          readFile(path.join(root, relativePath), "utf8"),
+        ),
+      ),
+    ).toEqual(before);
+    expect(await readFile(path.join(outside, "facts.md"), "utf8")).toBe(
+      sourceBytes,
+    );
+    await expect(
+      readFile(path.join(root, ".brain", "runtime", "transaction.json")),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a same-byte source inode replacement and preserves HEAD and unrelated work", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-inode-"));
+    await initGitBrain(root, "Source inode stability test");
+    const sourceBytes = "# Facts\n\nOriginal source bytes.\n";
+    const sourcePath = path.join(root, "sources", "facts.md");
+    await writeFile(sourcePath, sourceBytes);
+    await writeFile(path.join(root, "private-notes.txt"), "Keep me.\n");
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+
+    await expect(
+      scanAndRegisterSources(root, {
+        afterMutation: async () => {
+          await rename(sourcePath, path.join(root, "original-facts.md"));
+          await writeFile(sourcePath, sourceBytes);
+        },
+      }),
+    ).rejects.toThrow(/changed|unvalidated|identity/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(await readFile(path.join(root, "private-notes.txt"), "utf8")).toBe(
+      "Keep me.\n",
+    );
+  });
+
+  test("revalidates an idempotently reused source through its contained path", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-source-reuse-path-"));
+    await initGitBrain(root, "Idempotent source reuse containment test");
+    const sourceBytes = "# Facts\n\nReusable source bytes.\n";
+    await writeFile(path.join(root, "sources", "facts.md"), sourceBytes);
+    const source = (await scanAndRegisterSources(root)).added[0];
+    if (!source) throw new Error("Expected a registered source");
+    const discovery = {
+      originalUrl: "https://example.com/facts.md",
+      finalUrl: "https://example.com/facts.md",
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What do the reusable facts say?",
+      representation: "artifact" as const,
+      completeness: "complete" as const,
+    };
+    await enrichSourceWebDiscovery(root, source.id, discovery);
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-source-reuse-outside-"),
+    );
+    await writeFile(path.join(outside, "facts.md"), sourceBytes);
+
+    await expect(
+      registerWebSourceCapture(
+        root,
+        async () => ({ sourceId: source.id, discovery }),
+        {
+          afterMutation: async () => {
+            await rename(
+              path.join(root, "sources"),
+              path.join(root, "sources-original"),
+            );
+            await symlink(outside, path.join(root, "sources"));
+          },
+        },
+      ),
+    ).rejects.toThrow(/source.*changed|symbolic link|outside.*brain root/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(path.join(outside, "facts.md"), "utf8")).toBe(
+      sourceBytes,
+    );
   });
 
   test("rejects a pre-commit hook that re-stages changed source bytes", async () => {

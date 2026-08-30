@@ -1,6 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import {
   access,
   chmod,
@@ -26,6 +25,10 @@ import {
   planReconciliation,
 } from "./reconciliation.js";
 import type { BrainRuntimeServices } from "./semantic.js";
+import {
+  digestStableRepositoryFile,
+  inspectRepositoryEntry,
+} from "./sources/path-safety.js";
 import { readBrainState, type SyncStatusV1 } from "./state.js";
 import { writeGeneratedWikiFiles } from "./wiki/generated.js";
 import {
@@ -870,19 +873,9 @@ interface ManagedFileFingerprint {
   bytes?: number;
   sha256?: string;
   mode?: "100644" | "100755";
-}
-
-async function digestFile(filePath: string): Promise<{
-  bytes: number;
-  sha256: string;
-}> {
-  const hash = createHash("sha256");
-  let bytes = 0;
-  for await (const chunk of createReadStream(filePath)) {
-    bytes += chunk.byteLength;
-    hash.update(chunk);
-  }
-  return { bytes, sha256: hash.digest("hex") };
+  device?: string;
+  inode?: string;
+  realPath?: string;
 }
 
 async function digestIndexedFile(
@@ -919,8 +912,10 @@ async function digestIndexedFile(
   return result;
 }
 
-function gitRegularFileMode(mode: number): "100644" | "100755" {
-  return mode & 0o111 ? "100755" : "100644";
+function gitRegularFileMode(mode: number | bigint): "100644" | "100755" {
+  return (typeof mode === "bigint" ? mode & 0o111n : mode & 0o111)
+    ? "100755"
+    : "100644";
 }
 
 function canonicalManagedPath(
@@ -987,6 +982,33 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
     return directory;
   }
 
+  private async fingerprintExisting(
+    relativePath: string,
+    expected: { bytes: number; sha256: string },
+  ): Promise<ManagedFileFingerprint> {
+    canonicalManagedPath(this.root, relativePath, this.managedRootPaths);
+    const digest = await digestStableRepositoryFile(
+      this.root,
+      relativePath,
+      "Managed canonical file",
+      expected.bytes,
+    );
+    if (digest.sha256 !== expected.sha256) {
+      throw new Error(
+        `Managed canonical file bytes do not match their sealed digest: ${relativePath}`,
+      );
+    }
+    return {
+      relativePath,
+      exists: true,
+      ...expected,
+      mode: gitRegularFileMode(digest.metadata.mode),
+      device: String(digest.metadata.dev),
+      inode: String(digest.metadata.ino),
+      realPath: digest.realPath,
+    };
+  }
+
   async writeText(relativePath: string, content: string): Promise<void> {
     await this.writeBytes(relativePath, Buffer.from(content, "utf8"));
   }
@@ -1010,13 +1032,13 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
     } finally {
       await rm(temporaryPath, { force: true });
     }
-    this.expected.set(relativePath, {
+    this.expected.set(
       relativePath,
-      exists: true,
-      bytes: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      mode: "100644",
-    });
+      await this.fingerprintExisting(relativePath, {
+        bytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    );
   }
 
   async remove(relativePath: string): Promise<void> {
@@ -1038,24 +1060,10 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
     relativePath: string,
     expected: { bytes: number; sha256: string },
   ): Promise<void> {
-    const absolutePath = canonicalManagedPath(
-      this.root,
+    this.expected.set(
       relativePath,
-      this.managedRootPaths,
+      await this.fingerprintExisting(relativePath, expected),
     );
-    await this.canonicalParent(absolutePath);
-    const metadata = await lstat(absolutePath);
-    if (!metadata.isFile()) {
-      throw new Error(
-        `Managed canonical file must be regular before staging: ${relativePath}`,
-      );
-    }
-    this.expected.set(relativePath, {
-      relativePath,
-      exists: true,
-      ...expected,
-      mode: gitRegularFileMode(metadata.mode),
-    });
   }
 
   assertStagePaths(stagePaths: string[]): void {
@@ -1077,38 +1085,58 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
 
   async assertWorktree(): Promise<void> {
     for (const expected of this.expected.values()) {
-      const absolutePath = canonicalManagedPath(
-        this.root,
-        expected.relativePath,
-        this.managedRootPaths,
-      );
-      let metadata: Awaited<ReturnType<typeof lstat>>;
-      try {
-        metadata = await lstat(absolutePath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          if (!expected.exists) continue;
+      if (!expected.exists) {
+        let current: Awaited<ReturnType<typeof inspectRepositoryEntry>>;
+        try {
+          current = await inspectRepositoryEntry(
+            this.root,
+            expected.relativePath,
+            "file",
+            "Managed canonical file",
+            true,
+          );
+        } catch {
           throw new Error(
             `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
           );
         }
-        throw error;
-      }
-      if (!expected.exists) {
+        if (!current) continue;
         throw new Error(
           `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
         );
       }
-      if (!metadata.isFile()) {
+      if (
+        expected.bytes === undefined ||
+        expected.sha256 === undefined ||
+        expected.mode === undefined ||
+        expected.device === undefined ||
+        expected.inode === undefined ||
+        expected.realPath === undefined
+      ) {
         throw new Error(
-          `Managed canonical file is not a regular file after graph validation: ${expected.relativePath}`,
+          `Managed canonical file is missing its sealed fingerprint: ${expected.relativePath}`,
         );
       }
-      const digest = await digestFile(absolutePath);
+      let digest: Awaited<ReturnType<typeof digestStableRepositoryFile>>;
+      try {
+        digest = await digestStableRepositoryFile(
+          this.root,
+          expected.relativePath,
+          "Managed canonical file",
+          expected.bytes,
+        );
+      } catch {
+        throw new Error(
+          `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
+        );
+      }
       if (
         digest.bytes !== expected.bytes ||
         digest.sha256 !== expected.sha256 ||
-        gitRegularFileMode(metadata.mode) !== expected.mode
+        gitRegularFileMode(digest.metadata.mode) !== expected.mode ||
+        String(digest.metadata.dev) !== expected.device ||
+        String(digest.metadata.ino) !== expected.inode ||
+        digest.realPath !== expected.realPath
       ) {
         throw new Error(
           `Managed canonical file changed after graph validation; refusing to commit an unvalidated tree: ${expected.relativePath}`,
@@ -1536,17 +1564,17 @@ export async function runCanonicalWrite<T>(
             "Git staged changes appeared during the canonical write; refusing to commit",
           );
         }
+        await mutation.verifyBeforeCommit?.({
+          gitRepository: true,
+          indexPath: isolatedIndexPath,
+        });
+        await writer.assertWorktree();
         await assertNoUnexpectedCanonicalWorktreeChanges(
           root,
           stagePaths,
           managedRootPaths,
           managedFilePaths,
         );
-        await mutation.verifyBeforeCommit?.({
-          gitRepository: true,
-          indexPath: isolatedIndexPath,
-        });
-        await writer.assertWorktree();
         await assertPrivateIndexMatchesWorktree(
           root,
           isolatedIndexPath,
@@ -1588,6 +1616,7 @@ export async function runCanonicalWrite<T>(
           gitRepository: true,
           indexPath: isolatedIndexPath,
         });
+        await writer.assertWorktree();
         await assertPrivateIndexMatchesWorktree(
           root,
           isolatedIndexPath,
@@ -1660,6 +1689,7 @@ export async function runCanonicalWrite<T>(
     } else {
       await options.testOptions?.beforeStage?.();
       await mutation.verifyBeforeCommit?.({ gitRepository: false });
+      await writer.assertWorktree();
       await mutation.verifySealedState?.();
       await writer.assertWorktree();
       committed = true;

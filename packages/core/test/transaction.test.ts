@@ -2,8 +2,10 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import {
   access,
   chmod,
+  cp,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -667,6 +669,105 @@ describe("applyChangeSetTransaction", () => {
         options,
       ),
     ).rejects.toThrow(/regular|symlink|unvalidated/i);
+  });
+
+  test("rejects a same-content wiki reached through a swapped ancestor symlink without touching outside files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-wiki-ancestor-"));
+    await initBrain(root, {
+      name: "Transactions",
+      description: "Wiki ancestor containment test",
+    });
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-wiki-ancestor-outside-"),
+    );
+    const outsideWiki = path.join(outside, "wiki");
+    const canonicalPaths = [
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+      "wiki/log.md",
+    ];
+    const before = await Promise.all(
+      canonicalPaths.map((relativePath) =>
+        readFile(path.join(root, relativePath), "utf8"),
+      ),
+    );
+    let outsideLog = "";
+    let outsidePage = "";
+    const options = {
+      afterMutation: async () => {
+        await cp(path.join(root, "wiki"), outsideWiki, { recursive: true });
+        outsideLog = await readFile(path.join(outsideWiki, "log.md"), "utf8");
+        outsidePage = await readFile(
+          path.join(outsideWiki, "pages", "sources", "orbits.md"),
+          "utf8",
+        );
+        await rename(path.join(root, "wiki"), path.join(root, "wiki-original"));
+        await symlink(outsideWiki, path.join(root, "wiki"));
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_wiki_ancestor_symlink"),
+        options,
+      ),
+    ).rejects.toThrow(/symbolic link|outside.*brain root|unvalidated|changed/i);
+
+    expect(
+      await Promise.all(
+        canonicalPaths.map((relativePath) =>
+          readFile(path.join(root, relativePath), "utf8"),
+        ),
+      ),
+    ).toEqual(before);
+    expect(await readFile(path.join(outsideWiki, "log.md"), "utf8")).toBe(
+      outsideLog,
+    );
+    expect(
+      await readFile(
+        path.join(outsideWiki, "pages", "sources", "orbits.md"),
+        "utf8",
+      ),
+    ).toBe(outsidePage);
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+    await expect(
+      readFile(path.join(root, ".brain", "runtime", "transaction.json")),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a same-byte managed-file inode replacement while preserving HEAD and unrelated work", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const logPath = path.join(root, "wiki", "log.md");
+    const beforeLog = await readFile(logPath, "utf8");
+    const displacedPath = path.join(root, "generated-log-original.md");
+    const options = {
+      afterMutation: async () => {
+        const generatedLog = await readFile(logPath, "utf8");
+        await rename(logPath, displacedPath);
+        await writeFile(logPath, generatedLog);
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_managed_inode_swap"),
+        options,
+      ),
+    ).rejects.toThrow(/changed|identity|unvalidated/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(logPath, "utf8")).toBe(beforeLog);
+    await expect(readFile(displacedPath, "utf8")).resolves.toContain(
+      "op_managed_inode_swap",
+    );
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
   });
 
   test("rejects a generated wiki log overwrite before initial transaction sealing", async () => {

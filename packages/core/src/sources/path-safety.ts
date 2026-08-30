@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type BigIntStats, constants, type Dirent } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
@@ -134,6 +135,71 @@ export async function openStableRepositoryFile(
   } catch (error) {
     await handle.close();
     throw error;
+  }
+}
+
+export async function digestStableRepositoryFile(
+  root: string,
+  relativePath: string,
+  label: string,
+  expectedBytes: number,
+): Promise<{
+  bytes: number;
+  sha256: string;
+  realPath: string;
+  metadata: BigIntStats;
+}> {
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0) {
+    throw new Error(`${label} has an unsupported byte length: ${relativePath}`);
+  }
+  const inspected = await inspectRepositoryEntry(
+    root,
+    relativePath,
+    "file",
+    label,
+  );
+  if (!inspected) throw new Error(`${label} cannot be read: ${relativePath}`);
+  const { handle, metadata: opened } =
+    await openStableRepositoryFile(inspected);
+  try {
+    if (opened.size !== BigInt(expectedBytes)) {
+      throw new Error(`${label} changed while it was being verified`);
+    }
+    const hash = createHash("sha256");
+    let bytes = 0;
+    while (bytes <= expectedBytes) {
+      const chunk = Buffer.alloc(
+        Math.min(64 * 1024, expectedBytes + 1 - bytes),
+      );
+      const result = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (result.bytesRead === 0) break;
+      bytes += result.bytesRead;
+      hash.update(chunk.subarray(0, result.bytesRead));
+    }
+    const finalOpened = await handle.stat({ bigint: true });
+    const finalPath = await inspectRepositoryEntry(
+      root,
+      relativePath,
+      "file",
+      label,
+    );
+    if (
+      bytes !== expectedBytes ||
+      !unchangedRepositoryEntry(opened, finalOpened) ||
+      !finalPath ||
+      !unchangedRepositoryEntry(opened, finalPath.metadata) ||
+      finalPath.realPath !== inspected.realPath
+    ) {
+      throw new Error(`${label} changed while it was being verified`);
+    }
+    return {
+      bytes,
+      sha256: hash.digest("hex"),
+      realPath: inspected.realPath,
+      metadata: opened,
+    };
+  } finally {
+    await handle.close();
   }
 }
 
