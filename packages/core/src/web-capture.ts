@@ -241,6 +241,42 @@ function captureRelativePath(retrievedAt: string, fileName: string): string {
   return path.posix.join("sources", "web", year, month, fileName);
 }
 
+function legacyPreparedArtifactTimestamp(
+  sourcePath: string,
+  fileName: string,
+  modifiedAt: string,
+): string {
+  const match = /^sources\/web\/(\d{4})\/(0[1-9]|1[0-2])\/([^/]+)$/.exec(
+    sourcePath,
+  );
+  if (!match || match[3] !== fileName) {
+    throw new Error(
+      `Prepared web evidence path is not a valid YYYY/MM artifact path: ${sourcePath}`,
+    );
+  }
+  const monthStart = new Date(`${match[1]}-${match[2]}-01T00:00:00.000Z`);
+  const nextMonthStart = new Date(monthStart);
+  nextMonthStart.setUTCMonth(nextMonthStart.getUTCMonth() + 1);
+  const modifiedTime = Date.parse(modifiedAt);
+  if (
+    !Number.isFinite(monthStart.getTime()) ||
+    !Number.isFinite(modifiedTime)
+  ) {
+    throw new Error(
+      `Prepared web artifact has an invalid recovery timestamp: ${sourcePath}`,
+    );
+  }
+
+  // Legacy artifact-only preparations have no durable retrieval timestamp.
+  // Preserve an in-month mtime; otherwise clamp it to the closest instant in
+  // the already validated path month so a clock/month rollover stays resumable.
+  const recoveredTime = Math.min(
+    Math.max(modifiedTime, monthStart.getTime()),
+    nextMonthStart.getTime() - 1,
+  );
+  return new Date(recoveredTime).toISOString();
+}
+
 async function readSources(root: string): Promise<SourceRecordV1[]> {
   const manifest = JSON.parse(
     await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
@@ -1044,7 +1080,11 @@ export async function captureWebEvidence(
                   `Prepared web artifact bytes do not match the requested capture: ${sourcePath}`,
                 );
               }
-              retrievedAt = preparedArtifact.modifiedAt;
+              retrievedAt = legacyPreparedArtifactTimestamp(
+                sourcePath,
+                fileName,
+                preparedArtifact.modifiedAt,
+              );
             }
             if (captureRelativePath(retrievedAt, fileName) !== sourcePath) {
               throw new Error(

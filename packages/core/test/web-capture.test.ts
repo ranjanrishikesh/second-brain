@@ -1695,6 +1695,45 @@ describe("durable web evidence capture", () => {
     },
   );
 
+  test("resumes an August artifact-only preparation whose mtime crossed into September", async () => {
+    const { root, queryId } = await approvedBrain(
+      "Resume a month-boundary artifact?",
+    );
+    const content = encoder.encode("month-boundary bytes\n");
+    const digest = sha256(content).slice(0, 12);
+    const sourcePath = `sources/web/2026/08/month-boundary-${digest}.txt`;
+    const sidecarPath = `sources/web/2026/08/.month-boundary-${digest}.txt.web.json`;
+    await mkdir(path.dirname(path.join(root, sourcePath)), { recursive: true });
+    await writeFile(path.join(root, sourcePath), content);
+    await utimes(
+      path.join(root, sourcePath),
+      new Date("2026-09-01T00:00:00.000Z"),
+      new Date("2026-09-01T00:00:00.000Z"),
+    );
+
+    const result = await captureWebEvidence(root, queryId, {
+      representation: "artifact",
+      originalUrl: "https://example.test/month-boundary.txt",
+      title: "Month boundary",
+      fileName: "month-boundary.txt",
+      responseComplete: true,
+      content,
+    });
+
+    expect(result).toMatchObject({
+      created: true,
+      source: { path: sourcePath },
+    });
+    expect(await readFile(path.join(root, sourcePath))).toEqual(
+      Buffer.from(content),
+    );
+    const sidecar = JSON.parse(
+      await readFile(path.join(root, sidecarPath), "utf8"),
+    );
+    expect(sidecar.discovery.retrievedAt).toBe("2026-08-31T23:59:59.999Z");
+    expect(await webFiles(root)).toEqual([sidecarPath, sourcePath].sort());
+  });
+
   test.each(["artifact", "sidecar"] as const)(
     "fails closed without creating a companion for mismatched %s-only preparation",
     async (existing) => {
