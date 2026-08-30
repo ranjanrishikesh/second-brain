@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { type BigIntStats, constants } from "node:fs";
+import { access, lstat, open, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { z, ZodError } from "zod";
+import { ZodError, z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import {
   inspectBrainCharter,
@@ -11,8 +12,8 @@ import {
   inspectSetupCompletionIntegrity,
   inspectSourceDuplicateAcknowledgements,
 } from "./onboarding.js";
+import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import { brainStateV1Schema } from "./state.js";
-import { sourceRecordV1Schema } from "./sources/types.js";
 import { syncStatus } from "./sync.js";
 import { operationRecordV1Schema } from "./transaction.js";
 import { validateWikiGraph } from "./wiki/graph.js";
@@ -29,6 +30,16 @@ export interface DoctorIssue {
 export interface DoctorReport {
   ok: boolean;
   issues: DoctorIssue[];
+}
+
+export interface DoctorTestOptions {
+  /** Reports bounded registered-source read progress; tests only. */
+  afterSourceReadProgress?: (
+    sourcePath: string,
+    bytesRead: number,
+  ) => Promise<void> | void;
+  /** Pauses after a registered source is opened and initially sealed; tests only. */
+  afterSourceOpened?: (sourcePath: string) => Promise<void> | void;
 }
 
 const requiredPaths = [
@@ -60,10 +71,204 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function doctorBrain(root: string): Promise<DoctorReport> {
-  const issues: DoctorIssue[] = [];
+function sourceIssue(
+  source: SourceRecordV1,
+  code: string,
+  message: string,
+): DoctorIssue {
+  return {
+    code,
+    severity: "error",
+    message,
+    path: source.path,
+  };
+}
+
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function unchangedFile(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function isContained(parent: string, candidate: string): boolean {
+  return candidate.startsWith(`${parent}${path.sep}`);
+}
+
+async function inspectRegisteredSource(
+  root: string,
+  source: SourceRecordV1,
+  maxFileBytes: number,
+  testOptions: DoctorTestOptions,
+): Promise<DoctorIssue | undefined> {
+  const lexicalRoot = path.resolve(root);
+  const absolutePath = path.resolve(root, source.path);
+  if (!isContained(lexicalRoot, absolutePath)) {
+    return sourceIssue(
+      source,
+      "SOURCE_PATH_UNSAFE",
+      `Registered source path escapes the brain root: ${source.path}`,
+    );
+  }
+
+  let metadata: BigIntStats;
   try {
-    await loadBrainConfig(root);
+    metadata = await lstat(absolutePath, { bigint: true });
+  } catch (error) {
+    return sourceIssue(
+      source,
+      "SOURCE_MISSING",
+      `Registered source cannot be read: ${source.path} (${errorMessage(error)})`,
+    );
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    return sourceIssue(
+      source,
+      "SOURCE_PATH_UNSAFE",
+      `Registered source must be a non-symlink file: ${source.path}`,
+    );
+  }
+
+  let realRoot: string;
+  let realFile: string;
+  try {
+    [realRoot, realFile] = await Promise.all([
+      realpath(lexicalRoot),
+      realpath(absolutePath),
+    ]);
+  } catch (error) {
+    return sourceIssue(
+      source,
+      "SOURCE_MISSING",
+      `Registered source cannot be resolved: ${source.path} (${errorMessage(error)})`,
+    );
+  }
+  if (!isContained(realRoot, realFile)) {
+    return sourceIssue(
+      source,
+      "SOURCE_PATH_UNSAFE",
+      `Registered source resolves outside the brain root: ${source.path}`,
+    );
+  }
+
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      absolutePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const opened = await handle.stat({ bigint: true });
+    await testOptions.afterSourceReadProgress?.(source.path, 0);
+    if (!opened.isFile() || !sameFileIdentity(metadata, opened)) {
+      return sourceIssue(
+        source,
+        "SOURCE_CHANGED_DURING_CHECK",
+        `Registered source changed while Doctor opened it: ${source.path}`,
+      );
+    }
+    if (source.bytes > maxFileBytes) {
+      return sourceIssue(
+        source,
+        "SOURCE_SIZE_MISMATCH",
+        `Registered source exceeds configured maximum of ${maxFileBytes} bytes: ${source.path}`,
+      );
+    }
+    if (opened.size !== BigInt(source.bytes)) {
+      return sourceIssue(
+        source,
+        "SOURCE_SIZE_MISMATCH",
+        `Registered source size changed: ${source.path} (expected ${source.bytes}, found ${opened.size})`,
+      );
+    }
+
+    await testOptions.afterSourceOpened?.(source.path);
+    const afterOpen = await handle.stat({ bigint: true });
+    const [afterOpenPath, afterOpenRealFile] = await Promise.all([
+      lstat(absolutePath, { bigint: true }).catch(() => undefined),
+      realpath(absolutePath).catch(() => undefined),
+    ]);
+    if (
+      !unchangedFile(opened, afterOpen) ||
+      !afterOpenPath?.isFile() ||
+      afterOpenPath.isSymbolicLink() ||
+      !sameFileIdentity(opened, afterOpenPath) ||
+      !afterOpenRealFile ||
+      !isContained(realRoot, afterOpenRealFile)
+    ) {
+      return sourceIssue(
+        source,
+        "SOURCE_CHANGED_DURING_CHECK",
+        `Registered source changed after Doctor opened it: ${source.path}`,
+      );
+    }
+
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(Math.min(64 * 1024, source.bytes));
+    let bytesRead = 0;
+    while (bytesRead < source.bytes) {
+      const requested = Math.min(buffer.byteLength, source.bytes - bytesRead);
+      const result = await handle.read(buffer, 0, requested, null);
+      if (result.bytesRead === 0) break;
+      hash.update(buffer.subarray(0, result.bytesRead));
+      bytesRead += result.bytesRead;
+      await testOptions.afterSourceReadProgress?.(source.path, bytesRead);
+    }
+
+    const finalOpened = await handle.stat({ bigint: true });
+    const [finalPath, finalRealFile] = await Promise.all([
+      lstat(absolutePath, { bigint: true }).catch(() => undefined),
+      realpath(absolutePath).catch(() => undefined),
+    ]);
+    if (
+      bytesRead !== source.bytes ||
+      !unchangedFile(opened, finalOpened) ||
+      !finalPath?.isFile() ||
+      finalPath.isSymbolicLink() ||
+      !sameFileIdentity(opened, finalPath) ||
+      !finalRealFile ||
+      !isContained(realRoot, finalRealFile)
+    ) {
+      return sourceIssue(
+        source,
+        "SOURCE_CHANGED_DURING_CHECK",
+        `Registered source changed while Doctor read it: ${source.path}`,
+      );
+    }
+    if (hash.digest("hex") !== source.sha256) {
+      return sourceIssue(
+        source,
+        "SOURCE_HASH_MISMATCH",
+        `Registered source bytes changed: ${source.path}`,
+      );
+    }
+    return undefined;
+  } catch (error) {
+    const unsafe = (error as NodeJS.ErrnoException).code === "ELOOP";
+    return sourceIssue(
+      source,
+      unsafe ? "SOURCE_PATH_UNSAFE" : "SOURCE_MISSING",
+      `Registered source cannot be read: ${source.path} (${errorMessage(error)})`,
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+export async function doctorBrain(
+  root: string,
+  testOptions: DoctorTestOptions = {},
+): Promise<DoctorReport> {
+  const issues: DoctorIssue[] = [];
+  let maxFileBytes = 0;
+  try {
+    const config = await loadBrainConfig(root);
+    maxFileBytes = config.sources.maxFileBytes;
   } catch (error) {
     const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
     issues.push({
@@ -145,35 +350,13 @@ export async function doctorBrain(root: string): Promise<DoctorReport> {
   }
 
   for (const source of manifest?.sources ?? []) {
-    const absolutePath = path.resolve(root, source.path);
-    if (!absolutePath.startsWith(`${path.resolve(root)}${path.sep}`)) {
-      issues.push({
-        code: "SOURCE_PATH_UNSAFE",
-        severity: "error",
-        message: `Registered source path escapes the brain root: ${source.path}`,
-        path: source.path,
-      });
-      continue;
-    }
-    try {
-      const content = await readFile(absolutePath);
-      const actualHash = createHash("sha256").update(content).digest("hex");
-      if (actualHash !== source.sha256) {
-        issues.push({
-          code: "SOURCE_HASH_MISMATCH",
-          severity: "error",
-          message: `Registered source bytes changed: ${source.path}`,
-          path: source.path,
-        });
-      }
-    } catch (error) {
-      issues.push({
-        code: "SOURCE_MISSING",
-        severity: "error",
-        message: `Registered source cannot be read: ${source.path} (${errorMessage(error)})`,
-        path: source.path,
-      });
-    }
+    const issue = await inspectRegisteredSource(
+      root,
+      source,
+      maxFileBytes,
+      testOptions,
+    );
+    if (issue) issues.push(issue);
   }
 
   if (manifest && state) {

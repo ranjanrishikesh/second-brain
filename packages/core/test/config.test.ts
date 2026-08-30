@@ -407,7 +407,7 @@ describe("doctorBrain", () => {
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "OPERATIONS_INVALID" }),
-        expect.objectContaining({ code: "SOURCE_HASH_MISMATCH" }),
+        expect.objectContaining({ code: "SOURCE_SIZE_MISMATCH" }),
         expect.objectContaining({ code: "RECOVERY_REQUIRED" }),
       ]),
     );
