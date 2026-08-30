@@ -59,8 +59,7 @@ describe("loadBrainConfig", () => {
     expect(config.version).toBe(1);
     expect(config.brain.name).toBe("Astronomy");
     expect(config.support).toEqual({
-      issueTrackerUrl:
-        "https://github.com/ranjanrishikesh/second-brain/issues",
+      issueTrackerUrl: "https://github.com/ranjanrishikesh/second-brain/issues",
     });
     expect(config.bootstrap.mode).toBe("catalog-map");
     expect(config).toMatchObject({

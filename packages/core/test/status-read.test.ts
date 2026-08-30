@@ -45,8 +45,7 @@ describe("brain status and reading", () => {
       sourceFiles: { discovered: 0, registered: 0 },
     });
     expect((await statusBrain(initializedEmptyRoot)).support).toEqual({
-      issueTrackerUrl:
-        "https://github.com/ranjanrishikesh/second-brain/issues",
+      issueTrackerUrl: "https://github.com/ranjanrishikesh/second-brain/issues",
     });
     expect(
       await readFile(
