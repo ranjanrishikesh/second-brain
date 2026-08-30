@@ -258,6 +258,11 @@ export interface PdfExtractionTestOptions {
   afterGetPage?: (page: object) => Promise<void> | void;
   /** Reports only the cumulative UTF-8 bytes retained by the extractor. */
   afterRetainedBytes?: (retainedBytes: number) => Promise<void> | void;
+  /** Reports the bounded core string buffer and cumulative retained bytes. */
+  afterCoreBufferChange?: (
+    bufferedChunkBytes: number,
+    retainedBytes: number,
+  ) => Promise<void> | void;
 }
 
 export async function extractPdf(
@@ -290,10 +295,47 @@ export async function extractPdf(
       const page = await document.getPage(pageNumber);
       try {
         await testOptions.afterGetPage?.(page);
-        let pageText = "";
+        const pageTextChunks: string[] = [];
+        const coreChunkLimit = Math.min(4_096, policy.maxExtractedBytes);
+        let bufferedPageText = "";
+        let bufferedPageBytes = 0;
+        let pageHasText = false;
+        const flushPageBuffer = (): void => {
+          if (!bufferedPageText) return;
+          pageTextChunks.push(bufferedPageText);
+          bufferedPageText = "";
+          bufferedPageBytes = 0;
+        };
+        const retainPageFragment = async (
+          fragment: string,
+          fragmentBytes: number,
+        ): Promise<void> => {
+          if (
+            bufferedPageBytes > 0 &&
+            fragmentBytes > coreChunkLimit - bufferedPageBytes
+          ) {
+            flushPageBuffer();
+          }
+          bufferedPageText += fragment;
+          bufferedPageBytes += fragmentBytes;
+          extractedBytes += fragmentBytes;
+          await testOptions.afterCoreBufferChange?.(
+            bufferedPageBytes,
+            extractedBytes,
+          );
+          await testOptions.afterRetainedBytes?.(extractedBytes);
+        };
         const reader = page.streamTextContent().getReader();
         let streamComplete = false;
         let streamCancelled = false;
+        const rejectOutputBudget = async (): Promise<never> => {
+          const budgetError = new Error(
+            `Extracted PDF content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+          );
+          streamCancelled = true;
+          await reader.cancel(budgetError).catch(() => undefined);
+          throw budgetError;
+        };
         try {
           for (;;) {
             const next = await reader.read();
@@ -303,24 +345,34 @@ export async function extractPdf(
             }
             for (const item of next.value.items) {
               if (!("str" in item)) continue;
-              const normalizedItem = item.str.trim().replace(/\s+/g, " ");
-              if (!normalizedItem) continue;
-              const separatorBytes = pageText ? 1 : chunks.length > 0 ? 2 : 0;
-              const itemBytes = Buffer.byteLength(normalizedItem, "utf8");
-              if (
-                separatorBytes + itemBytes >
-                policy.maxExtractedBytes - extractedBytes
-              ) {
-                const budgetError = new Error(
-                  `Extracted PDF content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
-                );
-                streamCancelled = true;
-                await reader.cancel(budgetError).catch(() => undefined);
-                throw budgetError;
+              let itemHasText = false;
+              let pendingWhitespace = false;
+              for (const codePoint of item.str) {
+                if (/\s/u.test(codePoint)) {
+                  if (itemHasText) pendingWhitespace = true;
+                  continue;
+                }
+                const pageSeparatorBytes =
+                  !pageHasText && chunks.length > 0 ? 2 : 0;
+                const spaceRequired = pageHasText
+                  ? !itemHasText || pendingWhitespace
+                  : false;
+                const codePointBytes = Buffer.byteLength(codePoint, "utf8");
+                const retainedBytes =
+                  pageSeparatorBytes + (spaceRequired ? 1 : 0) + codePointBytes;
+                if (retainedBytes > policy.maxExtractedBytes - extractedBytes) {
+                  await rejectOutputBudget();
+                }
+                if (pageSeparatorBytes > 0) {
+                  extractedBytes += pageSeparatorBytes;
+                  await testOptions.afterRetainedBytes?.(extractedBytes);
+                }
+                if (spaceRequired) await retainPageFragment(" ", 1);
+                await retainPageFragment(codePoint, codePointBytes);
+                pageHasText = true;
+                itemHasText = true;
+                pendingWhitespace = false;
               }
-              pageText += `${pageText ? " " : ""}${normalizedItem}`;
-              extractedBytes += separatorBytes + itemBytes;
-              await testOptions.afterRetainedBytes?.(extractedBytes);
             }
           }
         } finally {
@@ -329,13 +381,14 @@ export async function extractPdf(
           }
           reader.releaseLock();
         }
-        if (!pageText) continue;
+        if (!pageHasText) continue;
+        flushPageBuffer();
         chunks.push({
           id: `${sourceId}_${String(pageNumber - 1).padStart(4, "0")}`,
           sourceId,
           ordinal: pageNumber - 1,
           locator: `page=${pageNumber}`,
-          text: pageText,
+          text: pageTextChunks.join(""),
         });
       } finally {
         page.cleanup();

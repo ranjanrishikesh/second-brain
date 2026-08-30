@@ -606,7 +606,7 @@ describe("scanSources", () => {
     expect(requestedPages).toBe(0);
   });
 
-  test("streams PDF text and cancels before retaining output beyond the byte budget", async () => {
+  test("normalizes one oversized PDF text item without retaining an oversized core copy", async () => {
     const document = await PDFDocument.create();
     const page = document.addPage();
     const font = await document.embedFont(StandardFonts.Helvetica);
@@ -624,6 +624,7 @@ describe("scanSources", () => {
     let cancelCalls = 0;
     let pageCleanupCalls = 0;
     const retainedByteObservations: number[] = [];
+    const bufferedChunkObservations: number[] = [];
     type ControlledPdfPage = {
       getTextContent: () => Promise<unknown>;
       streamTextContent: () => ReadableStream<unknown>;
@@ -637,6 +638,10 @@ describe("scanSources", () => {
       testOptions: {
         afterGetPage: (page: object) => void;
         afterRetainedBytes: (retainedBytes: number) => void;
+        afterCoreBufferChange: (
+          bufferedChunkBytes: number,
+          retainedBytes: number,
+        ) => void;
       },
     ) => Promise<unknown>;
 
@@ -661,16 +666,7 @@ describe("scanSources", () => {
                   controller.enqueue({
                     items: [
                       {
-                        str: "kept",
-                        dir: "ltr",
-                        transform: [1, 0, 0, 1, 40, 700],
-                        width: 20,
-                        height: 10,
-                        fontName: "Helvetica",
-                        hasEOL: false,
-                      },
-                      {
-                        str: "overflow ".repeat(200),
+                        str: `  kept \t${"overflow ".repeat(200)}`,
                         dir: "ltr",
                         transform: [1, 0, 0, 1, 40, 680],
                         width: 2_000,
@@ -703,6 +699,10 @@ describe("scanSources", () => {
           afterRetainedBytes(retainedBytes) {
             retainedByteObservations.push(retainedBytes);
           },
+          afterCoreBufferChange(bufferedChunkBytes, retainedBytes) {
+            bufferedChunkObservations.push(bufferedChunkBytes);
+            retainedByteObservations.push(retainedBytes);
+          },
         },
       ),
     ).rejects.toThrow(/extracted pdf content exceeds.*24 bytes/i);
@@ -713,6 +713,10 @@ describe("scanSources", () => {
     expect(pageCleanupCalls).toBeGreaterThanOrEqual(1);
     expect(retainedByteObservations.length).toBeGreaterThan(0);
     expect(Math.max(...retainedByteObservations)).toBeLessThanOrEqual(
+      maxExtractedBytes,
+    );
+    expect(bufferedChunkObservations.length).toBeGreaterThan(0);
+    expect(Math.max(...bufferedChunkObservations)).toBeLessThanOrEqual(
       maxExtractedBytes,
     );
   });

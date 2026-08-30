@@ -310,6 +310,109 @@ describe("applyChangeSetTransaction", () => {
     await expect(access(lockPath)).rejects.toThrow();
   });
 
+  test("re-evaluates a malformed writer marker replaced after its raw snapshot", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(lockPath, "not-json\n");
+    let snapshots = 0;
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_malformed_replacement_waiter",
+          commitMessage: "continue after malformed owner replacement",
+          waitForWriter: { timeoutMs: 250, pollIntervalMs: 5 },
+          testOptions: {
+            afterWriterOwnerRead: async () => {
+              snapshots += 1;
+              if (snapshots === 1) {
+                await writeFile(
+                  lockPath,
+                  `${JSON.stringify({ pid: process.pid, operationId: "op_replacement_owner" })}\n`,
+                );
+              } else {
+                await rm(lockPath);
+              }
+            },
+          },
+        },
+        async () => ({ value: "acquired", stagePaths: [] }),
+      ),
+    ).resolves.toMatchObject({ value: "acquired" });
+    expect(snapshots).toBeGreaterThanOrEqual(2);
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  test("re-evaluates a recoverable writer marker that disappears after its raw snapshot", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        operationId: "op_recoverable_disappeared",
+        recoverable: true,
+      })}\n`,
+    );
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_recoverable_disappearance_waiter",
+          commitMessage: "continue after recoverable owner cleanup",
+          waitForWriter: { timeoutMs: 100, pollIntervalMs: 5 },
+          testOptions: {
+            afterWriterOwnerRead: async () => {
+              await rm(lockPath);
+            },
+          },
+        },
+        async () => ({ value: "acquired", stagePaths: [] }),
+      ),
+    ).resolves.toMatchObject({ value: "acquired" });
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  test("re-evaluates a changed live marker before reporting writer timeout", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ pid: process.pid, operationId: "op_live_replaced" })}\n`,
+    );
+    let snapshots = 0;
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_timeout_replacement_waiter",
+          commitMessage: "continue after live owner replacement",
+          waitForWriter: { timeoutMs: 5, pollIntervalMs: 1 },
+          testOptions: {
+            afterWriterOwnerRead: async () => {
+              snapshots += 1;
+              if (snapshots === 1) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                await writeFile(
+                  lockPath,
+                  `${JSON.stringify({ pid: process.pid, operationId: "op_new_live_owner" })}\n`,
+                );
+              } else {
+                await rm(lockPath);
+              }
+            },
+          },
+        },
+        async () => ({ value: "acquired", stagePaths: [] }),
+      ),
+    ).resolves.toMatchObject({ value: "acquired" });
+    expect(snapshots).toBeGreaterThanOrEqual(2);
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
   test("preserves committed Git recovery state when a post-commit action fails", async () => {
     const root = await initializedGitBrain();
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);

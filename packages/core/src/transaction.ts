@@ -107,7 +107,7 @@ export interface TransactionTestOptions {
   afterIndexLock?: () => Promise<void> | void;
   /** Runs after the private index replaces the owned lock but before rename. */
   afterIndexCopy?: () => Promise<void> | void;
-  /** Runs after a waiting writer reads the current owner marker. */
+  /** Runs after a waiting writer snapshots the current raw owner marker. */
   afterWriterOwnerRead?: () => Promise<void> | void;
 }
 
@@ -663,6 +663,18 @@ function isLiveProcess(pid: number): boolean {
   }
 }
 
+async function writerMarkerSnapshotIsCurrent(
+  lockPath: string,
+  rawSnapshot: string,
+): Promise<boolean> {
+  try {
+    return (await readFile(lockPath, "utf8")) === rawSnapshot;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function acquireWriterLock(
   lockPath: string,
   operationId: string,
@@ -700,43 +712,35 @@ async function acquireWriterLock(
       await rm(candidatePath, { force: true });
     }
 
-    let owner: z.infer<typeof writerLockSchema>;
+    let rawOwner: string;
     try {
-      owner = writerLockSchema.parse(
-        JSON.parse(await readFile(lockPath, "utf8")),
-      );
+      rawOwner = await readFile(lockPath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw recoveryRequiredForWriter("the writer lock is malformed");
+      throw error;
     }
     await afterOwnerRead?.();
+    let owner: z.infer<typeof writerLockSchema>;
+    try {
+      owner = writerLockSchema.parse(JSON.parse(rawOwner));
+    } catch {
+      if (!(await writerMarkerSnapshotIsCurrent(lockPath, rawOwner))) continue;
+      throw recoveryRequiredForWriter("the writer lock is malformed");
+    }
     if (owner.recoverable) {
+      if (!(await writerMarkerSnapshotIsCurrent(lockPath, rawOwner))) continue;
       throw recoveryRequiredForWriter(
         `the writer lock for ${owner.operationId} is recoverable`,
       );
     }
     if (!isLiveProcess(owner.pid)) {
-      let currentOwner: z.infer<typeof writerLockSchema>;
-      try {
-        currentOwner = writerLockSchema.parse(
-          JSON.parse(await readFile(lockPath, "utf8")),
-        );
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw recoveryRequiredForWriter("the writer lock is malformed");
-      }
-      if (
-        currentOwner.pid !== owner.pid ||
-        currentOwner.operationId !== owner.operationId ||
-        currentOwner.recoverable !== owner.recoverable
-      ) {
-        continue;
-      }
+      if (!(await writerMarkerSnapshotIsCurrent(lockPath, rawOwner))) continue;
       throw recoveryRequiredForWriter(
         `the writer lock for ${owner.operationId} is stale`,
       );
     }
     if (Date.now() >= deadline) {
+      if (!(await writerMarkerSnapshotIsCurrent(lockPath, rawOwner))) continue;
       throw new Error(
         `Timed out waiting for active canonical writer ${owner.operationId}`,
       );
