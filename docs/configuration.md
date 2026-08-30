@@ -21,7 +21,7 @@ never contact GitHub.
 ## Sources and bootstrap
 
 - `sources.roots`: repository-relative immutable source roots. The default is `sources`.
-- `sources.maxFileBytes`: maximum source-file or downloaded-artifact size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. Oversized files are registered with a visible failure.
+- `sources.maxFileBytes`: maximum local source-file or downloaded-artifact input size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. An oversized local file found by source scanning is registered with a visible failure. An oversized downloaded web artifact is rejected before capture prepares files or registers a source.
 - `sources.textExtraction.maxExtractedBytes`: maximum cumulative UTF-8 retained across the title, primary text, chunk locators, and chunk text for Markdown, text, HTML, JSON/JSONL, CSV, and TSV extraction; default `8388608` bytes.
 - `sources.textExtraction.maxChunks`: maximum retained chunks or structured entries for those text-family extractors; default `10000`.
 - `sources.pdf.maxPages`: maximum PDF page count; default `2000`.
@@ -51,7 +51,7 @@ Bootstrap creates a shallow source catalog and relationship map. The host agent 
 
 Web captures record URL, retrieval time, originating query, capture kind, content hash, and version/supersession data. They obey the same immutable-source contract as local files.
 
-The host owns all searching, redirects, and fetching; the core and CLI perform no network request. The host may fetch only public HTTP(S) destinations after exact-question approval, with at most five ordered redirects, no private/loopback/link-local/metadata destinations, no access-control bypass, and no HTTPS-to-HTTP downgrade. Credentials and temporary local paths are not provenance.
+The host owns all web searching, redirects, and fetching. The web-capture core API and `brain web capture` command receive host-supplied bytes or text and do not make an HTTP request themselves. This claim is limited to the capture path: initial semantic setup can download the pinned model described below. The host may fetch only public HTTP(S) destinations after exact-question approval, with at most five ordered redirects, no private/loopback/link-local/metadata destinations, no access-control bypass, and no HTTPS-to-HTTP downgrade. Credentials and temporary local paths are not provenance.
 
 Artifact capture accepts exact PDF, DOCX, EPUB, Markdown, text, JSON/JSONL, CSV, or TSV bytes. Magic/container validation and the filename format declaration must agree; an absent or generic `application/octet-stream` media type is allowed, but a conflicting format-specific media type is rejected. Text formats require valid UTF-8 and use their existing structured parser. Ordinary HTML pages are not artifact inputs: preserve their accessible text as complete or partial Markdown snapshots. The CLI passes a safe basename as a detection hint and never stores its runtime input path.
 
@@ -77,7 +77,7 @@ You may extend page and relation types per clone without changing TypeScript.
 - `git.autoCommit`: when true, successful managed operations create local commits.
 - `git.autoPush`: remains `false`; it never authorizes a broad automatic push.
 
-Safe remote synchronization is separate and opt-in. The owner must explicitly run `brain sync configure --remote <name> --branch <branch> --confirm` for an existing remote. With that confirmed target, the core may attempt only a normal fast-forward push whose commits are all marked as managed brain operations. A pending or manual-sync-required result never discards the local commit; hosts must visibly report the exact `⚠ Sync pending — …` warning before answering. It never force-pushes, pulls, rebases, or pushes unrelated local commits.
+Safe remote synchronization is separate and opt-in. The host agent may configure an existing remote and branch only after the owner explicitly confirms that exact destination. After confirmation, the host runs routine status and eligible sync operations for the owner; a manual troubleshooting/reference equivalent is `brain sync configure --remote <name> --branch <branch> --confirm`. The core may then attempt only a normal fast-forward push whose commits are all marked as managed brain operations. A pending or manual-sync-required result never discards the local commit; hosts must visibly report the exact `⚠ Sync pending — …` warning before answering. It never force-pushes, pulls, rebases, or pushes unrelated local commits.
 
 The core refuses pre-existing staged changes and dirty managed wiki/state paths. It stages exact managed paths only; unrelated unstaged work remains untouched.
 
