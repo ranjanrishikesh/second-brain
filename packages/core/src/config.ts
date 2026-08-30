@@ -47,10 +47,15 @@ export const defaultTextExtractionPolicyV1 = {
   maxChunks: 10_000,
 } as const;
 
+// biome-ignore lint/complexity/useRegexLiterals: String.raw keeps forbidden control ranges escaped in the emitted JSON Schema.
+const sourceRootV1Pattern = new RegExp(
+  String.raw`^(?![A-Za-z]:)(?!\s*$)(?!\.{1,2}(?:/|$))[^/\\\u0000-\u001f\u007f\u2028\u2029]+(?:/(?!\.{1,2}(?:/|$))[^/\\\u0000-\u001f\u007f\u2028\u2029]+)*$`,
+);
+
 export const sourceRootV1Schema = z
   .string()
   .regex(
-    /^(?!\s*$)(?![A-Za-z]:)(?!\/)(?!.*\\)(?!(?:.*\/)?\.{1,2}(?:\/|$))[^/]+(?:\/[^/]+)*$/,
+    sourceRootV1Pattern,
     "sources.roots entries must be canonical repository-relative paths",
   );
 

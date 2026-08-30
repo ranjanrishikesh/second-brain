@@ -22,8 +22,9 @@ never contact GitHub.
 
 - `sources.roots`: canonical repository-relative immutable source roots using
   `/` separators, such as `sources` or `documents/research`. Absolute paths,
-  Windows drive/UNC paths, backslashes, empty segments, and `.` or `..` path
-  segments are rejected. The default is `sources`.
+  Windows drive/UNC paths, backslashes, control characters, line separators,
+  empty segments, and `.` or `..` path segments are rejected. The default is
+  `sources`.
 - `sources.maxFileBytes`: maximum local source-file or downloaded-artifact input size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; its logical-block ceiling is derived from that semantic byte budget rather than the general text-family chunk default. Physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. An oversized local file found by source scanning is registered with a visible failure. An oversized downloaded web artifact is rejected before capture prepares files or registers a source.
 - `sources.textExtraction.maxExtractedBytes`: maximum cumulative UTF-8 retained across the title, primary text, chunk locators, and chunk text for Markdown, text, HTML, JSON/JSONL, CSV, and TSV extraction; default `8388608` bytes.
 - `sources.textExtraction.maxChunks`: maximum retained chunks or structured entries for those text-family extractors; default `10000`.
