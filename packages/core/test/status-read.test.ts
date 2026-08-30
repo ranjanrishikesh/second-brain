@@ -15,14 +15,14 @@ import {
   initBrain,
   inspectOnboarding,
   onboardingStatusV1Schema,
-  readBrainState,
   readBrainItem,
+  readBrainState,
   renderWikiPage,
   scanAndRegisterSources,
   scanSources,
   statusBrain,
-  writeBrainState,
   type WikiPageV1,
+  writeBrainState,
 } from "../src/index.js";
 
 async function initializedBrain(name: string): Promise<string> {
@@ -32,6 +32,72 @@ async function initializedBrain(name: string): Promise<string> {
 }
 
 describe("brain status and reading", () => {
+  test("reports a deleted sources directory through controlled diagnostics", async () => {
+    const root = await initializedBrain("Missing sources directory");
+    await rm(path.join(root, "sources"), { recursive: true });
+
+    await expect(doctorBrain(root)).resolves.toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "LAYOUT_MISSING",
+          severity: "error",
+          path: "sources",
+        }),
+      ]),
+    });
+    await expect(statusBrain(root)).resolves.toMatchObject({
+      onboarding: {
+        phase: "awaiting-sources",
+        nextAction: "add-sources",
+      },
+    });
+  });
+
+  test("reports a duplicate companion below a deleted sources directory", async () => {
+    const root = await initializedBrain("Missing duplicate companion");
+    const sourceBytes = "Original source evidence.\n";
+    await writeFile(path.join(root, "sources", "original.md"), sourceBytes);
+    const scan = await scanAndRegisterSources(root);
+    const source = scan.added[0];
+    if (!source) throw new Error("Expected a registered source");
+    await writeFile(path.join(root, "duplicate-copy.md"), sourceBytes);
+    const state = await readBrainState(root);
+    await writeBrainState(root, {
+      ...state,
+      sourceDuplicates: [
+        {
+          path: "duplicate-copy.md",
+          sourceId: source.id,
+          sha256: source.sha256,
+          bytes: source.bytes,
+          sidecarPath: "sources/web/2026/08/.missing.txt.web.json",
+          sidecarSha256: "b".repeat(64),
+          sidecarBytes: 1,
+        },
+      ],
+    });
+    await rm(path.join(root, "sources"), { recursive: true });
+
+    await expect(doctorBrain(root)).resolves.toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_DUPLICATE_MISMATCH",
+          severity: "error",
+          path: "duplicate-copy.md",
+          message: expect.stringContaining("duplicate sidecar cannot be read"),
+        }),
+      ]),
+    });
+    await expect(statusBrain(root)).resolves.toMatchObject({
+      onboarding: {
+        phase: "ready-for-setup",
+        nextAction: "begin-setup",
+      },
+    });
+  });
+
   test("reports template and initialized-empty onboarding states without writing files", async () => {
     const templateRoot = await initializedBrain("Portable Second Brain");
     await writeFile(

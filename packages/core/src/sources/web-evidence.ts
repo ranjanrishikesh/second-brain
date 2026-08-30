@@ -740,7 +740,21 @@ function capturedBodyFromLegacyMarkdown(
   ) {
     return undefined;
   }
-  return authoredAndCaptured.slice(authoredPrefix.length, -1);
+  const storedBody = authoredAndCaptured.slice(authoredPrefix.length);
+  if (
+    createHash("sha256").update(storedBody).digest("hex") ===
+    metadata.contentSha256
+  ) {
+    return storedBody;
+  }
+  const bodyWithoutWrapperNewline = storedBody.slice(0, -1);
+  if (
+    createHash("sha256").update(bodyWithoutWrapperNewline).digest("hex") ===
+    metadata.contentSha256
+  ) {
+    return bodyWithoutWrapperNewline;
+  }
+  return undefined;
 }
 
 async function isCanonicalLegacyWebTextCapture(

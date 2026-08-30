@@ -1,16 +1,16 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { access, lstat, readdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { catalogedSourceIds } from "./source-page-coverage.js";
-import { readBrainState, type BrainStateV1 } from "./state.js";
 import { sourceFormatForPath } from "./sources/format.js";
-import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
+import { type BrainStateV1, readBrainState } from "./state.js";
 import { loadWikiPages } from "./wiki/graph.js";
 
 export const TEMPLATE_BRAIN_NAME = "Portable Second Brain";
@@ -220,9 +220,8 @@ export async function inspectSourceDuplicateAcknowledgements(
 }> {
   const validPaths = new Set<string>();
   const invalid: InvalidSourceDuplicateV1[] = [];
+  if (state.sourceDuplicates.length === 0) return { validPaths, invalid };
   const rootPath = path.resolve(root);
-  const realRootPath = await realpath(root);
-  const realSourcesPath = await realpath(path.join(root, "sources"));
   const recordsById = new Map(records.map((record) => [record.id, record]));
   for (const duplicate of state.sourceDuplicates) {
     const canonical = recordsById.get(duplicate.sourceId);
@@ -286,7 +285,12 @@ export async function inspectSourceDuplicateAcknowledgements(
         reason = "duplicate sidecar path escapes the brain sources tree";
       } else {
         try {
-          const realSidecarPath = await realpath(absoluteSidecarPath);
+          const [realRootPath, realSourcesPath, realSidecarPath] =
+            await Promise.all([
+              realpath(root),
+              realpath(path.join(root, "sources")),
+              realpath(absoluteSidecarPath),
+            ]);
           if (
             !realSourcesPath.startsWith(`${realRootPath}${path.sep}`) ||
             !realSidecarPath.startsWith(`${realSourcesPath}${path.sep}`)
