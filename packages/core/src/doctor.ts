@@ -100,6 +100,47 @@ function unsafeSourceRootIssue(
   };
 }
 
+const sourcePathErrorMarkers = [
+  " must stay inside the brain root:",
+  " contains a symbolic link component:",
+  " contains a non-directory component:",
+  " cannot be read:",
+  " is not a regular file:",
+  " is not a regular directory:",
+  " resolves outside the brain root:",
+] as const;
+
+function labeledSourcePath(
+  message: string,
+  labelPrefix: "Source path " | "Source root ",
+): string | undefined {
+  if (!message.startsWith(labelPrefix)) return undefined;
+  for (const marker of sourcePathErrorMarkers) {
+    const markerIndex = message.lastIndexOf(marker);
+    if (markerIndex >= labelPrefix.length) {
+      return message.slice(labelPrefix.length, markerIndex);
+    }
+  }
+  return undefined;
+}
+
+function onboardingSourcePathIssue(error: unknown): DoctorIssue | undefined {
+  const message = errorMessage(error);
+  const runtimeRootPrefixes = [
+    "Source root changed while scanning: ",
+    "Source root cannot be read: ",
+  ] as const;
+  for (const prefix of runtimeRootPrefixes) {
+    if (message.startsWith(prefix)) {
+      return unsafeSourceRootIssue(message.slice(prefix.length), error);
+    }
+  }
+  const relativePath =
+    labeledSourcePath(message, "Source path ") ??
+    labeledSourcePath(message, "Source root ");
+  return relativePath ? unsafeSourceRootIssue(relativePath, error) : undefined;
+}
+
 async function inspectConfiguredSourceRoots(
   root: string,
   sourceRoots: readonly string[],
@@ -596,12 +637,15 @@ export async function doctorBrain(
         path: ".brain/state.json",
       });
     }
-  } catch {
-    if (config) {
-      issues.push(
-        ...(await inspectConfiguredSourceRoots(root, config.sources.roots)),
-      );
-    }
+  } catch (error) {
+    const rootIssues = config
+      ? await inspectConfiguredSourceRoots(root, config.sources.roots)
+      : [];
+    const sourcePathIssue = onboardingSourcePathIssue(error);
+    issues.push(
+      ...rootIssues,
+      ...(rootIssues.length === 0 && sourcePathIssue ? [sourcePathIssue] : []),
+    );
     // Existing fatal configuration, manifest, or state issues already explain
     // other unavailable derived onboarding diagnostics. Unsafe source roots
     // are classified above by the canonical source-path validator.

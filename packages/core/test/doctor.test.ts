@@ -334,6 +334,78 @@ describe("doctor registered-source integrity", () => {
 });
 
 describe("doctor source-root safety", () => {
+  test("reports a nested source-file symlink as fatal without reading outside", async () => {
+    const root = await initializedBrain();
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-doctor-file-outside-"),
+    );
+    const outsideFile = path.join(outside, "private.md");
+    await writeFile(outsideFile, "# Private\n\nOutside file.\n");
+    await symlink(outsideFile, path.join(root, "sources", "link.md"), "file");
+    const outsideBefore = await treeSnapshot(outside);
+    const cacheBefore = await treeSnapshot(path.join(root, ".brain", "cache"));
+
+    const report = await doctorBrain(root);
+
+    expect(report).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_ROOT_UNSAFE",
+          severity: "error",
+          path: "sources/link.md",
+          message: expect.stringContaining("Source path sources/link.md"),
+        }),
+      ]),
+    });
+    expect(report.issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCES_UNREGISTERED" }),
+      ]),
+    );
+    expect(await treeSnapshot(outside)).toEqual(outsideBefore);
+    expect(await treeSnapshot(path.join(root, ".brain", "cache"))).toEqual(
+      cacheBefore,
+    );
+  });
+
+  test("reports a nested source-directory symlink as fatal without reading outside", async () => {
+    const root = await initializedBrain();
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-doctor-directory-outside-"),
+    );
+    await writeFile(
+      path.join(outside, "private.md"),
+      "# Private\n\nOutside directory.\n",
+    );
+    await symlink(outside, path.join(root, "sources", "nested"), "dir");
+    const outsideBefore = await treeSnapshot(outside);
+    const cacheBefore = await treeSnapshot(path.join(root, ".brain", "cache"));
+
+    const report = await doctorBrain(root);
+
+    expect(report).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "SOURCE_ROOT_UNSAFE",
+          severity: "error",
+          path: "sources/nested",
+          message: expect.stringContaining("Source path sources/nested"),
+        }),
+      ]),
+    });
+    expect(report.issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "SOURCES_UNREGISTERED" }),
+      ]),
+    );
+    expect(await treeSnapshot(outside)).toEqual(outsideBefore);
+    expect(await treeSnapshot(path.join(root, ".brain", "cache"))).toEqual(
+      cacheBefore,
+    );
+  });
+
   test("reports a default sources symlink as a controlled fatal issue without reading outside", async () => {
     const root = await initializedBrain();
     const outside = await mkdtemp(
