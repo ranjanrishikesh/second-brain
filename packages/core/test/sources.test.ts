@@ -23,7 +23,17 @@ import {
   scanSources,
   supersedeSource,
 } from "../src/index.js";
-import { extractPdf } from "../src/sources/extract.js";
+import { calculateExtractedSourceSha256 } from "../src/sources/cache-integrity.js";
+import {
+  extractCsv,
+  extractEpub,
+  extractHtml,
+  extractJson,
+  extractJsonLines,
+  extractMarkdown,
+  extractPdf,
+  extractText,
+} from "../src/sources/extract.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -96,6 +106,7 @@ async function textPdf(text = "Orbital mechanics"): Promise<Uint8Array> {
 async function createEpub(
   chapterHtml: string,
   extraEntries: Record<string, string> = {},
+  title = "Budget Book",
 ): Promise<Uint8Array> {
   const archive = new JSZip();
   archive.file("mimetype", "application/epub+zip");
@@ -105,7 +116,7 @@ async function createEpub(
   );
   archive.file(
     "OEBPS/content.opf",
-    '<?xml version="1.0"?><package><metadata><title>Budget Book</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>',
+    `<?xml version="1.0"?><package><metadata><title>${title}</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>`,
   );
   archive.file(
     "OEBPS/chapter.xhtml",
@@ -296,6 +307,185 @@ function corruptCentralDirectoryCrc(
   return buffer;
 }
 
+describe("bounded text extraction", () => {
+  test("rejects CSV header amplification at the safe default output budget", () => {
+    const firstHeader = `left_${"a".repeat(4_500)}`;
+    const secondHeader = `right_${"b".repeat(4_500)}`;
+    const csv = `${firstHeader},${secondHeader}\n${"x,y\n".repeat(1_000)}`;
+
+    expect(Buffer.byteLength(csv, "utf8")).toBeLessThan(14_000);
+    expect(() =>
+      extractCsv("src_0000000000000000", "amplified.csv", csv, ","),
+    ).toThrow(/extracted delimited content exceeds.*8388608 bytes/i);
+  });
+
+  test("rejects a wide CSV record at the configured structured-entry limit", () => {
+    const headings = Array.from({ length: 11 }, (_, index) => `field_${index}`);
+    const values = Array.from({ length: 11 }, (_, index) => String(index));
+    const csv = `${headings.join(",")}\n${values.join(",")}\n`;
+
+    expect(() =>
+      extractCsv("src_0000000000000000", "wide.csv", csv, ",", {
+        maxExtractedBytes: 1_000_000,
+        maxChunks: 10,
+      }),
+    ).toThrow(/extracted delimited content exceeds.*10 chunks/i);
+  });
+
+  test("rejects deep JSON locator amplification before retaining the expanded output", () => {
+    let value: unknown = Array.from({ length: 200 }, (_, index) => index);
+    for (let depth = 0; depth < 80; depth += 1) {
+      value = { [`long_locator_segment_${depth}`]: value };
+    }
+    const json = JSON.stringify(value);
+
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThan(10_000);
+    expect(() =>
+      extractJson("src_0000000000000000", "deep.json", json, {
+        maxExtractedBytes: 65_536,
+        maxChunks: 1_000,
+      }),
+    ).toThrow(/extracted JSON content exceeds.*65536 bytes/i);
+  });
+
+  test("rejects JSON and JSONL leaf counts before retaining unbounded chunks", () => {
+    expect(() =>
+      extractJson(
+        "src_0000000000000000",
+        "many-leaves.json",
+        JSON.stringify(Array.from({ length: 11 }, (_, index) => index)),
+        { maxExtractedBytes: 1_000_000, maxChunks: 10 },
+      ),
+    ).toThrow(/extracted JSON content exceeds.*10 chunks/i);
+
+    expect(() =>
+      extractJsonLines(
+        "src_0000000000000000",
+        "many-lines.jsonl",
+        `${Array.from({ length: 11 }, (_, index) =>
+          JSON.stringify({ index }),
+        ).join("\n")}\n`,
+        { maxExtractedBytes: 1_000_000, maxChunks: 10 },
+      ),
+    ).toThrow(/extracted JSONL content exceeds.*10 chunks/i);
+  });
+
+  test("preserves JSONL carriage-return line parsing", () => {
+    const extracted = extractJsonLines(
+      "src_0000000000000000",
+      "legacy-lines.jsonl",
+      '{"first":1}\r{"second":2}\r',
+    );
+
+    expect(extracted.chunks.map((chunk) => chunk.locator)).toEqual([
+      "line=1",
+      "line=2",
+    ]);
+  });
+
+  test("rejects repeated Markdown headings at the safe default chunk budget", () => {
+    const markdown = Array.from(
+      { length: 10_001 },
+      (_, index) => `# Section ${index}`,
+    ).join("\n");
+
+    expect(() =>
+      extractMarkdown("src_0000000000000000", "many-headings.md", markdown),
+    ).toThrow(/extracted Markdown content exceeds.*10000 chunks/i);
+  });
+
+  test("preserves legacy nested HTML block output within the configured budget", () => {
+    const nested = `${"<blockquote>".repeat(3)}Nested evidence.${"</blockquote>".repeat(3)}`;
+
+    const extracted = extractHtml(
+      "src_0000000000000000",
+      "nested.html",
+      `<html><body><main>${nested}</main></body></html>`,
+    );
+
+    expect(extracted.text).toBe(
+      "Nested evidence.\n\nNested evidence.\n\nNested evidence.",
+    );
+  });
+
+  test("rejects a 130 KB nested HTML expansion at the incremental output limit", () => {
+    const nested = `${"<blockquote>".repeat(200)}${"A".repeat(130_000)}${"</blockquote>".repeat(200)}`;
+    const html = `<html><body><main>${nested}</main></body></html>`;
+
+    expect(Buffer.byteLength(html, "utf8")).toBeLessThan(140_000);
+    expect(() =>
+      extractHtml("src_0000000000000000", "amplified.html", html),
+    ).toThrow(/extracted HTML content exceeds.*8388608 bytes/i);
+  });
+
+  test("rejects an HTML title that independently exceeds the output budget", () => {
+    expect(() =>
+      extractHtml(
+        "src_0000000000000000",
+        "large-title.html",
+        `<html><head><title>${"T".repeat(128)}</title></head><body><p>Small body.</p></body></html>`,
+        { maxExtractedBytes: 64, maxChunks: 10 },
+      ),
+    ).toThrow(/extracted HTML content exceeds.*64 bytes/i);
+  });
+
+  test("preserves legacy nested EPUB block output within its output budget", async () => {
+    const nested = `${"<blockquote>".repeat(3)}Nested evidence.${"</blockquote>".repeat(3)}`;
+    const epub = await createEpub(nested);
+
+    const extracted = await extractEpub(
+      "src_0000000000000000",
+      "nested.epub",
+      epub,
+      {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 512,
+      },
+    );
+
+    expect(extracted.text).toBe(
+      "Nested evidence.\n\nNested evidence.\n\nNested evidence.",
+    );
+  });
+
+  test("rejects a nested EPUB HTML expansion before retaining the joined output", async () => {
+    const nested = `${"<blockquote>".repeat(200)}${"A".repeat(130_000)}${"</blockquote>".repeat(200)}`;
+    const epub = await createEpub(nested);
+
+    await expect(
+      extractEpub("src_0000000000000000", "amplified.epub", epub, {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 1_000_000,
+      }),
+    ).rejects.toThrow(/extracted EPUB content exceeds.*1000000 bytes/i);
+  });
+
+  test("counts retained title, primary text, locator, and chunk text in the text budget", () => {
+    expect(() =>
+      extractText(
+        "src_0000000000000000",
+        "fact.txt",
+        "A retained textual fact.",
+        { maxExtractedBytes: 48, maxChunks: 10 },
+      ),
+    ).toThrow(/extracted text content exceeds.*48 bytes/i);
+  });
+
+  test("rejects an EPUB title that independently exceeds its output budget", async () => {
+    const epub = await createEpub("<p>Small body.</p>", {}, "T".repeat(128));
+
+    await expect(
+      extractEpub("src_0000000000000000", "large-title.epub", epub, {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 64,
+      }),
+    ).rejects.toThrow(/extracted EPUB content exceeds.*64 bytes/i);
+  });
+});
+
 describe("scanSources", () => {
   test("keeps the DOCX parser unloaded until DOCX extraction", async () => {
     const script = [
@@ -402,6 +592,46 @@ describe("scanSources", () => {
     expect(extracted.text).not.toContain("danger");
   });
 
+  test("rebuilds a deleted cache for a legacy nested HTML extraction hash", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-html-legacy-cache-"));
+    await initBrain(root, { name: "Test", description: "HTML cache parity" });
+    await writeFile(
+      path.join(root, "sources", "nested.html"),
+      "<html><body><main><blockquote><blockquote>Nested evidence.</blockquote></blockquote></main></body></html>",
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected registered nested HTML source");
+    const legacyText = "Nested evidence.\n\nNested evidence.";
+    const legacyExtracted = {
+      version: 1 as const,
+      sourceId: source.id,
+      title: "nested",
+      text: legacyText,
+      chunks: [
+        {
+          id: `${source.id}_0000`,
+          sourceId: source.id,
+          ordinal: 0,
+          locator: "document",
+          text: legacyText,
+        },
+      ],
+    };
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.sources[0].extractedSha256 =
+      calculateExtractedSourceSha256(legacyExtracted);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await rm(
+      path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+    );
+
+    await expect(readBrainItem(root, source.id)).resolves.toMatchObject({
+      kind: "source",
+      text: legacyText,
+    });
+  });
+
   test("extracts JSON values with JSONPath locators", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-json-"));
     await initBrain(root, { name: "Test", description: "JSON test" });
@@ -495,6 +725,108 @@ describe("scanSources", () => {
       locator: "line=2",
       text: '{"event":"landing"}',
     });
+  });
+
+  test.each([
+    {
+      extension: "md",
+      content: "# First\n\nOne.\n\n# Second\n\nTwo.\n",
+      policy: { maxExtractedBytes: 1_000_000, maxChunks: 1 },
+      error: /extracted Markdown content exceeds.*1 chunks/i,
+    },
+    {
+      extension: "txt",
+      content: "Plain text output that is longer than sixteen bytes.\n",
+      policy: { maxExtractedBytes: 16, maxChunks: 10 },
+      error: /extracted text content exceeds.*16 bytes/i,
+    },
+    {
+      extension: "html",
+      content:
+        "<html><body><main><p>First paragraph.</p><p>Second paragraph.</p></main></body></html>",
+      policy: { maxExtractedBytes: 1_000_000, maxChunks: 1 },
+      error: /extracted HTML content exceeds.*1 chunks/i,
+    },
+    {
+      extension: "json",
+      content: '{"first":1,"second":2}\n',
+      policy: { maxExtractedBytes: 1_000_000, maxChunks: 1 },
+      error: /extracted JSON content exceeds.*1 chunks/i,
+    },
+    {
+      extension: "jsonl",
+      content: '{"first":1}\n{"second":2}\n',
+      policy: { maxExtractedBytes: 1_000_000, maxChunks: 1 },
+      error: /extracted JSONL content exceeds.*1 chunks/i,
+    },
+    {
+      extension: "csv",
+      content: "name,value\nfirst,1\nsecond,2\n",
+      policy: { maxExtractedBytes: 1_000_000, maxChunks: 1 },
+      error: /extracted delimited content exceeds.*1 chunks/i,
+    },
+    {
+      extension: "tsv",
+      content: "name\tvalue\nfirst\t1\nsecond\t2\n",
+      policy: { maxExtractedBytes: 1_000_000, maxChunks: 1 },
+      error: /extracted delimited content exceeds.*1 chunks/i,
+    },
+  ])(
+    "enforces lowered text extraction policy on $extension cache hits and rebuilds",
+    async ({ extension, content, policy, error }) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), `brain-${extension}-cache-policy-`),
+      );
+      await initBrain(root, {
+        name: "Test",
+        description: `${extension} cache policy`,
+      });
+      await writeFile(
+        path.join(root, "sources", `cached.${extension}`),
+        content,
+      );
+      const source = (await scanSources(root)).added[0];
+      if (!source) throw new Error(`Expected registered ${extension} source`);
+      expect(source.extractionStatus).toBe("ready");
+
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.textExtraction = policy;
+      await writeFile(configPath, stringify(config));
+
+      await expect(readBrainItem(root, source.id)).rejects.toThrow(error);
+      await rm(
+        path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+      );
+      await expect(readBrainItem(root, source.id)).rejects.toThrow(error);
+    },
+  );
+
+  test("enforces a lowered source input limit before reading a plain-text cache", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-text-cache-input-"));
+    await initBrain(root, { name: "Test", description: "Input cache policy" });
+    await writeFile(
+      path.join(root, "sources", "cached.txt"),
+      "A registered source whose bytes exceed the lowered policy.\n",
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected registered text source");
+    expect(source.extractionStatus).toBe("ready");
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 16;
+    await writeFile(configPath, stringify(config));
+
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(
+      /source exceeds configured maximum of 16 bytes/i,
+    );
+    await rm(
+      path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+    );
+    await expect(readBrainItem(root, source.id)).rejects.toThrow(
+      /source exceeds configured maximum of 16 bytes/i,
+    );
   });
 
   test("extracts text-based PDFs with page locators", async () => {
@@ -1927,6 +2259,48 @@ describe("scanSources", () => {
     );
     expect(extracted.chunks[0]).toMatchObject({ locator: "chapter=1" });
     expect(extracted.chunks[0].text).toContain("The crew reached Mars.");
+  });
+
+  test("rebuilds a deleted cache for a legacy nested EPUB extraction hash", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-epub-legacy-cache-"));
+    await initBrain(root, { name: "Test", description: "EPUB cache parity" });
+    await writeFile(
+      path.join(root, "sources", "nested.epub"),
+      await createEpub(
+        "<blockquote><blockquote>Nested evidence.</blockquote></blockquote>",
+      ),
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected registered nested EPUB source");
+    const legacyText = "Nested evidence.\n\nNested evidence.";
+    const legacyExtracted = {
+      version: 1 as const,
+      sourceId: source.id,
+      title: "Budget Book",
+      text: legacyText,
+      chunks: [
+        {
+          id: `${source.id}_0000`,
+          sourceId: source.id,
+          ordinal: 0,
+          locator: "chapter=1",
+          text: legacyText,
+        },
+      ],
+    };
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.sources[0].extractedSha256 =
+      calculateExtractedSourceSha256(legacyExtracted);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await rm(
+      path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+    );
+
+    await expect(readBrainItem(root, source.id)).resolves.toMatchObject({
+      kind: "source",
+      text: legacyText,
+    });
   });
 
   test("fails EPUB extraction before decompression when entry and expanded budgets are exceeded", async () => {

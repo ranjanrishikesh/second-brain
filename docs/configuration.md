@@ -22,11 +22,20 @@ never contact GitHub.
 
 - `sources.roots`: repository-relative immutable source roots. The default is `sources`.
 - `sources.maxFileBytes`: maximum source-file or downloaded-artifact size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. Oversized files are registered with a visible failure.
+- `sources.textExtraction.maxExtractedBytes`: maximum cumulative UTF-8 retained across the title, primary text, chunk locators, and chunk text for Markdown, text, HTML, JSON/JSONL, CSV, and TSV extraction; default `8388608` bytes.
+- `sources.textExtraction.maxChunks`: maximum retained chunks or structured entries for those text-family extractors; default `10000`.
 - `sources.pdf.maxPages`: maximum PDF page count; default `2000`.
 - `sources.pdf.maxExtractedBytes`: cumulative normalized PDF text budget; default `104857600` bytes.
 - `sources.epub.maxEntries`: maximum physical/decoded archive entries; default `1000`.
 - `sources.epub.maxExpandedBytes`: cumulative EPUB expanded-byte budget; default `104857600` bytes.
 - `sources.epub.maxExtractedBytes`: cumulative normalized EPUB text budget; default `104857600` bytes.
+
+Text-family output and entry limits are enforced while parsing, before an
+unbounded chunk list or joined output can be retained. HTML blocks are
+processed sequentially with cumulative accounting, preserving stable nested
+block output without retaining an unbounded expansion. Lowering an input,
+output, or chunk limit invalidates disposable extraction and search caches; an
+older oversized cache is not treated as current evidence.
 
 PDF input bytes, page count, retained text, and the core string buffer are bounded, and pages are processed sequentially. PDF.js must still parse catalog/xref structures before reporting page count, and one emitted text-stream chunk/item may already exist when incremental accounting rejects it. These accepted residual allocations are bounded only indirectly by input bytes; PDF handling is not claimed to provide subprocess isolation or a complete memory boundary.
 - `bootstrap.mode`: `catalog-map` in v1.

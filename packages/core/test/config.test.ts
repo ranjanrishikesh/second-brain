@@ -124,6 +124,10 @@ describe("loadBrainConfig", () => {
     expect(config.bootstrap.mode).toBe("catalog-map");
     expect(config).toMatchObject({
       sources: {
+        textExtraction: {
+          maxExtractedBytes: 8_388_608,
+          maxChunks: 10_000,
+        },
         pdf: { maxPages: 2_000, maxExtractedBytes: 104_857_600 },
         epub: {
           maxEntries: 1_000,
@@ -169,6 +173,34 @@ describe("loadBrainConfig", () => {
           maxEntries: 7,
           maxExpandedBytes: 8_192,
           maxExtractedBytes: 2_048,
+        },
+      },
+    });
+  });
+
+  test("loads a bounded text extraction policy without requiring existing configs to declare it", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-text-budget-config-"),
+    );
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Text budget test",
+        "sources:",
+        "  textExtraction:",
+        "    maxExtractedBytes: 4096",
+        "    maxChunks: 12",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).resolves.toMatchObject({
+      sources: {
+        textExtraction: {
+          maxExtractedBytes: 4_096,
+          maxChunks: 12,
         },
       },
     });

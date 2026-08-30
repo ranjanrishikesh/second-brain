@@ -29,6 +29,7 @@ import {
   extractPdf,
   extractText,
   type PdfExtractionPolicyV1,
+  type TextExtractionPolicyV1,
 } from "./sources/extract.js";
 import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import {
@@ -361,6 +362,7 @@ async function assertArtifactStructure(
   fileName: string,
   content: Uint8Array,
   maxFileBytes: number,
+  textPolicy: TextExtractionPolicyV1,
   pdfPolicy: PdfExtractionPolicyV1,
   epubPolicy: EpubExtractionPolicyV1,
 ): Promise<void> {
@@ -375,19 +377,20 @@ async function assertArtifactStructure(
       ? new TextDecoder("utf-8", { fatal: true }).decode(content)
       : undefined;
   if (detected.format === "markdown")
-    extractMarkdown(id, fileName, text as string);
+    extractMarkdown(id, fileName, text as string, textPolicy);
   else if (detected.format === "text")
-    extractText(id, fileName, text as string);
+    extractText(id, fileName, text as string, textPolicy);
   else if (detected.format === "json")
-    extractJson(id, fileName, text as string);
+    extractJson(id, fileName, text as string, textPolicy);
   else if (detected.format === "jsonl")
-    extractJsonLines(id, fileName, text as string);
+    extractJsonLines(id, fileName, text as string, textPolicy);
   else if (detected.format === "csv" || detected.format === "tsv")
     extractCsv(
       id,
       fileName,
       text as string,
       detected.format === "tsv" ? "\t" : ",",
+      textPolicy,
     );
   else if (detected.format === "pdf")
     await extractPdf(id, fileName, content, pdfPolicy);
@@ -917,6 +920,7 @@ export async function captureWebEvidence(
       input.fileName,
       Uint8Array.from(artifactContent),
       config.sources.maxFileBytes,
+      config.sources.textExtraction,
       config.sources.pdf,
       config.sources.epub,
     );

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import {
   initBrain,
   rebuildSearchIndex,
@@ -219,6 +220,38 @@ describe("brain search", () => {
     });
 
     expect(results[0]?.path).toBe("sources/second.md");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("invalidates an existing search index when extraction policy is lowered", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-policy-"));
+    await initBrain(root, {
+      name: "Search",
+      description: "Extraction policy revision",
+    });
+    await writeFile(
+      path.join(root, "sources", "sections.md"),
+      "# First\n\nSearchable one.\n\n# Second\n\nSearchable two.\n",
+    );
+    await scanSources(root);
+    await expect(
+      searchBrain(root, { query: "searchable", scope: "sources" }),
+    ).resolves.toHaveLength(2);
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.textExtraction = {
+      maxExtractedBytes: 1_000_000,
+      maxChunks: 1,
+    };
+    await writeFile(configPath, stringify(config));
+
+    await expect(rebuildSearchIndex(root)).rejects.toThrow(
+      /extracted Markdown content exceeds.*1 chunks/i,
+    );
+    await expect(
+      searchBrain(root, { query: "searchable", scope: "sources" }),
+    ).rejects.toThrow(/extracted Markdown content exceeds.*1 chunks/i);
     await rm(root, { recursive: true, force: true });
   });
 

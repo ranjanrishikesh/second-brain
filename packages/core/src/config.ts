@@ -42,6 +42,11 @@ const defaultEpubSourcePolicyV1 = {
   maxExtractedBytes: 104_857_600,
 } as const;
 
+export const defaultTextExtractionPolicyV1 = {
+  maxExtractedBytes: 8_388_608,
+  maxChunks: 10_000,
+} as const;
+
 export const brainConfigV1Schema = z.object({
   version: z.literal(1),
   brain: z.object({
@@ -61,6 +66,12 @@ export const brainConfigV1Schema = z.object({
     .object({
       roots: z.array(z.string().trim().min(1)).min(1).default(["sources"]),
       maxFileBytes: z.number().int().positive().default(104_857_600),
+      textExtraction: z
+        .object({
+          maxExtractedBytes: z.number().int().positive().default(8_388_608),
+          maxChunks: z.number().int().positive().default(10_000),
+        })
+        .default(defaultTextExtractionPolicyV1),
       pdf: z
         .object({
           maxPages: z.number().int().positive().default(2_000),
@@ -78,6 +89,7 @@ export const brainConfigV1Schema = z.object({
     .default({
       roots: ["sources"],
       maxFileBytes: 104_857_600,
+      textExtraction: defaultTextExtractionPolicyV1,
       pdf: defaultPdfSourcePolicyV1,
       epub: defaultEpubSourcePolicyV1,
     }),

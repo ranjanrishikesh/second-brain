@@ -4,6 +4,7 @@ import { XMLParser } from "fast-xml-parser";
 import JSZip from "jszip";
 import { parseHTML } from "linkedom";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { defaultTextExtractionPolicyV1 } from "../config.js";
 import { validateDocxArchive } from "./docx-archive.js";
 import {
   assertDocxOutputSize,
@@ -12,9 +13,101 @@ import {
 import type { DocxOutputPolicyV1, ExtractedSourceV1 } from "./types.js";
 import { validateZipArchiveBudget } from "./zip-archive-budget.js";
 
+export interface TextExtractionPolicyV1 {
+  maxExtractedBytes: number;
+  maxChunks: number;
+}
+
+function textExtractionPolicy(
+  policy: TextExtractionPolicyV1 | undefined,
+): TextExtractionPolicyV1 {
+  const resolved = policy ?? defaultTextExtractionPolicyV1;
+  if (
+    !Number.isSafeInteger(resolved.maxExtractedBytes) ||
+    resolved.maxExtractedBytes <= 0 ||
+    !Number.isSafeInteger(resolved.maxChunks) ||
+    resolved.maxChunks <= 0
+  ) {
+    throw new Error("Text extraction limits must be positive safe integers");
+  }
+  return resolved;
+}
+
+class RetainedTextBudget {
+  readonly #policy: TextExtractionPolicyV1;
+  readonly #label: string;
+  #bytes = 0;
+  #entries = 0;
+
+  constructor(
+    policy: TextExtractionPolicyV1,
+    label: string,
+    initialFields: readonly string[] = [],
+  ) {
+    this.#policy = policy;
+    this.#label = label;
+    this.retainFields(initialFields);
+  }
+
+  #retainBytes(bytes: number): void {
+    if (bytes > this.#policy.maxExtractedBytes - this.#bytes) {
+      throw new Error(
+        `Extracted ${this.#label} content exceeds configured maximum of ${this.#policy.maxExtractedBytes} bytes`,
+      );
+    }
+    this.#bytes += bytes;
+  }
+
+  retainFields(fields: readonly string[]): void {
+    this.#retainBytes(
+      fields.reduce(
+        (bytes, field) => bytes + Buffer.byteLength(field, "utf8"),
+        0,
+      ),
+    );
+  }
+
+  #retainEntry(): void {
+    if (this.#entries >= this.#policy.maxChunks) {
+      throw new Error(
+        `Extracted ${this.#label} content exceeds configured maximum of ${this.#policy.maxChunks} chunks`,
+      );
+    }
+    this.#entries += 1;
+  }
+
+  retainChunk(fields: readonly string[]): void {
+    this.#retainEntry();
+    this.retainFields(fields);
+  }
+
+  retainPrimaryEntry(
+    primaryText: string,
+    separator: string,
+    chunkFields: readonly string[],
+  ): void {
+    const separatorBytes = this.#entries > 0 ? Buffer.byteLength(separator) : 0;
+    this.#retainEntry();
+    this.#retainBytes(separatorBytes + Buffer.byteLength(primaryText, "utf8"));
+    this.retainFields(chunkFields);
+  }
+}
+
 function titleFromMarkdown(text: string, filePath: string): string {
   const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
   return heading || path.basename(filePath, path.extname(filePath));
+}
+
+function normalizedLineCount(text: string): number {
+  if (!text) return 0;
+  let count = 1;
+  let offset = 0;
+  for (;;) {
+    const newline = text.indexOf("\n", offset);
+    if (newline === -1) return count;
+    count += 1;
+    offset = newline + 1;
+  }
 }
 
 function headingAnchor(value: string): string {
@@ -30,34 +123,48 @@ export function extractMarkdown(
   sourceId: string,
   filePath: string,
   text: string,
+  rawPolicy?: TextExtractionPolicyV1,
 ): ExtractedSourceV1 {
+  const policy = textExtractionPolicy(rawPolicy);
   const normalized = text.replace(/\r\n?/g, "\n").trim();
-  const lines = normalized.split("\n");
+  const title = titleFromMarkdown(normalized, filePath);
+  const budget = new RetainedTextBudget(policy, "Markdown", [
+    title,
+    normalized,
+  ]);
+  const lineCount = normalizedLineCount(normalized);
   const sections: Array<{ locator: string; text: string }> = [];
   const anchorCounts = new Map<string, number>();
-  let currentLines: string[] = [];
-  let currentLocator = `lines=1-${lines.length}`;
-  const flush = () => {
-    const value = currentLines.join("\n").trim();
-    if (value) sections.push({ locator: currentLocator, text: value });
-    currentLines = [];
+  let currentLocator = `lines=1-${lineCount}`;
+  let sectionStart = 0;
+  const flush = (sectionEnd: number) => {
+    const value = normalized.slice(sectionStart, sectionEnd).trim();
+    if (!value) return;
+    budget.retainChunk([currentLocator, value]);
+    sections.push({ locator: currentLocator, text: value });
   };
-  for (const line of lines) {
+  let lineStart = 0;
+  while (lineStart < normalized.length) {
+    const newline = normalized.indexOf("\n", lineStart);
+    const lineEnd = newline === -1 ? normalized.length : newline;
+    const line = normalized.slice(lineStart, lineEnd);
     const heading = line.match(/^#{1,6}\s+(.+?)\s*#*$/)?.[1]?.trim();
     if (heading) {
-      flush();
+      flush(lineStart);
       const baseAnchor = headingAnchor(heading) || "section";
       const count = (anchorCounts.get(baseAnchor) ?? 0) + 1;
       anchorCounts.set(baseAnchor, count);
       currentLocator = `heading=${baseAnchor}${count > 1 ? `-${count}` : ""}`;
+      sectionStart = lineStart;
     }
-    currentLines.push(line);
+    if (newline === -1) break;
+    lineStart = newline + 1;
   }
-  flush();
+  flush(normalized.length);
   return {
     version: 1,
     sourceId,
-    title: titleFromMarkdown(normalized, filePath),
+    title,
     text: normalized,
     chunks: sections.map((section, ordinal) => ({
       id: `${sourceId}_${String(ordinal).padStart(4, "0")}`,
@@ -73,57 +180,15 @@ export function extractText(
   sourceId: string,
   filePath: string,
   text: string,
+  rawPolicy?: TextExtractionPolicyV1,
 ): ExtractedSourceV1 {
+  const policy = textExtractionPolicy(rawPolicy);
   const normalized = text.replace(/\r\n?/g, "\n").trim();
-  const lineCount = normalized ? normalized.split("\n").length : 0;
-  return {
-    version: 1,
-    sourceId,
-    title: path.basename(filePath, path.extname(filePath)),
-    text: normalized,
-    chunks: normalized
-      ? [
-          {
-            id: `${sourceId}_0000`,
-            sourceId,
-            ordinal: 0,
-            locator: `lines=1-${lineCount}`,
-            text: normalized,
-          },
-        ]
-      : [],
-  };
-}
-
-export function extractHtml(
-  sourceId: string,
-  filePath: string,
-  html: string,
-): ExtractedSourceV1 {
-  const { document } = parseHTML(html);
-  for (const unsafe of document.querySelectorAll(
-    "script,style,noscript,template",
-  ))
-    unsafe.remove();
-  const title =
-    document.querySelector("h1")?.textContent?.trim() ||
-    document.title.trim() ||
-    path.basename(filePath, path.extname(filePath));
-  const content = document.querySelector("article,main") ?? document.body;
-  const blocks = Array.from(
-    content.querySelectorAll("h1,h2,h3,h4,h5,h6,p,li,pre,blockquote"),
-  )
-    .map((element) => {
-      const value = element.textContent.replace(/\s+/g, " ").trim();
-      if (!value) return "";
-      const heading = element.tagName.match(/^H([1-6])$/)?.[1];
-      return heading ? `${"#".repeat(Number(heading))} ${value}` : value;
-    })
-    .filter(Boolean);
-  const normalized = (blocks.length ? blocks.join("\n\n") : content.textContent)
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  const title = path.basename(filePath, path.extname(filePath));
+  const lineCount = normalizedLineCount(normalized);
+  const locator = `lines=1-${lineCount}`;
+  const budget = new RetainedTextBudget(policy, "text", [title, normalized]);
+  if (normalized) budget.retainChunk([locator, normalized]);
   return {
     version: 1,
     sourceId,
@@ -135,7 +200,7 @@ export function extractHtml(
             id: `${sourceId}_0000`,
             sourceId,
             ordinal: 0,
-            locator: "document",
+            locator,
             text: normalized,
           },
         ]
@@ -143,40 +208,184 @@ export function extractHtml(
   };
 }
 
-function flattenJson(
-  value: unknown,
-  locator: string,
-  entries: Array<{ locator: string; text: string }>,
-): void {
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => {
-      flattenJson(item, `${locator}[${index}]`, entries);
-    });
-    return;
+export function extractHtml(
+  sourceId: string,
+  filePath: string,
+  html: string,
+  rawPolicy?: TextExtractionPolicyV1,
+  label = "HTML",
+  includeChunk = true,
+): ExtractedSourceV1 {
+  const policy = textExtractionPolicy(rawPolicy);
+  const { document } = parseHTML(html);
+  for (const unsafe of document.querySelectorAll(
+    "script,style,noscript,template",
+  ))
+    unsafe.remove();
+  const title =
+    document.querySelector("h1")?.textContent?.trim() ||
+    document.title.trim() ||
+    path.basename(filePath, path.extname(filePath));
+  const content = document.querySelector("article,main") ?? document.body;
+  const blocks: string[] = [];
+  const budget = new RetainedTextBudget(policy, label, [title]);
+  for (const element of content.querySelectorAll(
+    "h1,h2,h3,h4,h5,h6,p,li,pre,blockquote",
+  )) {
+    const heading = element.tagName.match(/^H([1-6])$/)?.[1];
+    const value = element.textContent.replace(/\s+/g, " ").trim();
+    if (!value) continue;
+    const block = heading ? `${"#".repeat(Number(heading))} ${value}` : value;
+    if (blocks.length === 0 && includeChunk) {
+      budget.retainFields(["document"]);
+    }
+    budget.retainPrimaryEntry(block, "\n\n", includeChunk ? [block] : []);
+    blocks.push(block);
   }
-  if (value !== null && typeof value === "object") {
-    for (const [key, child] of Object.entries(value)) {
-      const safeKey = /^[A-Za-z_$][\w$]*$/.test(key)
-        ? `.${key}`
-        : `[${JSON.stringify(key)}]`;
-      flattenJson(child, `${locator}${safeKey}`, entries);
+  const normalized = (blocks.length ? blocks.join("\n\n") : content.textContent)
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (blocks.length === 0) {
+    budget.retainFields([normalized]);
+    if (normalized && includeChunk) {
+      budget.retainChunk(["document", normalized]);
+    }
+  }
+  return {
+    version: 1,
+    sourceId,
+    title,
+    text: normalized,
+    chunks:
+      includeChunk && normalized
+        ? [
+            {
+              id: `${sourceId}_0000`,
+              sourceId,
+              ordinal: 0,
+              locator: "document",
+              text: normalized,
+            },
+          ]
+        : [],
+  };
+}
+
+interface JsonValueFrame {
+  kind: "value";
+  value: unknown;
+  path: JsonPathNode | undefined;
+}
+
+interface JsonChildrenFrame {
+  kind: "children";
+  children: Iterator<JsonValueFrame>;
+}
+
+interface JsonPathNode {
+  parent: JsonPathNode | undefined;
+  segment: string;
+  bytes: number;
+}
+
+function extendJsonPath(
+  parent: JsonPathNode | undefined,
+  segment: string,
+  policy: TextExtractionPolicyV1,
+): JsonPathNode {
+  const bytes = (parent?.bytes ?? 1) + Buffer.byteLength(segment, "utf8");
+  if (bytes + 2 > policy.maxExtractedBytes) {
+    throw new Error(
+      `Extracted JSON content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+    );
+  }
+  return { parent, segment, bytes };
+}
+
+function renderJsonPath(pathNode: JsonPathNode | undefined): string {
+  const segments: string[] = [];
+  for (let current = pathNode; current; current = current.parent) {
+    segments.push(current.segment);
+  }
+  segments.reverse();
+  return `$${segments.join("")}`;
+}
+
+function* jsonChildren(
+  value: unknown[] | Record<string, unknown>,
+  pathNode: JsonPathNode | undefined,
+  policy: TextExtractionPolicyV1,
+): Generator<JsonValueFrame> {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      yield {
+        kind: "value",
+        value: value[index],
+        path: extendJsonPath(pathNode, `[${index}]`, policy),
+      };
     }
     return;
   }
-  entries.push({ locator, text: value === null ? "null" : String(value) });
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    const safeKey = /^[A-Za-z_$][\w$]*$/.test(key)
+      ? `.${key}`
+      : `[${JSON.stringify(key)}]`;
+    yield {
+      kind: "value",
+      value: value[key],
+      path: extendJsonPath(pathNode, safeKey, policy),
+    };
+  }
 }
 
 export function extractJson(
   sourceId: string,
   filePath: string,
   json: string,
+  rawPolicy?: TextExtractionPolicyV1,
 ): ExtractedSourceV1 {
+  const policy = textExtractionPolicy(rawPolicy);
   const entries: Array<{ locator: string; text: string }> = [];
-  flattenJson(JSON.parse(json), "$", entries);
+  const title = path.basename(filePath, path.extname(filePath));
+  const budget = new RetainedTextBudget(policy, "JSON", [title]);
+  const stack: Array<JsonValueFrame | JsonChildrenFrame> = [
+    { kind: "value", value: JSON.parse(json), path: undefined },
+  ];
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    if (!frame) continue;
+    if (frame.kind === "children") {
+      const next = frame.children.next();
+      if (!next.done) {
+        stack.push(frame, next.value);
+      }
+      continue;
+    }
+    if (
+      Array.isArray(frame.value) ||
+      (frame.value !== null && typeof frame.value === "object")
+    ) {
+      stack.push({
+        kind: "children",
+        children: jsonChildren(
+          frame.value as unknown[] | Record<string, unknown>,
+          frame.path,
+          policy,
+        ),
+      });
+      continue;
+    }
+    const value = frame.value === null ? "null" : String(frame.value);
+    const locator = renderJsonPath(frame.path);
+    budget.retainPrimaryEntry(`${locator}: ${value}`, "\n", [locator, value]);
+    entries.push({ locator, text: value });
+  }
   return {
     version: 1,
     sourceId,
-    title: path.basename(filePath, path.extname(filePath)),
+    title,
     text: entries.map((entry) => `${entry.locator}: ${entry.text}`).join("\n"),
     chunks: entries.map((entry, ordinal) => ({
       id: `${sourceId}_${String(ordinal).padStart(4, "0")}`,
@@ -193,28 +402,50 @@ export function extractCsv(
   filePath: string,
   csv: string,
   delimiter: "," | "\t",
+  rawPolicy?: TextExtractionPolicyV1,
 ): ExtractedSourceV1 {
+  const policy = textExtractionPolicy(rawPolicy);
+  const title = path.basename(filePath, path.extname(filePath));
+  const budget = new RetainedTextBudget(policy, "delimited", [title]);
+  let ordinal = 0;
+  let structuredEntries = 0;
   const records = parseCsv(csv, {
     columns: true,
     delimiter,
     skip_empty_lines: true,
     relax_column_count: false,
-  }) as Array<Record<string, string>>;
-  const chunks = records.map((record, ordinal) => ({
-    id: `${sourceId}_${String(ordinal).padStart(4, "0")}`,
-    sourceId,
-    ordinal,
-    locator: `row=${ordinal + 2}`,
-    text: Object.entries(record)
-      .map(([key, value]) => `${key}: ${value}`)
-      .join(" | "),
-  }));
+    on_record: (record: Record<string, string>) => {
+      const parts: string[] = [];
+      for (const key in record) {
+        if (!Object.hasOwn(record, key)) continue;
+        if (structuredEntries >= policy.maxChunks) {
+          throw new Error(
+            `Extracted delimited content exceeds configured maximum of ${policy.maxChunks} chunks`,
+          );
+        }
+        structuredEntries += 1;
+        parts.push(`${key}: ${record[key]}`);
+      }
+      const text = parts.join(" | ");
+      const locator = `row=${ordinal + 2}`;
+      budget.retainPrimaryEntry(text, "\n", [locator, text]);
+      const chunk = {
+        id: `${sourceId}_${String(ordinal).padStart(4, "0")}`,
+        sourceId,
+        ordinal,
+        locator,
+        text,
+      };
+      ordinal += 1;
+      return chunk;
+    },
+  }) as ExtractedSourceV1["chunks"];
   return {
     version: 1,
     sourceId,
-    title: path.basename(filePath, path.extname(filePath)),
-    text: chunks.map((chunk) => chunk.text).join("\n"),
-    chunks,
+    title,
+    text: records.map((chunk) => chunk.text).join("\n"),
+    chunks: records,
   };
 }
 
@@ -222,25 +453,49 @@ export function extractJsonLines(
   sourceId: string,
   filePath: string,
   jsonLines: string,
+  rawPolicy?: TextExtractionPolicyV1,
 ): ExtractedSourceV1 {
-  const lines = jsonLines.replace(/\r\n?/g, "\n").split("\n");
-  const chunks = lines.flatMap((line, index) => {
-    if (!line.trim()) return [];
-    const normalized = JSON.stringify(JSON.parse(line));
-    return [
-      {
-        id: `${sourceId}_${String(index).padStart(4, "0")}`,
+  const policy = textExtractionPolicy(rawPolicy);
+  const title = path.basename(filePath, path.extname(filePath));
+  const budget = new RetainedTextBudget(policy, "JSONL", [title]);
+  const chunks: ExtractedSourceV1["chunks"] = [];
+  let lineStart = 0;
+  let lineIndex = 0;
+  while (lineStart <= jsonLines.length) {
+    const nextLineFeed = jsonLines.indexOf("\n", lineStart);
+    const nextCarriageReturn = jsonLines.indexOf("\r", lineStart);
+    const carriageReturnFirst =
+      nextCarriageReturn !== -1 &&
+      (nextLineFeed === -1 || nextCarriageReturn < nextLineFeed);
+    const lineEnd = carriageReturnFirst
+      ? nextCarriageReturn
+      : nextLineFeed === -1
+        ? jsonLines.length
+        : nextLineFeed;
+    const line = jsonLines.slice(lineStart, lineEnd);
+    if (line.trim()) {
+      const normalized = JSON.stringify(JSON.parse(line));
+      const locator = `line=${lineIndex + 1}`;
+      budget.retainPrimaryEntry(normalized, "\n", [locator, normalized]);
+      chunks.push({
+        id: `${sourceId}_${String(lineIndex).padStart(4, "0")}`,
         sourceId,
-        ordinal: index,
-        locator: `line=${index + 1}`,
+        ordinal: lineIndex,
+        locator,
         text: normalized,
-      },
-    ];
-  });
+      });
+    }
+    if (lineEnd === jsonLines.length) break;
+    lineStart =
+      carriageReturnFirst && jsonLines[lineEnd + 1] === "\n"
+        ? lineEnd + 2
+        : lineEnd + 1;
+    lineIndex += 1;
+  }
   return {
     version: 1,
     sourceId,
-    title: path.basename(filePath, path.extname(filePath)),
+    title,
     text: chunks.map((chunk) => chunk.text).join("\n"),
     chunks,
   };
@@ -460,8 +715,17 @@ export async function extractDocxWithPolicy(
     sourceId,
     filePath,
     `<html><body>${converted.value}</body></html>`,
+    {
+      maxExtractedBytes: maxExpandedBytes,
+      maxChunks: defaultTextExtractionPolicyV1.maxChunks,
+    },
+    "DOCX",
+    false,
   );
-  const structured = extractMarkdown(sourceId, filePath, html.text);
+  const structured = extractMarkdown(sourceId, filePath, html.text, {
+    maxExtractedBytes: maxExpandedBytes,
+    maxChunks: defaultTextExtractionPolicyV1.maxChunks,
+  });
   const extractedBytes = assertDocxOutputSize(
     structured.text,
     maxExpandedBytes,
@@ -551,6 +815,12 @@ export async function extractEpub(
       ? rawTitle
       : String((rawTitle as Record<string, unknown>)?.["#text"] ?? "")) ||
     path.basename(filePath, path.extname(filePath));
+  const normalizedTitle = title.trim();
+  if (Buffer.byteLength(normalizedTitle, "utf8") > policy.maxExtractedBytes) {
+    throw new Error(
+      `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+    );
+  }
   const manifest = xmlChild(packageDocument, "manifest");
   const items = asArray(xmlChild(manifest, "item")) as Array<
     Record<string, unknown>
@@ -572,10 +842,27 @@ export async function extractEpub(
     const chapterHtml = await archive.file(chapterPath)?.async("string");
     if (!chapterHtml)
       throw new Error(`EPUB spine item is missing: ${chapterPath}`);
-    const chapter = extractHtml(sourceId, chapterPath, chapterHtml);
+    const separatorBytes = chunks.length > 0 ? 2 : 0;
+    const remainingExtractedBytes =
+      policy.maxExtractedBytes - extractedBytes - separatorBytes;
+    if (remainingExtractedBytes <= 0) {
+      throw new Error(
+        `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+      );
+    }
+    const chapter = extractHtml(
+      sourceId,
+      chapterPath,
+      chapterHtml,
+      {
+        maxExtractedBytes: remainingExtractedBytes,
+        maxChunks: defaultTextExtractionPolicyV1.maxChunks,
+      },
+      "EPUB",
+      false,
+    );
     if (!chapter.text) continue;
     const chapterBytes = Buffer.byteLength(chapter.text, "utf8");
-    const separatorBytes = chunks.length > 0 ? 2 : 0;
     if (
       chapterBytes + separatorBytes >
       policy.maxExtractedBytes - extractedBytes
@@ -596,7 +883,7 @@ export async function extractEpub(
   return {
     version: 1,
     sourceId,
-    title: title.trim(),
+    title: normalizedTitle,
     text: chunks.map((chunk) => chunk.text).join("\n\n"),
     chunks,
   };
