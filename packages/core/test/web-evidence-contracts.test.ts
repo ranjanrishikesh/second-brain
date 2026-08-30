@@ -36,6 +36,25 @@ describe("durable web evidence contracts", () => {
     ).toMatchObject({ provenance: { kind: "file" } });
   });
 
+  test("rejects unknown source provenance fields", () => {
+    expect(() =>
+      sourceRecordV1Schema.parse({
+        version: 1,
+        id: "src_0123456789abcdef",
+        sha256: "a".repeat(64),
+        path: "sources/legacy.md",
+        title: "Legacy",
+        mediaType: "text/markdown",
+        bytes: 12,
+        discoveredAt: "2026-08-30T00:00:00.000Z",
+        extractor: "markdown-v1",
+        extractionStatus: "ready",
+        extractedSha256: "b".repeat(64),
+        provenance: { kind: "file", unexpected: true },
+      }),
+    ).toThrow();
+  });
+
   test.each([
     ["a non-HTTP source URL", { url: "file:///tmp/orbits.pdf" }],
     [
@@ -201,7 +220,7 @@ describe("durable web evidence contracts", () => {
 
     expect(pdfVariant?.additionalProperties).toBe(false);
     expect(pdfVariant?.properties?.sourcePath).toMatchObject({
-      pattern: expect.stringContaining("pdf"),
+      pattern: expect.stringContaining("[pP][dD][fF]"),
     });
     expect(discovery?.additionalProperties).toBe(false);
     expect(discovery?.properties?.originalUrl).toMatchObject({
@@ -218,6 +237,93 @@ describe("durable web evidence contracts", () => {
       pattern: expect.stringContaining("^https?"),
     });
   });
+
+  test("rejects reserved sidecar names in runtime and generated path patterns", () => {
+    const discovery = {
+      originalUrl: "https://example.com/orbits.json",
+      finalUrl: "https://example.com/orbits.json",
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What does the orbit report conclude?",
+      representation: "artifact",
+      completeness: "complete",
+    };
+    const reservedPath = "sources/web/2026/08/orbits.pdf.web.json";
+    expect(
+      webArtifactSidecarV1Schema.safeParse({
+        brainWebArtifact: 1,
+        sourcePath: reservedPath,
+        artifactSha256: pdfSha256,
+        artifactBytes: 9,
+        title: "Orbits",
+        format: "json",
+        mediaType: "application/json",
+        discovery,
+      }).success,
+    ).toBe(false);
+
+    const schema = brainJsonSchemasV1.WebArtifactSidecarV1 as {
+      anyOf?: Array<{ properties?: Record<string, unknown> }>;
+    };
+    const jsonVariant = schema.anyOf?.find(
+      (variant) =>
+        (variant.properties?.format as { const?: unknown } | undefined)
+          ?.const === "json",
+    );
+    const sourcePathPattern = (
+      jsonVariant?.properties?.sourcePath as { pattern?: string } | undefined
+    )?.pattern;
+    expect(sourcePathPattern).toBeDefined();
+    expect(new RegExp(sourcePathPattern).test(reservedPath)).toBe(false);
+  });
+
+  test.each([
+    ["pdf", "sources/web/2026/08/orbits-0716f9264c9f.PDF", "application/pdf"],
+    ["text", "sources/web/2026/08/orbits-0716f9264c9f.TxT", "text/plain"],
+  ])(
+    "accepts uppercase extensions for %s sidecars in runtime and generated patterns",
+    (format, sourcePath, mediaType) => {
+      const discovery = {
+        originalUrl: "https://example.com/orbits",
+        finalUrl: "https://example.com/orbits",
+        redirectChain: [],
+        retrievedAt: "2026-08-30T00:00:00.000Z",
+        queryId: "qry_0123456789abcdef0123456789abcdef",
+        questionHash: "c".repeat(64),
+        query: "What does the orbit report conclude?",
+        representation: "artifact",
+        completeness: "complete",
+      };
+      expect(
+        webArtifactSidecarV1Schema.parse({
+          brainWebArtifact: 1,
+          sourcePath,
+          artifactSha256: pdfSha256,
+          artifactBytes: 9,
+          title: "Orbits",
+          format,
+          mediaType,
+          discovery,
+        }),
+      ).toMatchObject({ format, sourcePath });
+
+      const schema = brainJsonSchemasV1.WebArtifactSidecarV1 as {
+        anyOf?: Array<{ properties?: Record<string, unknown> }>;
+      };
+      const variant = schema.anyOf?.find(
+        (candidate) =>
+          (candidate.properties?.format as { const?: unknown } | undefined)
+            ?.const === format,
+      );
+      const sourcePathPattern = (
+        variant?.properties?.sourcePath as { pattern?: string } | undefined
+      )?.pattern;
+      expect(sourcePathPattern).toBeDefined();
+      expect(new RegExp(sourcePathPattern).test(sourcePath)).toBe(true);
+    },
+  );
 
   test("derives a deterministic hidden sidecar path", () => {
     expect(

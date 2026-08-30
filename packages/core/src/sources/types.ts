@@ -34,6 +34,7 @@ const sourceProvenanceV1Schema = z
     sidecarBytes: z.number().int().nonnegative().optional(),
     webDiscoveries: z.array(webDiscoveryV1Schema).optional(),
   })
+  .strict()
   .superRefine((provenance, context) => {
     if (provenance.kind !== "web") return;
     if (!provenance.url) {

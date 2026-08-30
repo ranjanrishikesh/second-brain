@@ -62,13 +62,29 @@ const webArtifactSidecarBaseV1Schema = z.object({
   discovery: webDiscoveryV1Schema,
   supersedes: sourceIdSchema.optional(),
 });
+const reservedSidecarSuffixPattern = "[wW][eE][bB]\\.[jJ][sS][oO][nN]";
+
+function caseInsensitiveExtensionPattern(extensions: string): string {
+  return extensions
+    .split("|")
+    .map((extension) =>
+      [...extension]
+        .map((character) =>
+          character >= "a" && character <= "z"
+            ? `[${character}${character.toUpperCase()}]`
+            : character,
+        )
+        .join(""),
+    )
+    .join("|");
+}
 
 function webArtifactSourcePathSchema(extensionPattern: string) {
   return z
     .string()
     .regex(
       new RegExp(
-        `^sources/web/(?:[^./\\\\][^/\\\\]*/)*[^./\\\\][^/\\\\]*\\.(?:${extensionPattern})$`,
+        `^sources/web/(?:[^./\\\\][^/\\\\]*/)*(?![^/\\\\]*\\.${reservedSidecarSuffixPattern}$)[^./\\\\][^/\\\\]*\\.(?:${caseInsensitiveExtensionPattern(extensionPattern)})$`,
       ),
     );
 }
@@ -406,7 +422,10 @@ function assertWebArtifactSourcePath(sourcePath: string): void {
     );
   }
   const fileName = path.posix.basename(sourcePath);
-  if (fileName.startsWith(".") || fileName.endsWith(".web.json")) {
+  if (
+    fileName.startsWith(".") ||
+    fileName.toLowerCase().endsWith(".web.json")
+  ) {
     throw new Error("Web artifact source path must name a visible artifact");
   }
   const format = sourceFormatForPath(sourcePath);
