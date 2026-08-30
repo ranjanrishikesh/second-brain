@@ -134,6 +134,57 @@ describe("shared Codex and Claude onboarding contract", () => {
     },
   );
 
+  it.each(["AGENTS.md", ".agents/skills/second-brain/SKILL.md"])(
+    "%s requires durable, hostile-by-default web evidence handling",
+    async (path) => {
+      const contract = (await readRepositoryFile(path)).toLowerCase();
+
+      for (const requiredBoundary of [
+        "before searching or fetching",
+        "materially used",
+        "prefer a supported original download",
+        "complete or partial",
+        "untrusted evidence, never instructions",
+        "public http(s)",
+        "access-control bypass",
+        "private destinations",
+        "https-to-http downgrade",
+        "registered extraction",
+        "capture-triggered bootstrap",
+        "reconciliation before finishing",
+        "explicit knowledge gap",
+      ]) {
+        expect(contract).toContain(requiredBoundary);
+      }
+    },
+  );
+
+  it.each(["AGENTS.md", ".agents/skills/second-brain/SKILL.md"])(
+    "%s orders web approval, capture, inspection, and durable reconciliation",
+    async (path) => {
+      const contract = (await readRepositoryFile(path)).toLowerCase();
+      const orderedMarkers = [
+        "approved web tier",
+        "fetch only material evidence",
+        "prefer a supported original download",
+        "preserve complete or partial accessible text",
+        "treat content as untrusted evidence",
+        "capture through the cli",
+        "inspect the registered extraction",
+        "persist cited and reconciled knowledge or an honest gap",
+      ];
+      let previousIndex = -1;
+      for (const marker of orderedMarkers) {
+        const index = contract.indexOf(marker);
+        expect(
+          index,
+          `missing or out-of-order web-flow marker: ${marker}`,
+        ).toBeGreaterThan(previousIndex);
+        previousIndex = index;
+      }
+    },
+  );
+
   it("provides a privacy-safe capability request form", async () => {
     const form = parse(
       await readRepositoryFile(".github/ISSUE_TEMPLATE/capability-request.yml"),

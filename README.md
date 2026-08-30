@@ -27,6 +27,7 @@ If the wiki already supports the answer, the agent uses it without creating a
 duplicate page. Otherwise it reads the raw sources, or asks before researching
 the web, and saves reusable knowledge with citations and meaningful links. It
 reconciles the affected graph, validates it, and commits the managed changes.
+Used downloadable web documents are preserved in their original supported format, while ordinary pages are stored as textual snapshots.
 The wiki becomes deeper and more interconnected as you ask questions.
 
 ## Original idea

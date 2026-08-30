@@ -1,17 +1,30 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import {
+  beginQuery,
   calculateCatalogRevision,
+  expandQuery,
   parseWikiPage,
   planReconciliation,
   readBrainState,
+  requestWebApproval,
   renderWikiPage,
+  resolveWebApproval,
   writeBrainState,
+  type WebCaptureResult,
   type ChangeSetV1,
   type WikiPageV1,
 } from "@second-brain/core";
@@ -56,6 +69,38 @@ function parseBrainJson(stdout: string): unknown {
 
 async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
+}
+
+async function approvedWebQuery(
+  root: string,
+  question: string,
+): Promise<string> {
+  const query = await beginQuery(root, question);
+  await expandQuery(root, query.id, {
+    tier: "sources",
+    reason: "The wiki does not contain the answer.",
+  });
+  await requestWebApproval(root, query.id, {
+    reason: "Approved web evidence is required.",
+    hostSessionId: "cli-test-host",
+  });
+  await resolveWebApproval(root, query.id, {
+    approved: true,
+    decidedBy: "cli-test-owner",
+  });
+  await expandQuery(root, query.id, {
+    tier: "web",
+    reason: "Use the approved web evidence.",
+  });
+  return query.id;
+}
+
+async function textPdfBytes(text: string): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  page.drawText(text, { x: 40, y: 700, size: 12, font });
+  return pdf.save();
 }
 
 describe("brain CLI", () => {
@@ -700,6 +745,304 @@ describe("brain CLI", () => {
       id: session.id,
       webApproval: { status: "approved", decidedBy: "brain-owner" },
     });
+  });
+
+  test("captures legacy and provenance-rich text modes without changing the JSON envelope", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-web-text-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Web text",
+        "--description",
+        "Web text CLI test",
+      ],
+      { write: () => undefined },
+    );
+    const queryId = await approvedWebQuery(root, "What does the report say?");
+    const legacyOutput: string[] = [];
+
+    await runCli(
+      [
+        "web",
+        "capture",
+        queryId,
+        "--url",
+        "https://example.test/legacy",
+        "--title",
+        "Legacy report",
+        "--kind",
+        "page",
+        "--content",
+        "Legacy page body.",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: (value) => legacyOutput.push(value) },
+    );
+
+    const legacy = JSON.parse(legacyOutput.join("")) as WebCaptureResult;
+    expect(Object.keys(legacy).sort()).toEqual([
+      "created",
+      "session",
+      "source",
+    ]);
+    expect(legacy.source.provenance).toMatchObject({
+      representation: "text",
+      completeness: "complete",
+      url: "https://example.test/legacy",
+      finalUrl: "https://example.test/legacy",
+    });
+
+    const contentFile = path.join(root, ".brain", "runtime", "partial.txt");
+    await writeFile(
+      contentFile,
+      "Partial body from the final response.\n",
+      "utf8",
+    );
+    const output: string[] = [];
+    await runCli(
+      [
+        "web",
+        "capture",
+        queryId,
+        "--url",
+        "https://example.test/start",
+        "--final-url",
+        "https://example.test/final",
+        "--redirect-url",
+        "https://example.test/first",
+        "--redirect-url",
+        "https://example.test/second",
+        "--title",
+        "Partial report",
+        "--kind",
+        "page",
+        "--completeness",
+        "partial",
+        "--content-file",
+        contentFile,
+        "--retrieved-at",
+        "2026-08-30T10:15:00.000Z",
+        "--root",
+        root,
+        "--json",
+      ],
+      { write: (value) => output.push(value) },
+    );
+
+    const captured = JSON.parse(output.join("")) as WebCaptureResult;
+    expect(captured.source.provenance).toMatchObject({
+      url: "https://example.test/start",
+      finalUrl: "https://example.test/final",
+      redirectChain: [
+        "https://example.test/first",
+        "https://example.test/second",
+      ],
+      completeness: "partial",
+      representation: "text",
+    });
+    expect(
+      await readFile(path.join(root, captured.source.path), "utf8"),
+    ).toContain("Partial body from the final response.\n");
+  });
+
+  test("preserves artifact bytes through real Commander parsing and reports create and reuse", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-web-artifact-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Web artifact",
+        "--description",
+        "Web artifact CLI test",
+      ],
+      { write: () => undefined },
+    );
+    const queryId = await approvedWebQuery(
+      root,
+      "How many signals did the report find?",
+    );
+    const bytes = await textPdfBytes("The report found seven signals.");
+    const artifactPath = path.join(root, ".brain", "runtime", "report.pdf");
+    await mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, bytes);
+
+    const subprocess = await runBrainSubprocess([
+      "web",
+      "capture",
+      queryId,
+      "--url",
+      "https://example.test/report",
+      "--final-url",
+      "https://cdn.example.test/report.pdf",
+      "--redirect-url",
+      "https://example.test/download",
+      "--redirect-url",
+      "https://cdn.example.test/report.pdf",
+      "--title",
+      "Signals report",
+      "--kind",
+      "artifact",
+      "--artifact-file",
+      artifactPath,
+      "--media-type",
+      "application/pdf",
+      "--retrieved-at",
+      "2026-08-30T11:00:00.000Z",
+      "--root",
+      root,
+      "--json",
+    ]);
+
+    expect(subprocess.exitCode, subprocess.stderr).toBe(0);
+    const created = parseBrainJson(subprocess.stdout) as WebCaptureResult;
+    expect(created.created).toBe(true);
+    expect(created.source.path).toMatch(/signals-report-[a-f0-9]{12}\.pdf$/u);
+    expect(await readFile(path.join(root, created.source.path))).toEqual(
+      Buffer.from(bytes),
+    );
+    expect(created.source.provenance.redirectChain).toEqual([
+      "https://example.test/download",
+      "https://cdn.example.test/report.pdf",
+    ]);
+    expect(created.session.webEvidenceSourceIds).toContain(created.source.id);
+
+    const overrideBytes = await textPdfBytes(
+      "The override report is readable.",
+    );
+    const extensionlessPath = path.join(root, ".brain", "runtime", "download");
+    await writeFile(extensionlessPath, overrideBytes);
+    const firstHuman: string[] = [];
+    await runCli(
+      [
+        "web",
+        "capture",
+        queryId,
+        "--url",
+        "https://example.test/override",
+        "--title",
+        "Override report",
+        "--kind",
+        "artifact",
+        "--artifact-file",
+        extensionlessPath,
+        "--file-name",
+        "override.pdf",
+        "--root",
+        root,
+      ],
+      { write: (value) => firstHuman.push(value) },
+    );
+    expect(firstHuman.join("")).toMatch(
+      /^Captured sources\/web\/.+\.pdf \(ready\)\.\n$/u,
+    );
+
+    const reusedHuman: string[] = [];
+    await runCli(
+      [
+        "web",
+        "capture",
+        queryId,
+        "--url",
+        "https://example.test/override",
+        "--title",
+        "Override report",
+        "--kind",
+        "artifact",
+        "--artifact-file",
+        extensionlessPath,
+        "--file-name",
+        "override.pdf",
+        "--root",
+        root,
+      ],
+      { write: (value) => reusedHuman.push(value) },
+    );
+    expect(reusedHuman.join("")).toMatch(
+      /^Reused sources\/web\/.+\.pdf \(ready\)\.\n$/u,
+    );
+  });
+
+  test("rejects invalid capture modes and malformed UTF-8 before canonical preparation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-web-invalid-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Web invalid",
+        "--description",
+        "Web invalid CLI test",
+      ],
+      { write: () => undefined },
+    );
+    const queryId = await approvedWebQuery(root, "What is invalid input?");
+    const artifactPath = path.join(root, ".brain", "runtime", "artifact.pdf");
+    const malformedPath = path.join(root, ".brain", "runtime", "malformed.txt");
+    await mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, await textPdfBytes("Valid PDF bytes."));
+    await writeFile(malformedPath, Uint8Array.of(0xc3, 0x28));
+    const base = [
+      "web",
+      "capture",
+      queryId,
+      "--url",
+      "https://example.test/input",
+      "--title",
+      "Input",
+      "--root",
+      root,
+    ];
+
+    const invalidModes = [
+      [...base, "--kind", "page"],
+      [...base, "--kind", "artifact"],
+      [...base, "--kind", "page", "--artifact-file", artifactPath],
+      [...base, "--kind", "artifact", "--content", "text"],
+      [
+        ...base,
+        "--kind",
+        "page",
+        "--content",
+        "text",
+        "--content-file",
+        malformedPath,
+      ],
+      [
+        ...base,
+        "--kind",
+        "artifact",
+        "--artifact-file",
+        artifactPath,
+        "--content",
+        "text",
+      ],
+      [
+        ...base,
+        "--kind",
+        "snippet",
+        "--completeness",
+        "complete",
+        "--content",
+        "text",
+      ],
+    ];
+    for (const args of invalidModes) {
+      await expect(runCli(args, { write: () => undefined })).rejects.toThrow();
+    }
+    await expect(
+      runCli([...base, "--kind", "page", "--content-file", malformedPath], {
+        write: () => undefined,
+      }),
+    ).rejects.toThrow(/UTF-8/iu);
+    await expect(access(path.join(root, "sources", "web"))).rejects.toThrow();
   });
 
   test("configures and reports a confirmed sync target through the CLI", async () => {

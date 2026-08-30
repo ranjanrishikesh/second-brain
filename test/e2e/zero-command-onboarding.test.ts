@@ -41,6 +41,7 @@ import {
   type ReadReceiptV1,
   type SetupSourceContextV1,
   type SourceScanResult,
+  type WebCaptureResult,
   type WikiPageV1,
 } from "@second-brain/core";
 import { runCli } from "../../packages/cli/src/program.js";
@@ -490,6 +491,109 @@ describe("zero-command onboarding fake host", () => {
       phase: "ready-for-setup",
       nextAction: "begin-setup",
     });
+  }, 120_000);
+
+  test("captures exact PDF evidence through the installed pristine-template CLI", async () => {
+    const { root } = await materializePristineTemplate(
+      "second-brain-installed-web-capture",
+    );
+    await execFile("pnpm", ["install", "--offline", "--frozen-lockfile"], {
+      cwd: root,
+    });
+    await runInstalledBrainJson<InitCliResult>(root, ["init"]);
+    const query = await runInstalledBrainJson<{ id: string }>(root, [
+      "query",
+      "begin",
+      "How many durable signals were reported?",
+    ]);
+    await runInstalledBrainJson(root, [
+      "query",
+      "expand",
+      query.id,
+      "--tier",
+      "sources",
+      "--reason",
+      "The wiki has no answer.",
+    ]);
+    await runInstalledBrainJson(root, [
+      "query",
+      "request-web",
+      query.id,
+      "--reason",
+      "Approved web evidence is required.",
+      "--host-session",
+      "installed-cli-host",
+    ]);
+    await runInstalledBrainJson(root, [
+      "query",
+      "approve-web",
+      query.id,
+      "--approved",
+      "true",
+      "--decided-by",
+      "fixture-owner",
+    ]);
+    await runInstalledBrainJson(root, [
+      "query",
+      "expand",
+      query.id,
+      "--tier",
+      "web",
+      "--reason",
+      "Use the approved PDF evidence.",
+    ]);
+
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    page.drawText("The installed capture retained eleven durable signals.", {
+      x: 40,
+      y: 700,
+      size: 12,
+      font,
+    });
+    const bytes = await pdf.save();
+    const runtimePath = path.join(root, ".brain", "runtime", "download.pdf");
+    await mkdir(path.dirname(runtimePath), { recursive: true });
+    await writeFile(runtimePath, bytes);
+
+    const captured = await runInstalledBrainJson<WebCaptureResult>(root, [
+      "web",
+      "capture",
+      query.id,
+      "--url",
+      "https://example.test/durable-signals.pdf",
+      "--title",
+      "Durable signals",
+      "--kind",
+      "artifact",
+      "--artifact-file",
+      runtimePath,
+    ]);
+
+    expect(captured.created).toBe(true);
+    expect(captured.session.id).toBe(query.id);
+    expect(captured.session.webEvidenceSourceIds).toContain(captured.source.id);
+    expect(await readFile(path.join(root, captured.source.path))).toEqual(
+      Buffer.from(bytes),
+    );
+    const sidecarPath = captured.source.provenance.sidecarPath;
+    if (!sidecarPath) throw new Error("Expected installed capture sidecar");
+    await expect(access(path.join(root, sidecarPath))).resolves.toBeUndefined();
+    expect(
+      JSON.parse(await readFile(path.join(root, sidecarPath), "utf8")),
+    ).toMatchObject({
+      sourcePath: captured.source.path,
+      discovery: { queryId: query.id, representation: "artifact" },
+    });
+    const committedPaths = (
+      await git(root, ["show", "--pretty=format:", "--name-only", "HEAD"])
+    )
+      .split("\n")
+      .filter(Boolean);
+    expect(committedPaths).toContain(captured.source.path);
+    expect(committedPaths).toContain(sidecarPath);
+    expect(committedPaths).not.toContain(".brain/runtime/download.pdf");
   }, 120_000);
 
   test("resumes a cloned brain from empty identity through cited ready state and safe sync", async () => {

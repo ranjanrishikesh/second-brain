@@ -55,6 +55,10 @@ Contradictory claims remain cited in a conflicts section and use `supports` or `
 
 Web approval records are runtime-scoped but bound to the active query ID, its SHA-256 normalized-question hash, and host session. A request has `requested`, `approved`, `denied`, or `expired` state and a configured expiry. `brain query expand --tier web` and `brain web capture` both reject unless the same query has an unexpired approval. Captured evidence becomes an immutable registered source under `sources/web/`; the approval itself never substitutes for evidence.
 
+Web text evidence is a complete or partial Markdown snapshot with versioned provenance frontmatter and an exact captured-body hash. A downloadable supported artifact retains its original bytes and has a hidden tracked `.<artifact>.web.json` sidecar. The sidecar records the artifact path/hash/size, original and final public URL, ordered redirect chain, retrieval time, query identity, completeness, detected format, media type, and optional supersession. The artifact and sidecar are one immutable portable pair: missing, moved, malformed, or changed companions fail integrity checks.
+
+Source provenance also carries sorted structured web discoveries. Identical compatible bytes found through another approved URL reuse the source and add a discovery without changing the sealed first-capture sidecar; changed bytes create a new superseding source. Runtime download paths, credentials, cookies, and authorization data are never canonical provenance or managed commit content. Capture links the registered source to the active runtime query and refreshes bootstrap state, but durable reuse comes from the canonical source pair, manifest, cited wiki mutation, and managed operation.
+
 ## Synchronization contract
 
 `SyncTargetV1` stores the owner-confirmed remote name, branch, and a credential-safe fingerprint of the remote URL. `SyncStatusV1` is derived rather than blindly trusted: `unconfigured`, `synced`, `pending`, or `manual-sync-required`.

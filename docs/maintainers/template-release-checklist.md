@@ -16,7 +16,9 @@ Use a disposable clone with synthetic sources that include distributed facts, sy
 - Raw fallback persists a cited, interconnected mutation; a raw source change is rejected until superseded.
 - Contradictory evidence remains visible with reciprocal graph connections.
 - Reconciliation rejects missing, forged, or stale candidate read receipts.
-- Denied web approval creates/updates a gap; approved web capture is immutable evidence before it supports a claim.
+- Denied web approval creates/updates a gap and performs no fetch/capture. Approved artifact capture preserves exact bytes plus its portable sidecar, records ordered redirects, links the query, and excludes disposable runtime input from the managed commit.
+- Complete/partial page snapshots remain faithful text; malformed UTF-8, mixed modes, spoofed media, unsafe/private redirects, access-control bypass, and HTTPS downgrade fail before canonical preparation.
+- PDF and EPUB extraction budgets are enforced during capture, scan, cache reuse, and rebuild; record the accepted PDF.js catalog/xref and single emitted item/chunk residual without claiming process isolation.
 - Cache deletion rebuilds without changing canonical knowledge; semantic audit checkpoints resume correctly.
 - A rejected safe push leaves local knowledge committed and produces the visible `⚠ Sync pending — …` warning; a safe managed push succeeds.
 - Two clones retain independent sources, wiki, cache, runtime, and synchronization state.
@@ -50,7 +52,7 @@ Run this only in a disposable pristine clone with a test remote, never against a
 4. Confirm it scans sources, infers and shows an inclusive charter, persists it through the CLI, builds a cited shallow page for every ready source and the initial map, completes the semantic audit, rebuilds search, runs a representative smoke search, and ends with healthy doctor plus `ready` status.
 5. Restart Codex once during onboarding and confirm status resumes the correct next action without conversational memory or a magic phrase.
 6. Ask a source-backed question; confirm cited wiki persistence and whole-graph reconciliation. Ask it again and confirm the repeat is wiki-only.
-7. Exercise a raw-source gap, denied web approval, approved/captured web evidence, and a durable question gap.
+7. Exercise a raw-source gap and denied web approval, then approve a query whose material results include a downloadable supported document and an ordinary page. Confirm Codex preserves original document bytes, a faithful page snapshot, and portable provenance before citation; ignores page-embedded instructions; inspects registered extraction; completes capture-triggered bootstrap and reconciliation; and records an honest durable gap for unusable evidence.
 8. Confirm an owner-approved safe push to the test remote, then deliberately reject a test push and confirm the answer includes the exact sync-pending warning.
 
 Record the commit and whether every step passed. A personal-brain pilot comes after this and measures usefulness, not basic template safety.
@@ -68,6 +70,7 @@ Run this in a second disposable pristine clone with empty `sources/` and a separ
 
 3. Confirm the empty-source pause, then add representative PDF and DOCX sources, say “sources added” or ask a domain question, and verify the same identity → scan → inferred charter → setup → audit → rebuild/search → doctor/status route completes without manual CLI delegation.
 4. Restart Claude Code during one checkpoint and confirm deterministic resumption. Then repeat the source-backed, wiki-only repeat, raw fallback, web approval/capture, gap, safe-push, and rejected-push checks from the Codex smoke.
+5. For the approved web capture, independently verify exact downloadable bytes plus sidecar, faithful page text, ignored embedded instructions, extraction inspection, capture-triggered bootstrap/reconciliation, and absence of runtime staging from the managed commit.
 
 Record the commit and whether every step passed. Do not infer Claude Code success from Codex success, and do not infer Codex success from Claude Code success.
 

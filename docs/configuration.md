@@ -21,7 +21,14 @@ never contact GitHub.
 ## Sources and bootstrap
 
 - `sources.roots`: repository-relative immutable source roots. The default is `sources`.
-- `sources.maxFileBytes`: maximum source-file size read in-process. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. Oversized files are registered with a visible failure.
+- `sources.maxFileBytes`: maximum source-file or downloaded-artifact size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. Oversized files are registered with a visible failure.
+- `sources.pdf.maxPages`: maximum PDF page count; default `2000`.
+- `sources.pdf.maxExtractedBytes`: cumulative normalized PDF text budget; default `104857600` bytes.
+- `sources.epub.maxEntries`: maximum physical/decoded archive entries; default `1000`.
+- `sources.epub.maxExpandedBytes`: cumulative EPUB expanded-byte budget; default `104857600` bytes.
+- `sources.epub.maxExtractedBytes`: cumulative normalized EPUB text budget; default `104857600` bytes.
+
+PDF input bytes, page count, retained text, and the core string buffer are bounded, and pages are processed sequentially. PDF.js must still parse catalog/xref structures before reporting page count, and one emitted text-stream chunk/item may already exist when incremental accounting rejects it. These accepted residual allocations are bounded only indirectly by input bytes; PDF handling is not claimed to provide subprocess isolation or a complete memory boundary.
 - `bootstrap.mode`: `catalog-map` in v1.
 - `bootstrap.batchSize`: maximum source contexts returned by `brain bootstrap next`.
 
@@ -34,6 +41,10 @@ Bootstrap creates a shallow source catalog and relationship map. The host agent 
 - `web.approvalTtlHours`: the lifespan of one owner decision for one active question; default `24`. Approval is bound to the query ID, normalized question, and host session. A past general preference for research does not authorize a new query.
 
 Web captures record URL, retrieval time, originating query, capture kind, content hash, and version/supersession data. They obey the same immutable-source contract as local files.
+
+The host owns all searching, redirects, and fetching; the core and CLI perform no network request. The host may fetch only public HTTP(S) destinations after exact-question approval, with at most five ordered redirects, no private/loopback/link-local/metadata destinations, no access-control bypass, and no HTTPS-to-HTTP downgrade. Credentials and temporary local paths are not provenance.
+
+Artifact capture accepts exact PDF, DOCX, EPUB, Markdown, text, JSON/JSONL, CSV, or TSV bytes. Magic/container validation and the filename format declaration must agree; an absent or generic `application/octet-stream` media type is allowed, but a conflicting format-specific media type is rejected. Text formats require valid UTF-8 and use their existing structured parser. Ordinary HTML pages are not artifact inputs: preserve their accessible text as complete or partial Markdown snapshots. The CLI passes a safe basename as a detection hint and never stores its runtime input path.
 
 ## Semantic model and hybrid retrieval
 

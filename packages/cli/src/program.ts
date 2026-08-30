@@ -35,9 +35,11 @@ import {
   type BrainRuntimeServices,
   type BrainCharterV1,
   type SearchScope,
+  type WebCaptureResult,
 } from "@second-brain/core";
 import { Command, CommanderError, Option } from "commander";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 export interface CliOutput {
   write(value: string): void;
@@ -45,6 +47,21 @@ export interface CliOutput {
 
 export interface CliRuntimeOptions {
   runtimeServices?: BrainRuntimeServices;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+async function readUtf8File(filePath: string): Promise<string> {
+  const bytes = await readFile(filePath);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`Content file must contain valid UTF-8: ${filePath}`, {
+      cause: error,
+    });
+  }
 }
 
 export async function runCli(
@@ -473,6 +490,17 @@ export async function runCli(
     .requiredOption("--kind <kind>")
     .option("--content <content>")
     .option("--content-file <path>")
+    .option("--artifact-file <path>")
+    .option("--file-name <name>")
+    .option("--media-type <type>")
+    .option("--final-url <url>")
+    .option("--completeness <completeness>")
+    .option(
+      "--redirect-url <url>",
+      "redirect URL in observed order",
+      collectOption,
+      [],
+    )
     .option("--retrieved-at <timestamp>")
     .option("--root <path>", "brain repository root", process.cwd())
     .option("--json", "emit machine-readable JSON")
@@ -482,33 +510,120 @@ export async function runCli(
         options: {
           url: string;
           title: string;
-          kind: "page" | "snippet";
+          kind: "page" | "snippet" | "artifact";
           content?: string;
           contentFile?: string;
+          artifactFile?: string;
+          fileName?: string;
+          mediaType?: string;
+          finalUrl?: string;
+          completeness?: "complete" | "partial";
+          redirectUrl: string[];
           retrievedAt?: string;
           root: string;
+          json?: boolean;
         },
       ) => {
-        if (options.kind !== "page" && options.kind !== "snippet") {
+        if (
+          options.kind !== "page" &&
+          options.kind !== "snippet" &&
+          options.kind !== "artifact"
+        ) {
           throw new Error(`Unknown web capture kind: ${options.kind}`);
         }
-        if (Boolean(options.content) === Boolean(options.contentFile)) {
-          throw new Error("Provide exactly one of --content or --content-file");
+        const hasContent = options.content !== undefined;
+        const hasContentFile = options.contentFile !== undefined;
+        const hasArtifactFile = options.artifactFile !== undefined;
+        if (options.kind === "artifact") {
+          if (!hasArtifactFile || hasContent || hasContentFile) {
+            throw new Error(
+              "Artifact capture requires --artifact-file and no text input",
+            );
+          }
+          if (options.completeness !== undefined) {
+            throw new Error("Artifact capture does not accept --completeness");
+          }
+        } else {
+          if (
+            hasArtifactFile ||
+            options.fileName !== undefined ||
+            options.mediaType !== undefined ||
+            hasContent === hasContentFile
+          ) {
+            throw new Error(
+              "Text capture requires exactly one of --content or --content-file",
+            );
+          }
+          if (
+            options.completeness !== undefined &&
+            options.completeness !== "complete" &&
+            options.completeness !== "partial"
+          ) {
+            throw new Error(
+              `Unknown web capture completeness: ${options.completeness}`,
+            );
+          }
+          if (
+            options.kind === "snippet" &&
+            options.completeness === "complete"
+          ) {
+            throw new Error("A snippet capture must be partial");
+          }
         }
-        const content = options.contentFile
-          ? await readFile(options.contentFile, "utf8")
-          : (options.content ?? "");
-        json(
-          await captureWebEvidence(options.root, queryId, {
-            url: options.url,
-            title: options.title,
-            captureKind: options.kind,
-            content,
-            ...(options.retrievedAt
-              ? { retrievedAt: options.retrievedAt }
+        const provenance = {
+          originalUrl: options.url,
+          title: options.title,
+          ...(options.finalUrl !== undefined
+            ? { finalUrl: options.finalUrl }
+            : {}),
+          ...(options.redirectUrl.length > 0
+            ? { redirectChain: options.redirectUrl }
+            : {}),
+          ...(options.retrievedAt !== undefined
+            ? { retrievedAt: options.retrievedAt }
+            : {}),
+        };
+        let result: WebCaptureResult;
+        if (options.kind === "artifact") {
+          const artifactFile = options.artifactFile;
+          if (artifactFile === undefined) {
+            throw new Error("Artifact capture requires --artifact-file");
+          }
+          const content = await readFile(artifactFile);
+          result = await captureWebEvidence(options.root, queryId, {
+            ...provenance,
+            representation: "artifact",
+            fileName: options.fileName ?? path.basename(artifactFile),
+            ...(options.mediaType !== undefined
+              ? { declaredMediaType: options.mediaType }
               : {}),
-          }),
-        );
+            responseComplete: true,
+            content,
+          });
+        } else {
+          const content =
+            options.contentFile !== undefined
+              ? await readUtf8File(options.contentFile)
+              : options.content;
+          if (content === undefined) {
+            throw new Error("Text capture requires content");
+          }
+          result = await captureWebEvidence(options.root, queryId, {
+            ...provenance,
+            representation: "text",
+            captureKind: options.kind,
+            completeness:
+              options.completeness ??
+              (options.kind === "snippet" ? "partial" : "complete"),
+            content,
+          });
+        }
+        if (options.json) json(result);
+        else {
+          output.write(
+            `${result.created ? "Captured" : "Reused"} ${result.source.path} (${result.source.extractionStatus}).\n`,
+          );
+        }
       },
     );
 
