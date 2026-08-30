@@ -161,6 +161,8 @@ export interface WebCaptureTestOptions {
   ) => Promise<void> | void;
 }
 
+const LEGACY_ARTIFACT_ROLLOVER_WINDOW_MS = 5 * 60 * 1000;
+
 function sha256(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -245,6 +247,7 @@ function legacyPreparedArtifactTimestamp(
   sourcePath: string,
   fileName: string,
   modifiedAt: string,
+  modifiedAtNs: bigint,
 ): string {
   const match = /^sources\/web\/(\d{4})\/(0[1-9]|1[0-2])\/([^/]+)$/.exec(
     sourcePath,
@@ -267,14 +270,29 @@ function legacyPreparedArtifactTimestamp(
     );
   }
 
-  // Legacy artifact-only preparations have no durable retrieval timestamp.
-  // Preserve an in-month mtime; otherwise clamp it to the closest instant in
-  // the already validated path month so a clock/month rollover stays resumable.
-  const recoveredTime = Math.min(
-    Math.max(modifiedTime, monthStart.getTime()),
-    nextMonthStart.getTime() - 1,
+  const monthStartTime = monthStart.getTime();
+  const nextMonthStartTime = nextMonthStart.getTime();
+  const nanosecondsPerMillisecond = 1_000_000n;
+  const monthStartNs = BigInt(monthStartTime) * nanosecondsPerMillisecond;
+  const nextMonthStartNs =
+    BigInt(nextMonthStartTime) * nanosecondsPerMillisecond;
+  if (modifiedAtNs >= monthStartNs && modifiedAtNs < nextMonthStartNs) {
+    return new Date(modifiedTime).toISOString();
+  }
+
+  // A legacy artifact can cross midnight before its sidecar is written. Only
+  // that narrow, immediate rollover is plausible without durable provenance.
+  if (
+    modifiedAtNs >= nextMonthStartNs &&
+    modifiedAtNs <=
+      nextMonthStartNs +
+        BigInt(LEGACY_ARTIFACT_ROLLOVER_WINDOW_MS) * nanosecondsPerMillisecond
+  ) {
+    return new Date(nextMonthStartTime - 1).toISOString();
+  }
+  throw new Error(
+    `Prepared web artifact mtime is outside the recovery rollover window: ${sourcePath}`,
   );
-  return new Date(recoveredTime).toISOString();
 }
 
 async function readSources(root: string): Promise<SourceRecordV1[]> {
@@ -623,6 +641,7 @@ async function ensureWebPreparationParent(
 interface PreparedWebFile {
   content: Buffer;
   modifiedAt: string;
+  modifiedAtNs: bigint;
 }
 
 async function readContainedOptional(
@@ -714,6 +733,7 @@ async function readContainedOptional(
       modifiedAt: new Date(
         Number(finalOpened.mtimeNs / 1_000_000n),
       ).toISOString(),
+      modifiedAtNs: finalOpened.mtimeNs,
     };
   } finally {
     await handle.close();
@@ -1084,6 +1104,7 @@ export async function captureWebEvidence(
                 sourcePath,
                 fileName,
                 preparedArtifact.modifiedAt,
+                preparedArtifact.modifiedAtNs,
               );
             }
             if (captureRelativePath(retrievedAt, fileName) !== sourcePath) {

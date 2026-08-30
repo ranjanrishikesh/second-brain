@@ -1695,44 +1695,107 @@ describe("durable web evidence capture", () => {
     },
   );
 
-  test("resumes an August artifact-only preparation whose mtime crossed into September", async () => {
-    const { root, queryId } = await approvedBrain(
-      "Resume a month-boundary artifact?",
-    );
-    const content = encoder.encode("month-boundary bytes\n");
-    const digest = sha256(content).slice(0, 12);
-    const sourcePath = `sources/web/2026/08/month-boundary-${digest}.txt`;
-    const sidecarPath = `sources/web/2026/08/.month-boundary-${digest}.txt.web.json`;
-    await mkdir(path.dirname(path.join(root, sourcePath)), { recursive: true });
-    await writeFile(path.join(root, sourcePath), content);
-    await utimes(
-      path.join(root, sourcePath),
-      new Date("2026-09-01T00:00:00.000Z"),
-      new Date("2026-09-01T00:00:00.000Z"),
-    );
+  test.each([
+    ["exact UTC month boundary", "2026-09-01T00:00:00.000Z"],
+    ["five-minute rollover limit", "2026-09-01T00:05:00.000Z"],
+  ] as const)(
+    "resumes an artifact-only rollover at the %s",
+    async (_case, modifiedAt) => {
+      const { root, queryId } = await approvedBrain(
+        "Resume a month-boundary artifact?",
+      );
+      const content = encoder.encode("month-boundary bytes\n");
+      const digest = sha256(content).slice(0, 12);
+      const sourcePath = `sources/web/2026/08/month-boundary-${digest}.txt`;
+      const sidecarPath = `sources/web/2026/08/.month-boundary-${digest}.txt.web.json`;
+      await mkdir(path.dirname(path.join(root, sourcePath)), {
+        recursive: true,
+      });
+      await writeFile(path.join(root, sourcePath), content);
+      await utimes(
+        path.join(root, sourcePath),
+        new Date(modifiedAt),
+        new Date(modifiedAt),
+      );
 
-    const result = await captureWebEvidence(root, queryId, {
-      representation: "artifact",
-      originalUrl: "https://example.test/month-boundary.txt",
-      title: "Month boundary",
-      fileName: "month-boundary.txt",
-      responseComplete: true,
-      content,
-    });
+      const result = await captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: "https://example.test/month-boundary.txt",
+        title: "Month boundary",
+        fileName: "month-boundary.txt",
+        responseComplete: true,
+        content,
+      });
 
-    expect(result).toMatchObject({
-      created: true,
-      source: { path: sourcePath },
-    });
-    expect(await readFile(path.join(root, sourcePath))).toEqual(
-      Buffer.from(content),
-    );
-    const sidecar = JSON.parse(
-      await readFile(path.join(root, sidecarPath), "utf8"),
-    );
-    expect(sidecar.discovery.retrievedAt).toBe("2026-08-31T23:59:59.999Z");
-    expect(await webFiles(root)).toEqual([sidecarPath, sourcePath].sort());
-  });
+      expect(result).toMatchObject({
+        created: true,
+        source: { path: sourcePath },
+      });
+      expect(await readFile(path.join(root, sourcePath))).toEqual(
+        Buffer.from(content),
+      );
+      const sidecar = JSON.parse(
+        await readFile(path.join(root, sidecarPath), "utf8"),
+      );
+      expect(sidecar.discovery.retrievedAt).toBe("2026-08-31T23:59:59.999Z");
+      expect(await webFiles(root)).toEqual([sidecarPath, sourcePath].sort());
+    },
+  );
+
+  test.each([
+    ["one millisecond beyond the rollover limit", "2026-09-01T00:05:00.001Z"],
+    ["an earlier month", "2026-07-31T23:59:59.999Z"],
+    ["a later month", "2026-10-01T00:00:00.000Z"],
+    ["an unrelated year", "2030-09-01T00:00:00.000Z"],
+  ] as const)(
+    "rejects an artifact-only rollover from %s without side effects",
+    async (_case, modifiedAt) => {
+      const { root, queryId } = await approvedBrain(
+        "Reject an implausible month rollover?",
+      );
+      const content = encoder.encode("implausible rollover bytes\n");
+      const digest = sha256(content).slice(0, 12);
+      const sourcePath = `sources/web/2026/08/implausible-rollover-${digest}.txt`;
+      const sidecarPath = `sources/web/2026/08/.implausible-rollover-${digest}.txt.web.json`;
+      await mkdir(path.dirname(path.join(root, sourcePath)), {
+        recursive: true,
+      });
+      await writeFile(path.join(root, sourcePath), content);
+      await utimes(
+        path.join(root, sourcePath),
+        new Date(modifiedAt),
+        new Date(modifiedAt),
+      );
+
+      await expect(
+        captureWebEvidence(root, queryId, {
+          representation: "artifact",
+          originalUrl: "https://example.test/implausible-rollover.txt",
+          title: "Implausible rollover",
+          fileName: "implausible-rollover.txt",
+          responseComplete: true,
+          content,
+        }),
+      ).rejects.toThrow(/prepared|recovery|rollover|timestamp/i);
+      expect(await readFile(path.join(root, sourcePath))).toEqual(
+        Buffer.from(content),
+      );
+      expect(await webFiles(root)).toEqual([sourcePath]);
+      await expect(
+        readFile(path.join(root, sidecarPath)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      const manifest = JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      );
+      expect(manifest.sources).toEqual([]);
+      expect(
+        (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+      ).toEqual([]);
+    },
+  );
 
   test.each(["artifact", "sidecar"] as const)(
     "fails closed without creating a companion for mismatched %s-only preparation",
