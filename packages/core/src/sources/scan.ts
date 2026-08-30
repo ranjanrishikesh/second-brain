@@ -62,6 +62,11 @@ export interface SourceScanTestOptions {
   ) => Promise<void> | void;
   /** Deterministic seam for replacing an ordinary source after discovery. */
   beforeLocalSourceRead?: (relativePath: string) => Promise<void> | void;
+  /** Deterministic seam for changing an ordinary source after an opened-handle read. */
+  afterLocalSourceChunkRead?: (
+    relativePath: string,
+    cumulativeBytesRead: number,
+  ) => Promise<void> | void;
 }
 
 function sha256(content: Uint8Array): string {
@@ -114,13 +119,17 @@ async function readOrdinarySource(
     const chunks: Buffer[] = [];
     let bytes = 0;
     const retainContent = opened.size <= BigInt(maxFileBytes);
-    const readLimit = retainContent
-      ? maxFileBytes + 1
-      : Number.MAX_SAFE_INTEGER;
-    while (bytes <= readLimit) {
-      const chunk = Buffer.alloc(
-        retainContent ? Math.min(64 * 1024, readLimit - bytes) : 64 * 1024,
+    const readLimitBigInt = retainContent
+      ? BigInt(maxFileBytes) + 1n
+      : opened.size + 1n;
+    if (readLimitBigInt > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `Source exceeds the safely supported size limit while scanning ${relativePath}`,
       );
+    }
+    const readLimit = Number(readLimitBigInt);
+    while (bytes <= readLimit) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, readLimit - bytes));
       if (chunk.byteLength === 0) break;
       const result = await handle.read(chunk, 0, chunk.byteLength, null);
       if (result.bytesRead === 0) break;
@@ -128,6 +137,7 @@ async function readOrdinarySource(
       bytes += result.bytesRead;
       hash.update(readChunk);
       if (retainContent) chunks.push(readChunk);
+      await testOptions.afterLocalSourceChunkRead?.(relativePath, bytes);
       if (retainContent && bytes > maxFileBytes) break;
     }
     const finalOpened = await handle.stat({ bigint: true });
