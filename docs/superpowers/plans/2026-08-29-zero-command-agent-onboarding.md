@@ -1,5 +1,11 @@
 # Zero-Command Agent Onboarding Implementation Plan
 
+> **Historical record:** User-facing version and roadmap handoff language in
+> this document is superseded by
+> [Public Template and Capability Support Design](../specs/2026-08-30-public-template-and-capability-support-design.md).
+> Active hosts follow `AGENTS.md` and the second-brain skill; this file is not
+> a runtime instruction or release promise.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development` or `superpowers:executing-plans`. Every behavioral slice uses `superpowers:test-driven-development`.
 
 **Goal:** Let a user clone the template, open it in Codex or Claude Code, say “initialize this second brain,” add sources when requested, and have the agent run every routine CLI operation through readiness.

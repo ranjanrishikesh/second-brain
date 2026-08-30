@@ -1,6 +1,10 @@
-# V1 exit checklist
+# Template release verification checklist
 
-V1 is not complete because a feature appears to work once. Mark it verified only when the deterministic template checks and the Codex and Claude Code live smokes below have passed, with their commands, date, commit, and environment recorded in the release note or pull request.
+This checklist is for template maintainers. A feature is not release-verified
+because it appeared to work once: record the deterministic template gate and
+separate Codex and Claude Code live smokes with their commands, date, commit,
+and environment in the release note or pull request. This file is not a cloned
+brain onboarding instruction and does not announce a product roadmap.
 
 ## 1. Deterministic template gate
 
@@ -67,6 +71,9 @@ Run this in a second disposable pristine clone with empty `sources/` and a separ
 
 Record the commit and whether every step passed. Do not infer Claude Code success from Codex success, and do not infer Codex success from Claude Code success.
 
-## 4. Explicit v2 handoff
+## 4. Release closeout
 
-After every gate above passes, tell the owner: **“V1 is verified. Shall we plan v2 now?”** Create a separate v2 plan before changing scope. The deferred backlog includes OCR/image/audio/video ingestion, cross-brain links, multi-user permissions, a custom UI, a standalone LLM loop, hard-gated local web MCP, remote embeddings, automatic template upgrades, and background watching.
+After every gate above passes, record the verified commit, date, environments,
+and results for maintainers. Normal cloned-brain onboarding ends with:
+**“Your second brain is ready.”** Do not announce or promise another version,
+roadmap item, delivery date, or next-release inclusion.
