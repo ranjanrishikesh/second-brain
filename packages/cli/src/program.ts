@@ -15,6 +15,7 @@ import {
   finishQuery,
   formatSyncWarning,
   initBrain,
+  loadBrainConfig,
   nextBootstrapBatch,
   nextSetupBatch,
   planReconciliation,
@@ -38,7 +39,8 @@ import {
   type WebCaptureResult,
 } from "@second-brain/core";
 import { Command, CommanderError, Option } from "commander";
-import { readFile } from "node:fs/promises";
+import { type BigIntStats, constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface CliOutput {
@@ -47,14 +49,107 @@ export interface CliOutput {
 
 export interface CliRuntimeOptions {
   runtimeServices?: BrainRuntimeServices;
+  /** Deterministic file-read observations; never use outside tests. */
+  webInputFileTestOptions?: WebInputFileTestOptions;
+}
+
+export interface WebInputFileObservation {
+  filePath: string;
+  size: number;
+}
+
+export interface WebInputChunkObservation {
+  filePath: string;
+  totalBytes: number;
+}
+
+export interface WebInputFileTestOptions {
+  afterInitialStat?: (
+    observation: WebInputFileObservation,
+  ) => Promise<void> | void;
+  afterChunkRead?: (
+    observation: WebInputChunkObservation,
+  ) => Promise<void> | void;
+  beforeFinalStat?: (
+    observation: WebInputFileObservation,
+  ) => Promise<void> | void;
 }
 
 function collectOption(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
-async function readUtf8File(filePath: string): Promise<string> {
-  const bytes = await readFile(filePath);
+function sameOpenedFileVersion(
+  initial: BigIntStats,
+  final: BigIntStats,
+): boolean {
+  return (
+    initial.dev === final.dev &&
+    initial.ino === final.ino &&
+    initial.size === final.size &&
+    initial.mtimeNs === final.mtimeNs &&
+    initial.ctimeNs === final.ctimeNs
+  );
+}
+
+async function readBoundedFile(
+  filePath: string,
+  maxBytes: number,
+  testOptions: WebInputFileTestOptions = {},
+): Promise<Buffer> {
+  const file = await open(filePath, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const initial = await file.stat({ bigint: true });
+    if (!initial.isFile()) {
+      throw new Error(`Web capture input must be a regular file: ${filePath}`);
+    }
+    await testOptions.afterInitialStat?.({
+      filePath,
+      size: Number(initial.size),
+    });
+    if (initial.size > BigInt(maxBytes)) {
+      throw new Error(
+        `Web capture input exceeds configured maximum of ${maxBytes} bytes`,
+      );
+    }
+
+    const content = Buffer.alloc(Number(initial.size));
+    let totalBytes = 0;
+    while (totalBytes < content.byteLength) {
+      const length = Math.min(64 * 1_024, content.byteLength - totalBytes);
+      const read = await file.read(content, totalBytes, length, totalBytes);
+      if (read.bytesRead === 0) break;
+      totalBytes += read.bytesRead;
+      await testOptions.afterChunkRead?.({ filePath, totalBytes });
+    }
+    const growthProbe = Buffer.alloc(1);
+    const extra = await file.read(growthProbe, 0, 1, totalBytes);
+    await testOptions.beforeFinalStat?.({
+      filePath,
+      size: Number(initial.size),
+    });
+    const final = await file.stat({ bigint: true });
+    if (
+      BigInt(totalBytes) !== initial.size ||
+      extra.bytesRead !== 0 ||
+      !sameOpenedFileVersion(initial, final)
+    ) {
+      throw new Error(
+        `Web capture input changed while it was being read: ${filePath}`,
+      );
+    }
+    return content;
+  } finally {
+    await file.close();
+  }
+}
+
+async function readUtf8File(
+  filePath: string,
+  maxBytes: number,
+  testOptions?: WebInputFileTestOptions,
+): Promise<string> {
+  const bytes = await readBoundedFile(filePath, maxBytes, testOptions);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
@@ -584,12 +679,23 @@ export async function runCli(
             : {}),
         };
         let result: WebCaptureResult;
+        const maxFileBytes =
+          options.kind === "artifact" || options.contentFile !== undefined
+            ? (await loadBrainConfig(options.root)).sources.maxFileBytes
+            : undefined;
         if (options.kind === "artifact") {
           const artifactFile = options.artifactFile;
           if (artifactFile === undefined) {
             throw new Error("Artifact capture requires --artifact-file");
           }
-          const content = await readFile(artifactFile);
+          if (maxFileBytes === undefined) {
+            throw new Error("Artifact capture file limit is unavailable");
+          }
+          const content = await readBoundedFile(
+            artifactFile,
+            maxFileBytes,
+            runtimeOptions.webInputFileTestOptions,
+          );
           result = await captureWebEvidence(options.root, queryId, {
             ...provenance,
             representation: "artifact",
@@ -601,10 +707,17 @@ export async function runCli(
             content,
           });
         } else {
-          const content =
-            options.contentFile !== undefined
-              ? await readUtf8File(options.contentFile)
-              : options.content;
+          let content = options.content;
+          if (options.contentFile !== undefined) {
+            if (maxFileBytes === undefined) {
+              throw new Error("Text capture file limit is unavailable");
+            }
+            content = await readUtf8File(
+              options.contentFile,
+              maxFileBytes,
+              runtimeOptions.webInputFileTestOptions,
+            );
+          }
           if (content === undefined) {
             throw new Error("Text capture requires content");
           }

@@ -28,7 +28,7 @@ import {
   type ChangeSetV1,
   type WikiPageV1,
 } from "@second-brain/core";
-import { runCli } from "../src/program.js";
+import { runCli, type CliRuntimeOptions } from "../src/program.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = path.resolve(
@@ -101,6 +101,19 @@ async function textPdfBytes(text: string): Promise<Uint8Array> {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   page.drawText(text, { x: 40, y: 700, size: 12, font });
   return pdf.save();
+}
+
+async function setMaxFileBytes(
+  root: string,
+  maxFileBytes: number,
+): Promise<void> {
+  const configPath = path.join(root, "brain.config.yaml");
+  const config = await readFile(configPath, "utf8");
+  await writeFile(
+    configPath,
+    config.replace(/maxFileBytes: \d+/u, `maxFileBytes: ${maxFileBytes}`),
+    "utf8",
+  );
 }
 
 describe("brain CLI", () => {
@@ -1042,6 +1055,177 @@ describe("brain CLI", () => {
         write: () => undefined,
       }),
     ).rejects.toThrow(/UTF-8/iu);
+    await expect(access(path.join(root, "sources", "web"))).rejects.toThrow();
+  });
+
+  test("rejects oversized artifact and text files from opened metadata before reading", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-web-bounded-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Web bounded",
+        "--description",
+        "Web bounded input CLI test",
+      ],
+      { write: () => undefined },
+    );
+    await setMaxFileBytes(root, 32);
+    const queryId = await approvedWebQuery(root, "What exceeds the bound?");
+    const artifactPath = path.join(root, ".brain", "runtime", "large.pdf");
+    const textPath = path.join(root, ".brain", "runtime", "large.txt");
+    await mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, Buffer.alloc(64, 0x25));
+    await writeFile(textPath, "x".repeat(64), "utf8");
+    const initialStats: Array<{ filePath: string; size: number }> = [];
+    const readTotals: Array<{ filePath: string; totalBytes: number }> = [];
+    const runtimeOptions: CliRuntimeOptions = {
+      webInputFileTestOptions: {
+        afterInitialStat: (observation: { filePath: string; size: number }) =>
+          initialStats.push(observation),
+        afterChunkRead: (observation: {
+          filePath: string;
+          totalBytes: number;
+        }) => readTotals.push(observation),
+      },
+    };
+    const base = [
+      "web",
+      "capture",
+      queryId,
+      "--url",
+      "https://example.test/large",
+      "--title",
+      "Large input",
+      "--root",
+      root,
+    ];
+
+    await expect(
+      runCli(
+        [
+          ...base,
+          "--kind",
+          "artifact",
+          "--artifact-file",
+          artifactPath,
+          "--file-name",
+          "large.pdf",
+        ],
+        { write: () => undefined },
+        runtimeOptions,
+      ),
+    ).rejects.toThrow(/32 bytes/iu);
+    await expect(
+      runCli(
+        [...base, "--kind", "page", "--content-file", textPath],
+        { write: () => undefined },
+        runtimeOptions,
+      ),
+    ).rejects.toThrow(/32 bytes/iu);
+
+    expect(initialStats).toEqual([
+      { filePath: artifactPath, size: 64 },
+      { filePath: textPath, size: 64 },
+    ]);
+    expect(readTotals).toEqual([]);
+    await expect(access(path.join(root, "sources", "web"))).rejects.toThrow();
+  });
+
+  test("rejects a same-size input mutation through the opened file before capture", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-web-mutated-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Web mutation",
+        "--description",
+        "Web input mutation CLI test",
+      ],
+      { write: () => undefined },
+    );
+    await setMaxFileBytes(root, 1_024);
+    const queryId = await approvedWebQuery(root, "What changed while reading?");
+    const textPath = path.join(root, ".brain", "runtime", "mutable.txt");
+    await mkdir(path.dirname(textPath), { recursive: true });
+    await writeFile(textPath, "original evidence", "utf8");
+    let mutated = false;
+    const runtimeOptions: CliRuntimeOptions = {
+      webInputFileTestOptions: {
+        afterInitialStat: async () => {
+          await writeFile(textPath, "mutated! evidence", "utf8");
+          mutated = true;
+        },
+      },
+    };
+
+    await expect(
+      runCli(
+        [
+          "web",
+          "capture",
+          queryId,
+          "--url",
+          "https://example.test/mutable",
+          "--title",
+          "Mutable input",
+          "--kind",
+          "page",
+          "--content-file",
+          textPath,
+          "--root",
+          root,
+        ],
+        { write: () => undefined },
+        runtimeOptions,
+      ),
+    ).rejects.toThrow(/changed while it was being read/iu);
+    expect(mutated).toBe(true);
+    await expect(access(path.join(root, "sources", "web"))).rejects.toThrow();
+  });
+
+  test("rejects a non-regular web capture input after opening it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-cli-web-regular-"));
+    await runCli(
+      [
+        "init",
+        "--root",
+        root,
+        "--name",
+        "Web regular",
+        "--description",
+        "Web regular-file CLI test",
+      ],
+      { write: () => undefined },
+    );
+    const queryId = await approvedWebQuery(root, "Is this input a file?");
+    const directoryPath = path.join(root, ".brain", "runtime", "directory");
+    await mkdir(directoryPath, { recursive: true });
+
+    await expect(
+      runCli(
+        [
+          "web",
+          "capture",
+          queryId,
+          "--url",
+          "https://example.test/directory",
+          "--title",
+          "Directory input",
+          "--kind",
+          "page",
+          "--content-file",
+          directoryPath,
+          "--root",
+          root,
+        ],
+        { write: () => undefined },
+      ),
+    ).rejects.toThrow(/regular file/iu);
     await expect(access(path.join(root, "sources", "web"))).rejects.toThrow();
   });
 
