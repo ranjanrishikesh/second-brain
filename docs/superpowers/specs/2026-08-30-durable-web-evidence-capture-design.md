@@ -113,6 +113,7 @@ interface WebArtifactCaptureInputV1 extends WebCaptureProvenanceV1 {
   representation: "artifact";
   fileName: string;
   declaredMediaType?: string;
+  responseComplete: true;
   content: Uint8Array;
 }
 
@@ -178,13 +179,19 @@ The hidden tracked sidecar is not itself a source. It uses a strict
   received); and
 - optional `supersedes` source ID.
 
-`SourceRecordV1.provenance` gains optional additive fields for final URL,
-redirect chain, completeness, representation, sidecar path/hash, and alternate
-discovery URLs. The existing `url` field remains the primary original URL and
-the existing `captureKind` enum remains `page | snippet`. Artifact records omit
-`captureKind` and use `representation: "artifact"`, so old v1 readers can still
-parse the additive record without encountering a new enum member. Generated v1
-JSON Schemas are updated; existing records require no migration.
+`SourceRecordV1.provenance` gains optional fields for final URL, redirect chain,
+completeness, representation, sidecar path/hash, query identity, and a sorted
+array of structured web discoveries. The existing `url` field remains the
+primary original URL and the existing `captureKind` enum remains
+`page | snippet`. Artifact records omit `captureKind` and use
+`representation: "artifact"`.
+
+The current code reads all existing v1 records without migration, and the
+checked-in v1 JSON Schema is regenerated for the expanded contract. This is
+backward compatibility, not forward compatibility: an older checkout or older
+`additionalProperties: false` schema may reject or strip fields it predates and
+must be updated before editing a brain that contains artifact provenance. No
+user-facing product-version or roadmap language is introduced.
 
 The source walker continues to ignore dotfiles as independent inputs. When it
 finds a candidate artifact under `sources/web/`, it looks for the deterministic
@@ -212,7 +219,8 @@ The core validates:
 - the detected source format is supported and agrees with magic bytes and
   container structure; an absent or generic `application/octet-stream`
   declaration is allowed, while a conflicting format-specific media type is
-  rejected;
+  rejected; ambiguous UTF-8 text formats use the sanitized filename extension
+  as the format declaration and then pass their existing parser;
 - PDF, DOCX, and EPUB reuse their existing structural/archive limits;
 - text formats are valid UTF-8, and structured text is validated by its
   existing parser before registration;
@@ -235,9 +243,14 @@ Source identity remains content-derived.
 
 - The same URL and same bytes reuse the existing source and only link it to the
   active query.
-- Identical bytes discovered at another URL reuse the same source; the new URL
-  is appended through a canonical provenance-enrichment operation rather than
-  duplicating the artifact.
+- Identical bytes discovered at another URL reuse the same source; a structured
+  discovery record containing the URL chain, retrieval/query identity, and
+  completeness is appended through a canonical provenance-enrichment operation
+  rather than duplicating or modifying the artifact sidecar.
+- If identical bytes already exist as a local source, the source is reused only
+  when its detected format/extractor is compatible. Its primary provenance
+  remains `file`, while the structured web discovery is appended. A conflicting
+  representation is rejected instead of rewriting the existing source.
 - Different bytes retrieved from the same original or final URL create a new
   source whose sidecar and manifest record reference the most recent prior
   source through `supersedes`.
@@ -371,8 +384,9 @@ credentials or live web access.
   failures fail closed without corrupting canonical state.
 - Identical evidence is reused; changed evidence is versioned and older
   evidence remains visible.
-- Existing Markdown web captures, local sources, public v1 schemas, and query
-  flows remain readable without migration.
+- Current code reads existing Markdown web captures, local source records, and
+  query flows without migration; generated public v1 schemas describe both the
+  legacy and expanded record shapes.
 - The core and CLI perform no network request.
 
 ## Decisions made
@@ -388,8 +402,10 @@ credentials or live web access.
    keeps every captured item connected to a real question.
 5. **Faithful accessible text, explicitly complete or partial.** This avoids
    presenting snippets or host summaries as verbatim pages.
-6. **Additive v1 fields instead of a new artifact enum.** Existing v1 records
-   and parsers remain compatible while new readers gain precise provenance.
+6. **Expand the current v1 schema instead of adding user-facing version
+   messaging.** New code reads existing records without migration; older
+   binaries are not falsely claimed to be forward-compatible with fields that
+   did not exist when they shipped.
 7. **Prepared inputs survive interruptions.** Deterministic retry is safer than
    cleanup that can race a concurrent writer.
 8. **No automatic retention of unsupported binaries.** A file that cannot be
