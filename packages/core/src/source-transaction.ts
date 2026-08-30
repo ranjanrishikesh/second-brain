@@ -22,6 +22,25 @@ interface ImmutableSourceInput extends SourceDigest {
   path: string;
 }
 
+function immutableInputs(source: SourceRecordV1): ImmutableSourceInput[] {
+  const sidecar =
+    source.provenance.sidecarPath &&
+    source.provenance.sidecarSha256 &&
+    source.provenance.sidecarBytes !== undefined
+      ? [
+          {
+            path: source.provenance.sidecarPath,
+            bytes: source.provenance.sidecarBytes,
+            sha256: source.provenance.sidecarSha256,
+          },
+        ]
+      : [];
+  return [
+    { path: source.path, bytes: source.bytes, sha256: source.sha256 },
+    ...sidecar,
+  ];
+}
+
 interface SourceVerificationContext {
   gitRepository: boolean;
   indexPath?: string;
@@ -146,7 +165,8 @@ export async function scanAndRegisterSources(
           ].join(", ")}`,
         );
       }
-      for (const source of result.added) {
+      const addedInputs = result.added.flatMap(immutableInputs);
+      for (const source of addedInputs) {
         await writer.sealExisting(source.path, {
           bytes: source.bytes,
           sha256: source.sha256,
@@ -271,7 +291,7 @@ export async function scanAndRegisterSources(
       return {
         value: result,
         stagePaths: [
-          ...result.added.map((source) => source.path),
+          ...addedInputs.map((source) => source.path),
           ...(duplicateAcknowledgementsChanged
             ? result.duplicates.map((duplicate) => duplicate.path)
             : []),
@@ -282,7 +302,7 @@ export async function scanAndRegisterSources(
           assertSourceInputsAreStable(
             root,
             [
-              ...result.added,
+              ...addedInputs,
               ...(duplicateAcknowledgementsChanged ? result.duplicates : []),
             ],
             context,

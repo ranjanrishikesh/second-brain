@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { parse } from "yaml";
 import { loadBrainConfig } from "../config.js";
 import { calculateExtractedSourceSha256 } from "./cache-integrity.js";
 import {
@@ -24,6 +23,13 @@ import {
   type SourceScanResult,
 } from "./types.js";
 import { sourceFormatForPath } from "./format.js";
+import {
+  parseWebArtifactSidecar,
+  parseWebCaptureMetadata,
+  validateWebArtifact,
+  webArtifactSidecarPath,
+  type ValidatedWebArtifactV1,
+} from "./web-evidence.js";
 
 interface SourceManifestV1 {
   version: 1;
@@ -31,49 +37,6 @@ interface SourceManifestV1 {
 }
 
 export type SourceManifestWriter = (content: string) => Promise<void>;
-
-interface WebCaptureMetadata {
-  brainWebCapture: 1;
-  url: string;
-  retrievedAt: string;
-  query: string;
-  captureKind: "page" | "snippet";
-  title: string;
-  supersedes?: string;
-}
-
-function readWebCaptureMetadata(
-  content: string,
-): WebCaptureMetadata | undefined {
-  if (!content.startsWith("---\n")) return undefined;
-  const closingMarker = content.indexOf("\n---\n", 4);
-  if (closingMarker < 0) return undefined;
-  const metadata = parse(content.slice(4, closingMarker)) as Record<
-    string,
-    unknown
-  >;
-  if (
-    metadata.brainWebCapture !== 1 ||
-    typeof metadata.url !== "string" ||
-    typeof metadata.retrievedAt !== "string" ||
-    typeof metadata.query !== "string" ||
-    (metadata.captureKind !== "page" && metadata.captureKind !== "snippet") ||
-    typeof metadata.title !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    brainWebCapture: 1,
-    url: metadata.url,
-    retrievedAt: metadata.retrievedAt,
-    query: metadata.query,
-    captureKind: metadata.captureKind,
-    title: metadata.title,
-    ...(typeof metadata.supersedes === "string"
-      ? { supersedes: metadata.supersedes }
-      : {}),
-  };
-}
 
 async function walk(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -149,15 +112,73 @@ export async function scanSources(
         ? undefined
         : await readFile(absolutePath);
       const digest = content ? sha256(content) : await sha256File(absolutePath);
+      const sourceFormat = sourceFormatForPath(absolutePath);
+      const markdown = sourceFormat === "markdown";
+      const isManagedWebEvidence = relativePath.startsWith("sources/web/");
+      let webArtifact: ValidatedWebArtifactV1 | undefined;
+      let webCapture: ReturnType<typeof parseWebCaptureMetadata>;
+      if (isManagedWebEvidence) {
+        const relativeSidecarPath = webArtifactSidecarPath(relativePath);
+        let sidecarContent: Buffer | undefined;
+        try {
+          sidecarContent = await readFile(path.join(root, relativeSidecarPath));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        if (sidecarContent) {
+          parseWebArtifactSidecar(
+            sidecarContent.toString("utf8"),
+            relativePath,
+          );
+          if (exceedsSizeLimit || !content) {
+            throw new Error(
+              `Web artifact exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
+            );
+          }
+          webArtifact = validateWebArtifact({
+            sourcePath: relativePath,
+            artifactContent: content,
+            sidecarContent,
+            maxFileBytes: config.sources.maxFileBytes,
+          });
+        } else {
+          webCapture = markdown
+            ? parseWebCaptureMetadata(content?.toString("utf8") ?? "")
+            : undefined;
+          if (!webCapture) {
+            throw new Error(
+              `Web artifact sidecar is missing: ${relativeSidecarPath}`,
+            );
+          }
+        }
+      } else {
+        webCapture = markdown
+          ? parseWebCaptureMetadata(content?.toString("utf8") ?? "")
+          : undefined;
+      }
       const registered = registeredByPath.get(relativePath);
       if (registered) {
-        if (registered.sha256 === digest) result.unchanged.push(registered);
-        else
+        if (registered.sha256 !== digest) {
           result.modified.push({
             path: relativePath,
             registered,
             actualSha256: digest,
           });
+        } else if (
+          webArtifact &&
+          (registered.provenance.sidecarPath !==
+            webArtifactSidecarPath(relativePath) ||
+            registered.provenance.sidecarSha256 !== webArtifact.sidecarSha256 ||
+            registered.provenance.sidecarBytes !== webArtifact.sidecarBytes)
+        ) {
+          result.modified.push({
+            path: webArtifactSidecarPath(relativePath),
+            registered,
+            actualSha256: webArtifact.sidecarSha256,
+          });
+        } else {
+          result.unchanged.push(registered);
+        }
         continue;
       }
       const duplicate = registeredByHash.get(digest);
@@ -171,12 +192,7 @@ export async function scanSources(
         continue;
       }
 
-      const sourceFormat = sourceFormatForPath(absolutePath);
       const id = `src_${digest.slice(0, 16)}`;
-      const markdown = sourceFormat === "markdown";
-      const webCapture = markdown
-        ? readWebCaptureMetadata(content?.toString("utf8") ?? "")
-        : undefined;
       const plainText = sourceFormat === "text";
       const html = sourceFormat === "html";
       const json = sourceFormat === "json";
@@ -252,6 +268,13 @@ export async function scanSources(
                             : undefined;
         }
       } catch (error) {
+        if (webArtifact) {
+          throw new Error(
+            `Invalid web artifact ${relativePath}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
         extractionError =
           error instanceof Error
             ? `${error.name}: ${error.message}`
@@ -263,28 +286,33 @@ export async function scanSources(
         sha256: digest,
         path: relativePath,
         title:
-          webCapture?.title ?? extracted?.title ?? path.basename(relativePath),
-        mediaType: markdown
-          ? "text/markdown"
-          : plainText
-            ? "text/plain"
-            : html
-              ? "text/html"
-              : json
-                ? "application/json"
-                : jsonLines
-                  ? "application/x-ndjson"
-                  : csv
-                    ? "text/csv"
-                    : tsv
-                      ? "text/tab-separated-values"
-                      : pdf
-                        ? "application/pdf"
-                        : docx
-                          ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                          : epub
-                            ? "application/epub+zip"
-                            : "application/octet-stream",
+          webArtifact?.sidecar.title ??
+          webCapture?.title ??
+          extracted?.title ??
+          path.basename(relativePath),
+        mediaType: webArtifact
+          ? webArtifact.sidecar.mediaType
+          : markdown
+            ? "text/markdown"
+            : plainText
+              ? "text/plain"
+              : html
+                ? "text/html"
+                : json
+                  ? "application/json"
+                  : jsonLines
+                    ? "application/x-ndjson"
+                    : csv
+                      ? "text/csv"
+                      : tsv
+                        ? "text/tab-separated-values"
+                        : pdf
+                          ? "application/pdf"
+                          : docx
+                            ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            : epub
+                              ? "application/epub+zip"
+                              : "application/octet-stream",
         bytes: content?.byteLength ?? fileStats.size,
         discoveredAt: new Date().toISOString(),
         extractionStatus: extractionError
@@ -319,17 +347,47 @@ export async function scanSources(
           ? { extractedSha256: calculateExtractedSourceSha256(extracted) }
           : {}),
         ...(docxOutputPolicy ? { docxOutputPolicy } : {}),
-        provenance: webCapture
+        provenance: webArtifact
           ? {
               kind: "web",
-              url: webCapture.url,
-              retrievedAt: webCapture.retrievedAt,
-              query: webCapture.query,
-              captureKind: webCapture.captureKind,
+              url: webArtifact.sidecar.discovery.originalUrl,
+              finalUrl: webArtifact.sidecar.discovery.finalUrl,
+              redirectChain: webArtifact.sidecar.discovery.redirectChain,
+              retrievedAt: webArtifact.sidecar.discovery.retrievedAt,
+              query: webArtifact.sidecar.discovery.query,
+              completeness: webArtifact.sidecar.discovery.completeness,
+              representation: webArtifact.sidecar.discovery.representation,
+              sidecarPath: webArtifactSidecarPath(relativePath),
+              sidecarSha256: webArtifact.sidecarSha256,
+              sidecarBytes: webArtifact.sidecarBytes,
+              webDiscoveries: [webArtifact.sidecar.discovery],
             }
-          : { kind: "file" },
-        ...(webCapture?.supersedes
-          ? { supersedes: webCapture.supersedes }
+          : webCapture
+            ? {
+                kind: "web",
+                url: webCapture.originalUrl ?? webCapture.url,
+                ...(webCapture.finalUrl
+                  ? { finalUrl: webCapture.finalUrl }
+                  : {}),
+                ...(webCapture.redirectChain
+                  ? { redirectChain: webCapture.redirectChain }
+                  : {}),
+                retrievedAt: webCapture.retrievedAt,
+                query: webCapture.query,
+                captureKind: webCapture.captureKind,
+                completeness:
+                  webCapture.completeness ??
+                  (webCapture.captureKind === "snippet"
+                    ? "partial"
+                    : "complete"),
+                representation: "text",
+              }
+            : { kind: "file" },
+        ...(webArtifact?.sidecar.supersedes || webCapture?.supersedes
+          ? {
+              supersedes:
+                webArtifact?.sidecar.supersedes ?? webCapture?.supersedes,
+            }
           : {}),
         ...(extractionError ? { error: extractionError } : {}),
       });

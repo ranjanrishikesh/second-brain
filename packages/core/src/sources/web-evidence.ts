@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -138,6 +139,15 @@ export interface DetectedWebArtifactV1 {
   format: WebArtifactSourceFormatV1;
   extension: string;
   mediaType: string;
+}
+
+export interface ValidatedWebArtifactV1 {
+  sidecar: WebArtifactSidecarV1;
+  detected: DetectedWebArtifactV1;
+  artifactSha256: string;
+  artifactBytes: number;
+  sidecarSha256: string;
+  sidecarBytes: number;
 }
 
 /**
@@ -462,6 +472,65 @@ export function parseWebArtifactSidecar(
     );
   }
   return sidecar;
+}
+
+export function validateWebArtifact(input: {
+  sourcePath: string;
+  artifactContent: Uint8Array;
+  sidecarContent: Uint8Array;
+  maxFileBytes: number;
+}): ValidatedWebArtifactV1 {
+  validateUtf8(input.sidecarContent);
+  const sidecar = parseWebArtifactSidecar(
+    new TextDecoder("utf-8", { fatal: true }).decode(input.sidecarContent),
+    input.sourcePath,
+  );
+  if (input.artifactContent.byteLength > input.maxFileBytes) {
+    throw new Error(
+      `Web artifact exceeds configured maximum of ${input.maxFileBytes} bytes`,
+    );
+  }
+  if (
+    sidecar.discovery.representation !== "artifact" ||
+    sidecar.discovery.completeness !== "complete"
+  ) {
+    throw new Error(
+      "Web artifact sidecar must describe a complete artifact representation",
+    );
+  }
+  const detected = detectWebArtifact({
+    fileName: input.sourcePath,
+    declaredMediaType: sidecar.mediaType,
+    content: input.artifactContent,
+  });
+  if (detected.format !== sidecar.format) {
+    throw new Error(
+      "Web artifact sidecar format must match the detected artifact format",
+    );
+  }
+  const artifactSha256 = createHash("sha256")
+    .update(input.artifactContent)
+    .digest("hex");
+  if (sidecar.artifactBytes !== input.artifactContent.byteLength) {
+    throw new Error(
+      "Web artifact byte length does not match its sidecar declaration",
+    );
+  }
+  if (sidecar.artifactSha256 !== artifactSha256) {
+    throw new Error(
+      "Web artifact SHA-256 does not match its sidecar declaration",
+    );
+  }
+  return {
+    sidecar,
+    detected,
+    artifactSha256,
+    artifactBytes: input.artifactContent.byteLength,
+    sidecarSha256: createHash("sha256")
+      .update(input.sidecarContent)
+      .digest("hex"),
+    sidecarBytes: input.sidecarContent.byteLength,
+  };
 }
 
 export function parseWebCaptureMetadata(

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +16,72 @@ import {
 } from "../src/index.js";
 
 const execFileAsync = promisify(execFile);
+
+const webArtifactDirectory = "sources/web/2026/08";
+const webDiscovery = {
+  originalUrl: "https://example.com/orbits.pdf",
+  finalUrl: "https://cdn.example.com/orbits.pdf",
+  redirectChain: ["https://cdn.example.com/orbits.pdf"],
+  retrievedAt: "2026-08-30T00:00:00.000Z",
+  queryId: "qry_0123456789abcdef0123456789abcdef",
+  questionHash: "c".repeat(64),
+  query: "What does the orbit report conclude?",
+  representation: "artifact",
+  completeness: "complete",
+} as const;
+
+function sha256(bytes: Uint8Array | string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function artifactSidecar(
+  sourcePath: string,
+  bytes: Uint8Array,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const extension = path.extname(sourcePath).toLowerCase();
+  const format = extension === ".md" ? "markdown" : extension.slice(1);
+  const mediaType = extension === ".md" ? "text/markdown" : "application/pdf";
+  return {
+    brainWebArtifact: 1,
+    sourcePath,
+    artifactSha256: sha256(bytes),
+    artifactBytes: bytes.byteLength,
+    title: "Orbital Report",
+    format,
+    mediaType,
+    discovery: webDiscovery,
+    ...overrides,
+  };
+}
+
+async function writeWebArtifact(
+  root: string,
+  fileName: string,
+  bytes: Uint8Array,
+  sidecar: Record<string, unknown> = artifactSidecar(
+    `${webArtifactDirectory}/${fileName}`,
+    bytes,
+  ),
+): Promise<{ sourcePath: string; sidecarPath: string }> {
+  const sourcePath = `${webArtifactDirectory}/${fileName}`;
+  const sidecarPath = `${webArtifactDirectory}/.${fileName}.web.json`;
+  await mkdir(path.join(root, webArtifactDirectory), { recursive: true });
+  await writeFile(path.join(root, sourcePath), bytes);
+  await writeFile(
+    path.join(root, sidecarPath),
+    `${JSON.stringify(sidecar, null, 2)}\n`,
+  );
+  return { sourcePath, sidecarPath };
+}
+
+async function textPdf(text = "Orbital mechanics"): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  page.drawText(text, { x: 40, y: 700, size: 14, font });
+  return await document.save();
+}
 
 async function createDocx(
   body: string,
@@ -425,6 +492,288 @@ describe("scanSources", () => {
     );
     expect(extracted.chunks[0]).toMatchObject({ locator: "page=1" });
     expect(extracted.chunks[0].text).toContain("Orbital mechanics");
+  });
+
+  test("registers a web artifact from its validated hidden sidecar", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-pdf-"));
+    await initBrain(root, { name: "Test", description: "Web PDF test" });
+    const bytes = await textPdf();
+    const sourcePath = `${webArtifactDirectory}/orbits-0123456789ab.pdf`;
+    const sidecarPath = `${webArtifactDirectory}/.orbits-0123456789ab.pdf.web.json`;
+    await writeWebArtifact(root, "orbits-0123456789ab.pdf", bytes, {
+      brainWebArtifact: 1,
+      sourcePath,
+      artifactSha256: sha256(bytes),
+      artifactBytes: bytes.byteLength,
+      title: "Orbital Report",
+      format: "pdf",
+      mediaType: "application/pdf",
+      discovery: webDiscovery,
+    });
+
+    const result = await scanSources(root);
+
+    expect(result.added).toHaveLength(1);
+    expect(result.added[0]).toMatchObject({
+      path: sourcePath,
+      mediaType: "application/pdf",
+      extractionStatus: "ready",
+      title: "Orbital Report",
+      provenance: {
+        kind: "web",
+        url: "https://example.com/orbits.pdf",
+        finalUrl: "https://cdn.example.com/orbits.pdf",
+        representation: "artifact",
+        sidecarPath,
+        sidecarSha256: sha256(await readFile(path.join(root, sidecarPath))),
+      },
+    });
+    expect(result.added[0]?.provenance.sidecarBytes).toBe(
+      (await readFile(path.join(root, sidecarPath))).byteLength,
+    );
+    expect(
+      result.added.some((source) => source.path.endsWith(".web.json")),
+    ).toBe(false);
+  });
+
+  test("uses a Markdown artifact sidecar instead of hostile capture frontmatter", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-markdown-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Web Markdown test",
+    });
+    const bytes = new TextEncoder().encode(
+      "---\nbrainWebCapture: 1\nurl: file:///private/host\n---\n# Hostile title\n\nTrusted body.\n",
+    );
+    const sourcePath = `${webArtifactDirectory}/orbits-0123456789ab.md`;
+    await writeWebArtifact(root, "orbits-0123456789ab.md", bytes, {
+      ...artifactSidecar(sourcePath, bytes),
+      title: "Sidecar title",
+      discovery: {
+        ...webDiscovery,
+        originalUrl: "https://example.com/orbits.md",
+        finalUrl: "https://example.com/orbits.md",
+        redirectChain: [],
+      },
+    });
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      title: "Sidecar title",
+      mediaType: "text/markdown",
+      extractionStatus: "ready",
+      provenance: {
+        kind: "web",
+        representation: "artifact",
+      },
+    });
+  });
+
+  test("keeps legacy Markdown web captures readable without expanded fields", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-legacy-"));
+    await initBrain(root, { name: "Test", description: "Legacy web test" });
+    const body = "# Legacy orbit page\n\nAn orbit curves around a body.\n";
+    const sourcePath = path.join(root, webArtifactDirectory, "legacy.md");
+    await mkdir(path.dirname(sourcePath), { recursive: true });
+    await writeFile(
+      sourcePath,
+      `---\nbrainWebCapture: 1\nurl: https://example.com/legacy\nretrievedAt: 2026-08-30T00:00:00.000Z\nquery: What is an orbit?\ncaptureKind: page\ntitle: Legacy orbit page\ncontentSha256: ${sha256(body)}\n---\n${body}`,
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      title: "Legacy orbit page",
+      extractionStatus: "ready",
+      provenance: {
+        kind: "web",
+        url: "https://example.com/legacy",
+        captureKind: "page",
+      },
+    });
+  });
+
+  test.each([
+    ["missing", undefined, /sidecar.*missing/i],
+    ["malformed", "{not-json\n", /sidecar.*valid JSON/i],
+  ])(
+    "rejects a web artifact with a %s sidecar before manifest write",
+    async (_condition, sidecarContent, expectedError) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-web-sidecar-"));
+      await initBrain(root, {
+        name: "Test",
+        description: "Invalid web sidecar test",
+      });
+      const manifestPath = path.join(root, ".brain", "source-manifest.json");
+      const before = await readFile(manifestPath, "utf8");
+      const bytes = await textPdf();
+      const fileName = "orbits-0123456789ab.pdf";
+      const sourcePath = `${webArtifactDirectory}/${fileName}`;
+      const sidecarPath = `${webArtifactDirectory}/.${fileName}.web.json`;
+      await mkdir(path.join(root, webArtifactDirectory), { recursive: true });
+      await writeFile(path.join(root, sourcePath), bytes);
+      if (sidecarContent !== undefined) {
+        await writeFile(path.join(root, sidecarPath), sidecarContent);
+      }
+
+      await expect(scanSources(root)).rejects.toThrow(expectedError);
+      expect(await readFile(manifestPath, "utf8")).toBe(before);
+    },
+  );
+
+  test("rejects a moved web artifact sidecar", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-moved-"));
+    await initBrain(root, { name: "Test", description: "Moved sidecar test" });
+    const bytes = await textPdf();
+    const fileName = "orbits-0123456789ab.pdf";
+    const sourcePath = `${webArtifactDirectory}/${fileName}`;
+    await mkdir(path.join(root, webArtifactDirectory), { recursive: true });
+    await writeFile(path.join(root, sourcePath), bytes);
+    await writeFile(
+      path.join(root, webArtifactDirectory, ".moved.pdf.web.json"),
+      `${JSON.stringify(artifactSidecar(sourcePath, bytes), null, 2)}\n`,
+    );
+
+    await expect(scanSources(root)).rejects.toThrow(/sidecar.*missing/i);
+  });
+
+  test.each([
+    [
+      "a different source path",
+      (sourcePath: string, bytes: Uint8Array) => ({
+        ...artifactSidecar(sourcePath, bytes),
+        sourcePath: `${webArtifactDirectory}/different.pdf`,
+      }),
+      /different artifact path/i,
+    ],
+    [
+      "a different source hash",
+      (sourcePath: string, bytes: Uint8Array) => ({
+        ...artifactSidecar(sourcePath, bytes),
+        artifactSha256: "0".repeat(64),
+      }),
+      /hash.*match|sha-?256.*match/i,
+    ],
+  ])(
+    "rejects a web artifact sidecar declaring %s",
+    async (_condition, makeSidecar, expectedError) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-web-identity-"));
+      await initBrain(root, {
+        name: "Test",
+        description: "Sidecar identity test",
+      });
+      const bytes = await textPdf();
+      const fileName = "orbits-0123456789ab.pdf";
+      const sourcePath = `${webArtifactDirectory}/${fileName}`;
+      await writeWebArtifact(
+        root,
+        fileName,
+        bytes,
+        makeSidecar(sourcePath, bytes),
+      );
+
+      await expect(scanSources(root)).rejects.toThrow(expectedError);
+    },
+  );
+
+  test("reports a registered artifact sidecar mutation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-changed-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Changed sidecar test",
+    });
+    const bytes = await textPdf();
+    const { sourcePath, sidecarPath } = await writeWebArtifact(
+      root,
+      "orbits-0123456789ab.pdf",
+      bytes,
+    );
+    const first = await scanSources(root);
+    const registered = first.added[0];
+    if (!registered) throw new Error("Expected artifact registration");
+    await writeFile(
+      path.join(root, sidecarPath),
+      `${JSON.stringify(
+        artifactSidecar(sourcePath, bytes, { title: "Changed title" }),
+        null,
+        2,
+      )}\n`,
+    );
+
+    const second = await scanSources(root);
+
+    expect(second.modified).toContainEqual(
+      expect.objectContaining({ path: sidecarPath, registered }),
+    );
+  });
+
+  test("rejects an oversized web artifact before manifest write", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-oversize-"));
+    await initBrain(root, { name: "Test", description: "Oversize web test" });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 16;
+    await writeFile(configPath, stringify(config));
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const before = await readFile(manifestPath, "utf8");
+    const bytes = new TextEncoder().encode(
+      "A web artifact larger than sixteen bytes.\n",
+    );
+    await writeWebArtifact(root, "orbits-0123456789ab.txt", bytes, {
+      ...artifactSidecar(
+        `${webArtifactDirectory}/orbits-0123456789ab.txt`,
+        bytes,
+      ),
+      format: "text",
+      mediaType: "text/plain",
+    });
+
+    await expect(scanSources(root)).rejects.toThrow(/exceeds.*16 bytes/i);
+    expect(await readFile(manifestPath, "utf8")).toBe(before);
+  });
+
+  test.each([
+    ["spoofed", new TextEncoder().encode("not a PDF"), /PDF.*signature/i],
+    ["malformed", new TextEncoder().encode("%PDF-1.7\nmalformed"), /pdf/i],
+  ])(
+    "rejects a %s web PDF before manifest write",
+    async (_condition, bytes, expectedError) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-web-invalid-pdf-"));
+      await initBrain(root, {
+        name: "Test",
+        description: "Invalid web PDF test",
+      });
+      const manifestPath = path.join(root, ".brain", "source-manifest.json");
+      const before = await readFile(manifestPath, "utf8");
+      await writeWebArtifact(root, "orbits-0123456789ab.pdf", bytes);
+
+      await expect(scanSources(root)).rejects.toThrow(expectedError);
+      expect(await readFile(manifestPath, "utf8")).toBe(before);
+    },
+  );
+
+  test("registers an image-only web PDF as extraction-required", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-image-pdf-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Image-only web PDF test",
+    });
+    const document = await PDFDocument.create();
+    document.addPage();
+    await writeWebArtifact(
+      root,
+      "orbits-0123456789ab.pdf",
+      await document.save(),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "extraction-required",
+      extractor: "pdf-v1",
+      provenance: { representation: "artifact" },
+    });
   });
 
   test("extracts DOCX sections with heading locators", async () => {
