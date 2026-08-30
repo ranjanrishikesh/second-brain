@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadBrainConfig } from "../config.js";
+import { assertCanonicalExtractedSource } from "./cache-integrity.js";
 import { validateDocxArchive } from "./docx-archive.js";
 import {
   assertDocxOutputPolicy,
@@ -18,8 +19,8 @@ import {
   extractPdf,
   extractText,
 } from "./extract.js";
-import { assertCanonicalExtractedSource } from "./cache-integrity.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./types.js";
+import { assertWebEvidenceIntegrity } from "./web-evidence.js";
 
 async function readCanonicalSourceContent(
   root: string,
@@ -42,6 +43,7 @@ export async function rebuildExtractedSourceCache(
   root: string,
   source: SourceRecordV1,
 ): Promise<ExtractedSourceV1> {
+  await assertWebEvidenceIntegrity(root, source);
   const content = await readCanonicalSourceContent(root, source);
 
   const text = content.toString("utf8");
@@ -106,6 +108,7 @@ export async function loadExtractedSourceCache(
   root: string,
   source: SourceRecordV1,
 ): Promise<ExtractedSourceV1> {
+  await assertWebEvidenceIntegrity(root, source);
   let cached: ExtractedSourceV1;
   try {
     cached = assertCanonicalExtractedSource(

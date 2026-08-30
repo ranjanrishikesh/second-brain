@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -10,8 +11,90 @@ import {
   searchBrain,
   type WikiPageV1,
 } from "../src/index.js";
+import { loadExtractedSourceCache } from "../src/sources/rebuild-cache.js";
+
+function sha256(content: Uint8Array | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function registeredWebTextArtifact(root: string) {
+  const directory = "sources/web/2026/08";
+  const sourcePath = `${directory}/cache-parity.txt`;
+  const sidecarPath = `${directory}/.cache-parity.txt.web.json`;
+  const artifact = new TextEncoder().encode("Cache parity evidence.\n");
+  const sidecar = {
+    brainWebArtifact: 1,
+    sourcePath,
+    artifactSha256: sha256(artifact),
+    artifactBytes: artifact.byteLength,
+    title: "Cache parity evidence",
+    format: "text",
+    mediaType: "text/plain",
+    discovery: {
+      originalUrl: "https://example.com/cache-parity.txt",
+      finalUrl: "https://example.com/cache-parity.txt",
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What does the cache parity evidence say?",
+      representation: "artifact",
+      completeness: "complete",
+    },
+  };
+  await mkdir(path.join(root, directory), { recursive: true });
+  await writeFile(path.join(root, sourcePath), artifact);
+  await writeFile(
+    path.join(root, sidecarPath),
+    `${JSON.stringify(sidecar, null, 2)}\n`,
+  );
+  const source = (await scanSources(root)).added[0];
+  if (!source) throw new Error("Expected registered web artifact");
+  return { source, sidecarPath };
+}
 
 describe("brain search", () => {
+  test.each([
+    ["cached extraction", false],
+    ["rebuilt extraction", true],
+  ])("rejects corrupt web evidence for %s", async (_label, removeCache) => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-web-cache-"));
+    await initBrain(root, { name: "Search", description: "Cache parity" });
+    const { source, sidecarPath } = await registeredWebTextArtifact(root);
+    await loadExtractedSourceCache(root, source);
+    await writeFile(path.join(root, sidecarPath), "{}\n");
+    if (removeCache) {
+      await rm(path.join(root, ".brain", "cache"), {
+        recursive: true,
+        force: true,
+      });
+    }
+
+    await expect(loadExtractedSourceCache(root, source)).rejects.toThrow(
+      /web artifact sidecar/i,
+    );
+  });
+
+  test("cannot bypass cache integrity by removing the artifact representation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-web-signal-"));
+    await initBrain(root, {
+      name: "Search",
+      description: "Artifact classification",
+    });
+    const { source, sidecarPath } = await registeredWebTextArtifact(root);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.sources[0].provenance.representation;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const tamperedSource = manifest.sources[0];
+    await writeFile(path.join(root, sidecarPath), "{}\n");
+
+    await expect(
+      loadExtractedSourceCache(root, tamperedSource),
+    ).rejects.toThrow(/web artifact|artifact provenance/i);
+    expect(source.provenance.sidecarPath).toBe(sidecarPath);
+  });
+
   test("finds extracted source chunks with stable locators", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-search-"));
     await initBrain(root, { name: "Search", description: "Search test" });

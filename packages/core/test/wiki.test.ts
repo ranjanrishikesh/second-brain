@@ -1,20 +1,30 @@
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PDFDocument } from "pdf-lib";
 import { describe, expect, test } from "vitest";
 import {
   applyWikiChangeSet,
   buildReconciliationCandidates,
+  type ChangeSetV1,
   calculateCatalogRevision,
   calculatePageRevision,
   initBrain,
   parseWikiPage,
   renderWikiPage,
+  type SourceRecordV1,
   scanSources,
   validateWikiGraph,
-  writeGeneratedWikiFiles,
-  type ChangeSetV1,
   type WikiPageV1,
+  writeGeneratedWikiFiles,
 } from "../src/index.js";
 
 function conceptPage(overrides: Partial<WikiPageV1> = {}): WikiPageV1 {
@@ -38,7 +48,177 @@ function conceptPage(overrides: Partial<WikiPageV1> = {}): WikiPageV1 {
   };
 }
 
+const webArtifactDirectory = "sources/web/2026/08";
+
+function sha256(content: Uint8Array | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function registerWebArtifact(
+  root: string,
+  bytes: Uint8Array,
+  fileName = "integrity.txt",
+) {
+  const sourcePath = `${webArtifactDirectory}/${fileName}`;
+  const sidecarPath = `${webArtifactDirectory}/.${fileName}.web.json`;
+  const extension = path.extname(fileName).slice(1);
+  const format = extension === "txt" ? "text" : extension;
+  const sidecar = {
+    brainWebArtifact: 1,
+    sourcePath,
+    artifactSha256: sha256(bytes),
+    artifactBytes: bytes.byteLength,
+    title: "Integrity evidence",
+    format,
+    mediaType: extension === "pdf" ? "application/pdf" : "text/plain",
+    discovery: {
+      originalUrl: `https://example.com/${fileName}`,
+      finalUrl: `https://example.com/${fileName}`,
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What does the integrity evidence say?",
+      representation: "artifact",
+      completeness: "complete",
+    },
+  };
+  await mkdir(path.join(root, webArtifactDirectory), { recursive: true });
+  await writeFile(path.join(root, sourcePath), bytes);
+  await writeFile(
+    path.join(root, sidecarPath),
+    `${JSON.stringify(sidecar, null, 2)}\n`,
+  );
+  const source = (await scanSources(root)).added[0];
+  if (!source) throw new Error("Expected registered web artifact");
+  return { source, sourcePath, sidecarPath };
+}
+
+async function updateRegisteredSource(
+  root: string,
+  update: (source: SourceRecordV1) => void,
+): Promise<void> {
+  const manifestPath = path.join(root, ".brain", "source-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  update(manifest.sources[0] as SourceRecordV1);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 describe("wiki page format", () => {
+  test.each([
+    [
+      "WEB_ARTIFACT_SIDECAR_MISSING",
+      async (root: string, sidecarPath: string) => {
+        await rm(path.join(root, sidecarPath));
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SIDECAR_INVALID",
+      async (root: string, sidecarPath: string) => {
+        await writeFile(path.join(root, sidecarPath), "{}\n");
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SIDECAR_PATH_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          source.provenance.sidecarPath = `${webArtifactDirectory}/.different.txt.web.json`;
+        });
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SIDECAR_HASH_MISMATCH",
+      async (root: string, sidecarPath: string) => {
+        const current = await readFile(path.join(root, sidecarPath), "utf8");
+        await writeFile(path.join(root, sidecarPath), `${current}\n`);
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          source.provenance.url = "https://example.com/different.txt";
+        });
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          delete source.provenance.representation;
+        });
+      },
+    ],
+  ])("reports structural issue %s", async (code, corrupt) => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-graph-web-"));
+    await initBrain(root, { name: "Graph", description: "Web integrity" });
+    const { sidecarPath } = await registerWebArtifact(
+      root,
+      new TextEncoder().encode("Integrity evidence.\n"),
+    );
+    await corrupt(root, sidecarPath);
+
+    const report = await validateWikiGraph(root);
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code, severity: "error" }),
+    );
+  });
+
+  test("rejects factual citations to non-ready sources but allows locator-free gap references", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-non-ready-citation-"),
+    );
+    await initBrain(root, {
+      name: "Graph",
+      description: "Citation readiness",
+    });
+    const document = await PDFDocument.create();
+    document.addPage();
+    const { source } = await registerWebArtifact(
+      root,
+      await document.save(),
+      "image-only.pdf",
+    );
+    expect(source.extractionStatus).toBe("extraction-required");
+    const gap = conceptPage({
+      id: "pg_missing_web_evidence",
+      path: "wiki/pages/questions/missing-web-evidence.md",
+      title: "Missing web evidence",
+      type: "question",
+      aliases: [],
+      sources: [{ id: source.id, locators: [] }],
+      body: "# Missing web evidence\n\nThe captured PDF needs text extraction.",
+    });
+    const claim = conceptPage({
+      id: "pg_unsupported_web_claim",
+      path: "wiki/pages/sources/unsupported-web-claim.md",
+      title: "Unsupported web claim",
+      type: "source",
+      aliases: [],
+      sources: [{ id: source.id, locators: ["page=1"] }],
+      body: `# Unsupported web claim\n\nThe PDF proves the claim. [@${source.id}#page=1]`,
+    });
+    await writeFile(path.join(root, gap.path), renderWikiPage(gap));
+    await writeFile(path.join(root, claim.path), renderWikiPage(claim));
+
+    const report = await validateWikiGraph(root);
+
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "SOURCE_NOT_READY_FOR_CITATION",
+        pageId: claim.id,
+      }),
+    );
+    expect(report.issues).not.toContainEqual(
+      expect.objectContaining({
+        code: "SOURCE_NOT_READY_FOR_CITATION",
+        pageId: gap.id,
+      }),
+    );
+  });
+
   test("round-trips canonical frontmatter and cited Markdown", () => {
     const markdown = renderWikiPage(conceptPage());
 

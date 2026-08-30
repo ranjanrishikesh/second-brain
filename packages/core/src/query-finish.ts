@@ -3,21 +3,22 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
+  type QuerySessionV1,
   readQuerySession,
   refreshQueryBootstrap,
   writeQuerySession,
-  type QuerySessionV1,
 } from "./query.js";
+import { sourceRecordV1Schema } from "./sources/types.js";
+import { assertWebEvidenceIntegrity } from "./sources/web-evidence.js";
 import type { SyncStatusV1 } from "./state.js";
 import { attemptManagedSync } from "./sync.js";
 import {
+  type OperationRecordV1,
   operationRecordV1Schema,
   recoverBrain,
   runCanonicalWrite,
-  type OperationRecordV1,
   type TransactionTestOptions,
 } from "./transaction.js";
-import { sourceRecordV1Schema } from "./sources/types.js";
 import { assertWebApproval } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
 
@@ -200,6 +201,7 @@ export async function finishQuery(
   }
   if (
     session.currentTier === "web" &&
+    options.outcome !== "unanswered" &&
     session.webEvidenceSourceIds.length === 0
   ) {
     throw new Error("A web-backed answer requires captured web evidence");
@@ -255,30 +257,41 @@ export async function finishQuery(
         .filter((page) => evidencePageIds.has(page.id))
         .flatMap((page) => page.sources.map((source) => source.id)),
     );
+    const manifest = z
+      .object({
+        version: z.literal(1),
+        sources: z.array(sourceRecordV1Schema),
+      })
+      .parse(
+        JSON.parse(
+          await readFile(
+            path.join(root, ".brain", "source-manifest.json"),
+            "utf8",
+          ),
+        ),
+      );
     if (session.currentTier === "web") {
-      if (
-        !session.webEvidenceSourceIds.some((sourceId) =>
-          citedSourceIds.has(sourceId),
-        )
-      ) {
+      const citedCapturedSources = manifest.sources.filter(
+        (source) =>
+          citedSourceIds.has(source.id) &&
+          session.webEvidenceSourceIds.includes(source.id),
+      );
+      for (const source of citedCapturedSources) {
+        await assertWebEvidenceIntegrity(root, source);
+      }
+      const hasReadyCurrentEvidence = citedCapturedSources.some((source) => {
+        if (source.extractionStatus !== "ready") return false;
+        const discoveries = source.provenance.webDiscoveries;
+        return discoveries
+          ? discoveries.some((discovery) => discovery.queryId === session.id)
+          : source.provenance.kind === "web";
+      });
+      if (!hasReadyCurrentEvidence) {
         throw new Error(
-          "A web-backed answer must cite captured web evidence in its wiki mutation",
+          "A web-backed answer must cite ready web evidence captured for the current query in its wiki mutation",
         );
       }
     } else {
-      const manifest = z
-        .object({
-          version: z.literal(1),
-          sources: z.array(sourceRecordV1Schema),
-        })
-        .parse(
-          JSON.parse(
-            await readFile(
-              path.join(root, ".brain", "source-manifest.json"),
-              "utf8",
-            ),
-          ),
-        );
       if (
         !manifest.sources.some(
           (source) =>

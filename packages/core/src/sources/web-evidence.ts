@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
+import { type BigIntStats, constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { loadBrainConfig } from "../config.js";
 import {
   sourceFormatForPath,
   type WebArtifactSourceFormatV1,
 } from "./format.js";
+import type { SourceRecordV1 } from "./types.js";
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const sourceIdSchema = z.string().regex(/^src_[a-f0-9]{16}$/);
@@ -148,6 +152,17 @@ export interface ValidatedWebArtifactV1 {
   artifactBytes: number;
   sidecarSha256: string;
   sidecarBytes: number;
+}
+
+export interface WebEvidenceIntegrityIssueV1 {
+  code:
+    | "WEB_ARTIFACT_SIDECAR_MISSING"
+    | "WEB_ARTIFACT_SIDECAR_INVALID"
+    | "WEB_ARTIFACT_SIDECAR_PATH_MISMATCH"
+    | "WEB_ARTIFACT_SIDECAR_HASH_MISMATCH"
+    | "WEB_ARTIFACT_SOURCE_MISMATCH";
+  message: string;
+  path: string;
 }
 
 /**
@@ -582,4 +597,297 @@ export function renderWebArtifactSidecar(
     ...(parsed.supersedes ? { supersedes: parsed.supersedes } : {}),
   };
   return `${JSON.stringify(canonical, null, 2)}\n`;
+}
+
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function unchangedOpenFile(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+async function readIntegrityFile(
+  root: string,
+  relativePath: string,
+  maxFileBytes: number,
+  label: string,
+): Promise<Buffer> {
+  const absolutePath = path.resolve(root, relativePath);
+  const lexicalSources = path.resolve(root, "sources");
+  if (!absolutePath.startsWith(`${lexicalSources}${path.sep}`)) {
+    throw new Error(`${label} must stay inside the brain sources tree`);
+  }
+  const metadata = await lstat(absolutePath, { bigint: true });
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular non-symlink file`);
+  }
+  if (metadata.size > BigInt(maxFileBytes)) {
+    throw new Error(`${label} exceeds the configured size limit`);
+  }
+  const [realRoot, realSources, realEvidence] = await Promise.all([
+    realpath(root),
+    realpath(path.join(root, "sources")),
+    realpath(absolutePath),
+  ]);
+  if (
+    !realSources.startsWith(`${realRoot}${path.sep}`) ||
+    !realEvidence.startsWith(`${realSources}${path.sep}`)
+  ) {
+    throw new Error(`${label} must stay inside the brain sources tree`);
+  }
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(
+      absolutePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+    throw new Error(`${label} path changed during integrity inspection`);
+  }
+  try {
+    const openedMetadata = await handle.stat({ bigint: true });
+    if (
+      !openedMetadata.isFile() ||
+      !sameFileIdentity(metadata, openedMetadata)
+    ) {
+      throw new Error(`${label} path changed during integrity inspection`);
+    }
+    if (openedMetadata.size > BigInt(maxFileBytes)) {
+      throw new Error(`${label} exceeds the configured size limit`);
+    }
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    while (bytes <= maxFileBytes) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, maxFileBytes + 1 - bytes));
+      const result = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (result.bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, result.bytesRead));
+      bytes += result.bytesRead;
+    }
+    if (bytes > maxFileBytes) {
+      throw new Error(`${label} exceeds the configured size limit`);
+    }
+    const finalMetadata = await handle.stat({ bigint: true });
+    if (
+      !unchangedOpenFile(openedMetadata, finalMetadata) ||
+      finalMetadata.size !== BigInt(bytes)
+    ) {
+      throw new Error(`${label} changed during integrity inspection`);
+    }
+    const [finalRealEvidence, finalPathMetadata] = await Promise.all([
+      realpath(absolutePath).catch(() => undefined),
+      lstat(absolutePath, { bigint: true }).catch(() => undefined),
+    ]);
+    if (
+      !finalRealEvidence?.startsWith(`${realSources}${path.sep}`) ||
+      !finalPathMetadata?.isFile() ||
+      finalPathMetadata.isSymbolicLink() ||
+      !sameFileIdentity(openedMetadata, finalPathMetadata)
+    ) {
+      throw new Error(`${label} path changed during integrity inspection`);
+    }
+    return Buffer.concat(chunks, bytes);
+  } finally {
+    await handle.close();
+  }
+}
+
+function sameDiscovery(left: WebDiscoveryV1, right: WebDiscoveryV1): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function primaryDiscoveryMatches(
+  source: SourceRecordV1,
+  sidecar: WebArtifactSidecarV1,
+): boolean {
+  const discovery = sidecar.discovery;
+  const provenance = source.provenance;
+  return (
+    provenance.kind === "web" &&
+    provenance.url === discovery.originalUrl &&
+    provenance.finalUrl === discovery.finalUrl &&
+    JSON.stringify(provenance.redirectChain ?? []) ===
+      JSON.stringify(discovery.redirectChain) &&
+    provenance.retrievedAt === discovery.retrievedAt &&
+    provenance.query === discovery.query &&
+    provenance.representation === discovery.representation &&
+    provenance.completeness === discovery.completeness &&
+    (provenance.webDiscoveries?.some((candidate) =>
+      sameDiscovery(candidate, discovery),
+    ) ??
+      false)
+  );
+}
+
+export async function inspectWebEvidenceIntegrity(
+  root: string,
+  source: SourceRecordV1,
+): Promise<WebEvidenceIntegrityIssueV1[]> {
+  const issues: WebEvidenceIntegrityIssueV1[] = [];
+  const provenance = source.provenance;
+  const companionFields = [
+    provenance.sidecarPath,
+    provenance.sidecarSha256,
+    provenance.sidecarBytes,
+  ];
+  const hasCompanionSignal = companionFields.some(
+    (value) => value !== undefined,
+  );
+  const hasArtifactDiscovery = provenance.webDiscoveries?.some(
+    (discovery) => discovery.representation === "artifact",
+  );
+  if (
+    provenance.representation !== "artifact" &&
+    !hasCompanionSignal &&
+    !hasArtifactDiscovery
+  ) {
+    return [];
+  }
+  const hasCompleteCompanion = companionFields.every(
+    (value) => value !== undefined,
+  );
+  if (provenance.representation !== "artifact" || !hasCompleteCompanion) {
+    issues.push({
+      code: "WEB_ARTIFACT_SOURCE_MISMATCH",
+      message:
+        "Registered web artifact provenance is inconsistent or incomplete",
+      path: source.path,
+    });
+  }
+  if (!hasCompleteCompanion) return issues;
+
+  let expectedSidecarPath: string;
+  try {
+    expectedSidecarPath = webArtifactSidecarPath(source.path);
+  } catch (error) {
+    return [
+      {
+        code: "WEB_ARTIFACT_SOURCE_MISMATCH",
+        message: `Registered web artifact path is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        path: source.path,
+      },
+    ];
+  }
+  if (source.provenance.sidecarPath !== expectedSidecarPath) {
+    return [
+      {
+        code: "WEB_ARTIFACT_SIDECAR_PATH_MISMATCH",
+        message: `Registered web artifact sidecar path does not match ${source.path}`,
+        path: source.provenance.sidecarPath ?? expectedSidecarPath,
+      },
+    ];
+  }
+
+  const config = await loadBrainConfig(root);
+  let sidecarContent: Buffer;
+  try {
+    sidecarContent = await readIntegrityFile(
+      root,
+      expectedSidecarPath,
+      config.sources.maxFileBytes,
+      "Web artifact sidecar",
+    );
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+    return [
+      {
+        code: missing
+          ? "WEB_ARTIFACT_SIDECAR_MISSING"
+          : "WEB_ARTIFACT_SIDECAR_INVALID",
+        message: missing
+          ? `Registered web artifact sidecar is missing: ${expectedSidecarPath}`
+          : `Registered web artifact sidecar is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        path: expectedSidecarPath,
+      },
+    ];
+  }
+
+  const actualSidecarSha256 = createHash("sha256")
+    .update(sidecarContent)
+    .digest("hex");
+  if (
+    source.provenance.sidecarBytes !== sidecarContent.byteLength ||
+    source.provenance.sidecarSha256 !== actualSidecarSha256
+  ) {
+    issues.push({
+      code: "WEB_ARTIFACT_SIDECAR_HASH_MISMATCH",
+      message: `Registered web artifact sidecar bytes changed: ${expectedSidecarPath}`,
+      path: expectedSidecarPath,
+    });
+  }
+
+  let sidecar: WebArtifactSidecarV1;
+  try {
+    sidecar = parseWebArtifactSidecar(
+      sidecarContent.toString("utf8"),
+      source.path,
+    );
+  } catch (error) {
+    issues.push({
+      code: "WEB_ARTIFACT_SIDECAR_INVALID",
+      message: `Registered web artifact sidecar is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      path: expectedSidecarPath,
+    });
+    return issues;
+  }
+
+  try {
+    const artifactContent = await readIntegrityFile(
+      root,
+      source.path,
+      config.sources.maxFileBytes,
+      "Web artifact",
+    );
+    const validated = validateWebArtifact({
+      sourcePath: source.path,
+      artifactContent,
+      sidecarContent,
+      maxFileBytes: config.sources.maxFileBytes,
+    });
+    if (
+      validated.artifactSha256 !== source.sha256 ||
+      validated.artifactBytes !== source.bytes ||
+      validated.detected.mediaType !== source.mediaType ||
+      !primaryDiscoveryMatches(source, sidecar)
+    ) {
+      throw new Error(
+        "artifact bytes or primary discovery metadata do not match the registered source",
+      );
+    }
+  } catch (error) {
+    const sourceIssue: WebEvidenceIntegrityIssueV1 = {
+      code: "WEB_ARTIFACT_SOURCE_MISMATCH",
+      message: `Registered web artifact does not match its sidecar: ${error instanceof Error ? error.message : String(error)}`,
+      path: source.path,
+    };
+    if (
+      !issues.some(
+        (issue) =>
+          issue.code === sourceIssue.code && issue.path === sourceIssue.path,
+      )
+    ) {
+      issues.push(sourceIssue);
+    }
+  }
+  return issues;
+}
+
+export async function assertWebEvidenceIntegrity(
+  root: string,
+  source: SourceRecordV1,
+): Promise<void> {
+  const issues = await inspectWebEvidenceIntegrity(root, source);
+  if (issues.length === 0) return;
+  throw new Error(
+    `Web artifact sidecar integrity failure: ${issues
+      .map((issue) => `${issue.code}: ${issue.message}`)
+      .join("; ")}`,
+  );
 }
