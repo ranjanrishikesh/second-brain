@@ -246,14 +246,45 @@ export async function scanSources(
     duplicates: [],
   };
 
-  for (const sourceRoot of config.sources.roots) {
+  const candidates = new Map<string, string>();
+  for (const sourceRoot of [
+    ...config.sources.roots,
+    ...(config.sources.roots.includes("sources") ? [] : ["sources/web"]),
+  ]) {
     const absoluteRoot = path.join(root, sourceRoot);
-    const files = await walk(absoluteRoot);
-    for (const absolutePath of files.sort()) {
+    let files: string[];
+    try {
+      files = await walk(absoluteRoot);
+    } catch (error) {
+      if (
+        sourceRoot === "sources/web" &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    for (const absolutePath of files) {
       const relativePath = path
         .relative(root, absolutePath)
         .split(path.sep)
         .join("/");
+      candidates.set(relativePath, absolutePath);
+    }
+  }
+
+  const orderedCandidateGroups = [
+    [...candidates.entries()].filter(
+      ([relativePath]) => !relativePath.startsWith("sources/web/"),
+    ),
+    [...candidates.entries()].filter(([relativePath]) =>
+      relativePath.startsWith("sources/web/"),
+    ),
+  ].map((group) =>
+    group.sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath)),
+  );
+  for (const candidateGroup of orderedCandidateGroups) {
+    for (const [relativePath, absolutePath] of candidateGroup) {
       seenPaths.add(relativePath);
       const sourceFormat = sourceFormatForPath(absolutePath);
       const markdown = sourceFormat === "markdown";
@@ -360,30 +391,35 @@ export async function scanSources(
                     id,
                     relativePath,
                     content?.toString("utf8") ?? "",
+                    config.sources.textExtraction,
                   )
                 : plainText
                   ? extractText(
                       id,
                       relativePath,
                       content?.toString("utf8") ?? "",
+                      config.sources.textExtraction,
                     )
                   : html
                     ? extractHtml(
                         id,
                         relativePath,
                         content?.toString("utf8") ?? "",
+                        config.sources.textExtraction,
                       )
                     : json
                       ? extractJson(
                           id,
                           relativePath,
                           content?.toString("utf8") ?? "",
+                          config.sources.textExtraction,
                         )
                       : jsonLines
                         ? extractJsonLines(
                             id,
                             relativePath,
                             content?.toString("utf8") ?? "",
+                            config.sources.textExtraction,
                           )
                         : csv || tsv
                           ? extractCsv(
@@ -391,6 +427,7 @@ export async function scanSources(
                               relativePath,
                               content?.toString("utf8") ?? "",
                               tsv ? "\t" : ",",
+                              config.sources.textExtraction,
                             )
                           : pdf
                             ? await extractPdf(

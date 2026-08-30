@@ -3,6 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  type SupportedSourceFormatV1,
+  sourceFormatForPath,
+} from "./sources/format.js";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
@@ -83,6 +87,48 @@ function duplicateImmutableInputs(
 interface SourceVerificationContext {
   gitRepository: boolean;
   indexPath?: string;
+}
+
+const sourceEncodingByFormat: Readonly<
+  Record<SupportedSourceFormatV1, { extractor: string; mediaType: string }>
+> = {
+  markdown: { extractor: "markdown-v1", mediaType: "text/markdown" },
+  text: { extractor: "text-v1", mediaType: "text/plain" },
+  html: { extractor: "html-v1", mediaType: "text/html" },
+  json: { extractor: "json-v1", mediaType: "application/json" },
+  jsonl: {
+    extractor: "jsonl-v1",
+    mediaType: "application/x-ndjson",
+  },
+  csv: { extractor: "delimited-v1", mediaType: "text/csv" },
+  tsv: {
+    extractor: "delimited-v1",
+    mediaType: "text/tab-separated-values",
+  },
+  pdf: { extractor: "pdf-v1", mediaType: "application/pdf" },
+  docx: {
+    extractor: "docx-v1",
+    mediaType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  },
+  epub: { extractor: "epub-v1", mediaType: "application/epub+zip" },
+};
+
+function assertPreparedSourceCompatibility(
+  source: SourceRecordV1,
+  preparedPath: string,
+): void {
+  const format = sourceFormatForPath(preparedPath);
+  const expected = format ? sourceEncodingByFormat[format] : undefined;
+  if (
+    !expected ||
+    source.extractor !== expected.extractor ||
+    source.mediaType !== expected.mediaType
+  ) {
+    throw new Error(
+      `Existing source format ${source.mediaType} (${source.extractor}) is not compatible with prepared web evidence at ${preparedPath}`,
+    );
+  }
 }
 
 async function digestStream(
@@ -619,15 +665,37 @@ export async function registerWebSourceCapture(
       const sources = (manifest.sources ?? []).map((item) =>
         sourceRecordV1Schema.parse(item),
       );
+      const preparedDuplicate = prepared.sourcePath
+        ? scan.value.duplicates.find(
+            (candidate) => candidate.path === prepared.sourcePath,
+          )
+        : undefined;
       const source = prepared.sourceId
         ? sources.find((candidate) => candidate.id === prepared.sourceId)
-        : sources.find((candidate) => candidate.path === prepared.sourcePath);
+        : (sources.find(
+            (candidate) => candidate.path === prepared.sourcePath,
+          ) ??
+          sources.find(
+            (candidate) => candidate.id === preparedDuplicate?.sourceId,
+          ));
       if (!source) {
         throw new Error(
           prepared.sourceId
             ? `Registered source disappeared: ${prepared.sourceId}`
             : `Captured source was not registered: ${prepared.sourcePath}`,
         );
+      }
+      if (
+        preparedDuplicate &&
+        (source.sha256 !== preparedDuplicate.sha256 ||
+          source.bytes !== preparedDuplicate.bytes)
+      ) {
+        throw new Error(
+          `Captured source identity does not match prepared bytes: ${preparedDuplicate.path}`,
+        );
+      }
+      if (preparedDuplicate) {
+        assertPreparedSourceCompatibility(source, preparedDuplicate.path);
       }
       const enrichment = await sourceWebDiscoveryMutation(
         root,
@@ -636,9 +704,27 @@ export async function registerWebSourceCapture(
         discoveryOperationId,
         writer,
       );
-      const stagePaths = [
+      const reusedInputs = immutableInputs(source);
+      const changedStagePaths = [
         ...new Set([...scan.stagePaths, ...enrichment.stagePaths]),
       ];
+      if (changedStagePaths.length > 0) {
+        for (const input of reusedInputs) {
+          await writer.sealExisting(input.path, {
+            bytes: input.bytes,
+            sha256: input.sha256,
+          });
+        }
+      }
+      const stagePaths =
+        changedStagePaths.length > 0
+          ? [
+              ...new Set([
+                ...changedStagePaths,
+                ...reusedInputs.map((input) => input.path),
+              ]),
+            ]
+          : [];
       return {
         value: {
           source: enrichment.value.source,
@@ -648,6 +734,7 @@ export async function registerWebSourceCapture(
         verifyBeforeCommit: async (context) => {
           await scan.verifyBeforeCommit?.(context);
           await enrichment.verifyBeforeCommit?.(context);
+          await assertSourceInputsAreStable(root, reusedInputs, context);
         },
         verifySealedState: async () => {
           await scan.verifySealedState?.();

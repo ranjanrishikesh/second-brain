@@ -13,6 +13,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import {
   initBrain,
   recoverBrain,
@@ -309,6 +310,78 @@ describe("registered source transactions", () => {
         "wiki/log.md",
       ].sort(),
     );
+  });
+
+  test.each(["a-local.pdf", "z-local.pdf"])(
+    "keeps an ordinary %s source canonical when identical managed web bytes are scanned",
+    async (localName) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-local-priority-"));
+      await initGitBrain(root, "Local source priority test");
+      const { artifactBytes } = await createArtifactFiles(root);
+      const localPath = `sources/${localName}`;
+      await writeFile(path.join(root, localPath), artifactBytes);
+
+      const result = await scanAndRegisterSources(root);
+
+      expect(result.added).toEqual([
+        expect.objectContaining({
+          path: localPath,
+          provenance: { kind: "file" },
+        }),
+      ]);
+      expect(result.duplicates).toEqual([
+        expect.objectContaining({
+          path: artifactPath,
+          sourceId: result.added[0]?.id,
+          sidecarPath,
+        }),
+      ]);
+      const manifest = JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      );
+      expect(manifest.sources).toEqual([
+        expect.objectContaining({
+          path: localPath,
+          provenance: { kind: "file" },
+        }),
+      ]);
+    },
+  );
+
+  test("always scans managed web evidence when configured source roots are elsewhere", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-custom-roots-"));
+    await initGitBrain(root, "Custom source roots test");
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.roots = ["sources/local"];
+    await writeFile(configPath, stringify(config));
+    await mkdir(path.join(root, "sources", "local"));
+    await git(root, ["add", "brain.config.yaml"]);
+    await git(root, ["commit", "-m", "test: use custom source root"]);
+    const { artifactBytes } = await createArtifactFiles(root);
+    await writeFile(
+      path.join(root, "sources", "local", "z-local.pdf"),
+      artifactBytes,
+    );
+
+    const result = await scanAndRegisterSources(root);
+
+    expect(result.added).toEqual([
+      expect.objectContaining({
+        path: "sources/local/z-local.pdf",
+        provenance: { kind: "file" },
+      }),
+    ]);
+    expect(result.duplicates).toEqual([
+      expect.objectContaining({
+        path: artifactPath,
+        sourceId: result.added[0]?.id,
+        sidecarPath,
+      }),
+    ]);
   });
 
   test("acknowledges a duplicate web artifact with its immutable sidecar", async () => {

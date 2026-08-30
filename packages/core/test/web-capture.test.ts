@@ -233,6 +233,73 @@ describe("durable web evidence capture", () => {
     expect((await readBrainState(root)).sourceDuplicates).toEqual([]);
   });
 
+  test("resolves a local source added while capture waits for the canonical writer", async () => {
+    const { root, queryId } = await approvedBrain("Waiting local evidence?");
+    let writerEntered!: () => void;
+    const writerHeld = new Promise<void>((resolve) => {
+      writerEntered = resolve;
+    });
+    let releaseWriter!: () => void;
+    const writerReleased = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    const blocker = runCanonicalWrite(
+      root,
+      {
+        operationId: "op_test_waiting_local_blocker",
+        commitMessage: "test: hold canonical writer",
+        testOptions: {
+          afterMutationBeforeSeal: async () => {
+            writerEntered();
+            await writerReleased;
+          },
+        },
+      },
+      async () => ({ value: undefined, stagePaths: [] }),
+    );
+    await writerHeld;
+    const bytes = encoder.encode("Evidence added while capture waits.\n");
+    const localPath = "sources/z-waiting-local.txt";
+    let waiterObserved!: () => void;
+    const waiterSawWriter = new Promise<void>((resolve) => {
+      waiterObserved = resolve;
+    });
+    const pendingCapture = captureWebEvidence(
+      root,
+      queryId,
+      {
+        representation: "artifact",
+        originalUrl: "https://example.test/waiting-local.txt",
+        title: "Waiting local",
+        fileName: "waiting-local.txt",
+        responseComplete: true,
+        content: bytes,
+        retrievedAt: "2026-08-30T00:15:00.000Z",
+      },
+      {
+        beforeWriterWait: async () => {
+          await writeFile(path.join(root, localPath), bytes);
+        },
+        transactionTestOptions: {
+          afterWriterOwnerRead: () => waiterObserved(),
+        },
+      },
+    );
+    await waiterSawWriter;
+    releaseWriter();
+    await blocker;
+
+    const result = await pendingCapture;
+
+    expect(result.source).toMatchObject({
+      path: localPath,
+      provenance: { kind: "file" },
+    });
+    expect((await readBrainState(root)).sourceDuplicates).toEqual([
+      expect.objectContaining({ sourceId: result.source.id }),
+    ]);
+  });
+
   test("serializes concurrent changed bytes into one linear supersession chain", async () => {
     const { root, queryId } = await approvedBrain();
     const originalUrl = "https://example.test/serial-report.txt";
@@ -823,6 +890,30 @@ describe("durable web evidence capture", () => {
     expect(await webFiles(root)).toEqual([]);
   });
 
+  test("rejects a text artifact that exceeds extraction policy before preparation", async () => {
+    const { root, queryId } = await approvedBrain("Bound text extraction?");
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.textExtraction = {
+      maxExtractedBytes: 16,
+      maxChunks: 10,
+    };
+    await writeFile(configPath, stringify(config));
+
+    await expect(
+      captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: "https://example.test/oversized.txt",
+        title: "Oversized text",
+        fileName: "oversized.txt",
+        responseComplete: true,
+        content: encoder.encode("This extracted text exceeds the policy.\n"),
+        retrievedAt: "2026-08-30T03:00:30.000Z",
+      }),
+    ).rejects.toThrow(/extracted text content exceeds.*16 bytes/i);
+    expect(await webFiles(root)).toEqual([]);
+  });
+
   test("rejects an EPUB amplification before preparing canonical artifacts", async () => {
     const { root, queryId } = await approvedBrain("EPUB amplification?");
     const configPath = path.join(root, "brain.config.yaml");
@@ -1113,6 +1204,54 @@ describe("durable web evidence capture", () => {
     );
   });
 
+  test("seals a reused web artifact sidecar before discovery enrichment", async () => {
+    const { root, queryId } = await approvedBrain();
+    const bytes = await textPdf("Sealed sidecar evidence");
+    const first = await captureWebEvidence(root, queryId, {
+      representation: "artifact",
+      originalUrl: "https://example.test/sealed-sidecar.pdf",
+      title: "Sealed sidecar",
+      fileName: "sealed-sidecar.pdf",
+      responseComplete: true,
+      content: bytes,
+      retrievedAt: "2026-08-30T05:40:00.000Z",
+    });
+    const sidecarPath = first.source.provenance.sidecarPath;
+    if (!sidecarPath) throw new Error("Expected registered artifact sidecar");
+    const originalSidecar = await readFile(path.join(root, sidecarPath));
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const alternate = {
+      representation: "artifact" as const,
+      originalUrl: "https://mirror.example.test/sealed-sidecar.pdf",
+      title: "Sealed sidecar mirror",
+      fileName: "sealed-sidecar.pdf",
+      responseComplete: true as const,
+      content: bytes,
+      retrievedAt: "2026-08-30T05:41:00.000Z",
+    };
+
+    await expect(
+      captureWebEvidence(root, queryId, alternate, {
+        transactionTestOptions: {
+          beforeStage: async () => {
+            await writeFile(path.join(root, sidecarPath), "{}\n");
+          },
+        },
+      }),
+    ).rejects.toThrow(/changed|private Git index|canonical/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    await writeFile(path.join(root, sidecarPath), originalSidecar);
+    const retry = await captureWebEvidence(root, queryId, alternate);
+    expect(retry.source.id).toBe(first.source.id);
+    expect(await readFile(path.join(root, sidecarPath))).toEqual(
+      originalSidecar,
+    );
+  });
+
   test("reuses compatible local bytes without changing primary provenance", async () => {
     const { root, queryId } = await approvedBrain();
     const bytes = encoder.encode("Locally registered evidence.\n");
@@ -1145,6 +1284,189 @@ describe("durable web evidence capture", () => {
         retrievedAt: "2026-08-30T06:01:00.000Z",
       }),
     ).rejects.toThrow(/format|extractor|representation|compatible/i);
+  });
+
+  test.each(["bytes", "path"] as const)(
+    "seals a reused local source against %s changes before discovery or query linkage",
+    async (mutation) => {
+      const { root, queryId } = await approvedBrain();
+      const localPath = "sources/local.txt";
+      const movedPath = "sources/local-moved.txt";
+      const original = encoder.encode("Stable local evidence.\n");
+      await writeFile(path.join(root, localPath), original);
+      const local = (await scanAndRegisterSources(root)).added[0];
+      if (!local) throw new Error("Expected registered local source");
+      const manifestPath = path.join(root, ".brain", "source-manifest.json");
+      const operationsPath = path.join(root, ".brain", "operations.jsonl");
+      const beforeManifest = await readFile(manifestPath, "utf8");
+      const beforeOperations = await readFile(operationsPath, "utf8");
+      const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+      const input = {
+        representation: "artifact" as const,
+        originalUrl: "https://example.test/stable-local.txt",
+        title: "Stable local",
+        fileName: "stable-local.txt",
+        responseComplete: true as const,
+        content: original,
+        retrievedAt: "2026-08-30T06:05:00.000Z",
+      };
+
+      await expect(
+        captureWebEvidence(root, queryId, input, {
+          transactionTestOptions: {
+            beforeStage: async () => {
+              if (mutation === "bytes") {
+                await writeFile(
+                  path.join(root, localPath),
+                  "Changed after discovery preparation.\n",
+                );
+              } else {
+                await rename(
+                  path.join(root, localPath),
+                  path.join(root, movedPath),
+                );
+              }
+            },
+          },
+        }),
+      ).rejects.toThrow(/changed|private Git index|canonical/i);
+
+      expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+      expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+      expect(await readFile(operationsPath, "utf8")).toBe(beforeOperations);
+      expect(
+        (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+      ).toEqual([]);
+
+      if (mutation === "bytes") {
+        await writeFile(path.join(root, localPath), original);
+      } else {
+        await rename(path.join(root, movedPath), path.join(root, localPath));
+      }
+      const retry = await captureWebEvidence(root, queryId, input);
+      expect(retry).toMatchObject({
+        created: false,
+        source: { id: local.id, provenance: { kind: "file" } },
+      });
+    },
+  );
+
+  test("seals an idempotently reused source before returning existing query linkage", async () => {
+    const { root, queryId } = await approvedBrain();
+    const localPath = "sources/idempotent-local.txt";
+    const original = encoder.encode("Idempotent local evidence.\n");
+    await writeFile(path.join(root, localPath), original);
+    await scanAndRegisterSources(root);
+    const input = {
+      representation: "artifact" as const,
+      originalUrl: "https://example.test/idempotent-local.txt",
+      title: "Idempotent local",
+      fileName: "idempotent-local.txt",
+      responseComplete: true as const,
+      content: original,
+      retrievedAt: "2026-08-30T06:10:00.000Z",
+    };
+    const first = await captureWebEvidence(root, queryId, input);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      captureWebEvidence(root, queryId, input, {
+        transactionTestOptions: {
+          beforeStage: async () => {
+            await writeFile(
+              path.join(root, localPath),
+              "Changed during idempotent reuse.\n",
+            );
+          },
+        },
+      }),
+    ).rejects.toThrow(/changed|private Git index|canonical/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(
+      (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+    ).toEqual([first.source.id]);
+
+    await writeFile(path.join(root, localPath), original);
+    const retry = await captureWebEvidence(root, queryId, input);
+    expect(retry.source.id).toBe(first.source.id);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+  });
+
+  test("resolves an internally scanned local collision and remains retryable", async () => {
+    const { root, queryId } = await approvedBrain();
+    const bytes = encoder.encode("Locally discovered before capture.\n");
+    const localPath = "sources/z-local.txt";
+    await writeFile(path.join(root, localPath), bytes);
+    const input = {
+      representation: "artifact" as const,
+      originalUrl: "https://example.test/unregistered-local.txt",
+      title: "Unregistered local",
+      fileName: "unregistered-local.txt",
+      responseComplete: true as const,
+      content: bytes,
+      retrievedAt: "2026-08-30T06:15:00.000Z",
+    };
+
+    const first = await captureWebEvidence(root, queryId, input);
+
+    expect(first.source).toMatchObject({
+      path: localPath,
+      provenance: { kind: "file" },
+    });
+    const preparedPaths = await webFiles(root);
+    expect(preparedPaths).toHaveLength(2);
+    const sidecarPath = preparedPaths.find((item) =>
+      item.endsWith(".web.json"),
+    );
+    if (!sidecarPath) throw new Error("Expected immutable web sidecar");
+    const firstSidecar = await readFile(path.join(root, sidecarPath));
+    expect((await readBrainState(root)).sourceDuplicates).toEqual([
+      expect.objectContaining({
+        sourceId: first.source.id,
+        sidecarPath,
+      }),
+    ]);
+
+    const retryOne = await captureWebEvidence(root, queryId, input);
+    const retryTwo = await captureWebEvidence(root, queryId, input);
+
+    expect([retryOne.source.id, retryTwo.source.id]).toEqual([
+      first.source.id,
+      first.source.id,
+    ]);
+    expect(await webFiles(root)).toEqual(preparedPaths);
+    expect(await readFile(path.join(root, sidecarPath))).toEqual(firstSidecar);
+  });
+
+  test("rejects an internally scanned hash collision with an incompatible extractor", async () => {
+    const { root, queryId } = await approvedBrain();
+    const bytes = encoder.encode("Same bytes, different source format.\n");
+    await writeFile(path.join(root, "sources", "z-local.md"), bytes);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: "https://example.test/incompatible.txt",
+        title: "Incompatible collision",
+        fileName: "incompatible.txt",
+        responseComplete: true,
+        content: bytes,
+        retrievedAt: "2026-08-30T06:20:00.000Z",
+      }),
+    ).rejects.toThrow(/not compatible/i);
+
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(
+      (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+    ).toEqual([]);
   });
 
   test("does not reuse an unrelated local source that only matches the text digest suffix", async () => {
