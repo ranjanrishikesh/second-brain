@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
+import { constants, createReadStream, type BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -47,6 +47,14 @@ interface SourceManifestV1 {
 
 export type SourceManifestWriter = (content: string) => Promise<void>;
 
+export interface SourceScanTestOptions {
+  /** Deterministic seam for replacing a managed web-evidence path after its initial validation. */
+  afterInitialWebEvidencePathValidation?: (
+    kind: "artifact" | "sidecar",
+    relativePath: string,
+  ) => Promise<void> | void;
+}
+
 async function walk(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const files: string[] = [];
@@ -73,56 +81,87 @@ async function sha256File(filePath: string): Promise<string> {
   });
 }
 
-async function readBoundedWebSidecar(
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function unchangedOpenFile(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+async function readBoundedWebEvidenceFile(
   root: string,
   relativePath: string,
   maxFileBytes: number,
+  kind: "artifact" | "sidecar",
+  testOptions: SourceScanTestOptions,
 ): Promise<Buffer | undefined> {
-  const absolutePath = path.join(root, relativePath);
-  let metadata: Awaited<ReturnType<typeof lstat>>;
+  const label = kind === "artifact" ? "Web artifact" : "Web artifact sidecar";
+  const absolutePath = path.resolve(root, relativePath);
+  const lexicalSources = path.resolve(root, "sources");
+  if (!absolutePath.startsWith(`${lexicalSources}${path.sep}`)) {
+    throw new Error(`${label} must stay inside the brain sources tree: ${relativePath}`);
+  }
+  let metadata: BigIntStats;
   try {
-    metadata = await lstat(absolutePath);
+    metadata = await lstat(absolutePath, { bigint: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && kind === "sidecar") {
+      return undefined;
+    }
     throw error;
   }
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error(
-      `Web artifact sidecar must be a regular non-symlink file: ${relativePath}`,
+      `${label} must be a regular non-symlink file: ${relativePath}`,
     );
   }
-  if (metadata.size > maxFileBytes) {
+  if (metadata.size > BigInt(maxFileBytes)) {
     throw new Error(
-      `Web artifact sidecar exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
+      `${label} exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
     );
   }
-  const [realRoot, realSources, realSidecar] = await Promise.all([
+  const [realRoot, realSources, realEvidence] = await Promise.all([
     realpath(root),
     realpath(path.join(root, "sources")),
     realpath(absolutePath),
   ]);
   if (
     !realSources.startsWith(`${realRoot}${path.sep}`) ||
-    !realSidecar.startsWith(`${realSources}${path.sep}`)
+    !realEvidence.startsWith(`${realSources}${path.sep}`)
   ) {
     throw new Error(
-      `Web artifact sidecar must stay inside the brain sources tree: ${relativePath}`,
+      `${label} must stay inside the brain sources tree: ${relativePath}`,
     );
   }
-  const handle = await open(
-    absolutePath,
-    constants.O_RDONLY | constants.O_NOFOLLOW,
+  await testOptions.afterInitialWebEvidencePathValidation?.(
+    kind,
+    relativePath,
   );
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    const openedMetadata = await handle.stat();
-    if (!openedMetadata.isFile()) {
+    handle = await open(
+      absolutePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+  } catch {
+    throw new Error(`${label} path changed while scanning: ${relativePath}`);
+  }
+  try {
+    const openedMetadata = await handle.stat({ bigint: true });
+    if (!openedMetadata.isFile() || !sameFileIdentity(metadata, openedMetadata)) {
       throw new Error(
-        `Web artifact sidecar must be a regular file: ${relativePath}`,
+        `${label} path changed while scanning: ${relativePath}`,
       );
     }
-    if (openedMetadata.size > maxFileBytes) {
+    if (openedMetadata.size > BigInt(maxFileBytes)) {
       throw new Error(
-        `Web artifact sidecar exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
+        `${label} exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
       );
     }
     const chunks: Buffer[] = [];
@@ -136,14 +175,33 @@ async function readBoundedWebSidecar(
     }
     if (bytes > maxFileBytes) {
       throw new Error(
-        `Web artifact sidecar exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
+        `${label} exceeds configured maximum of ${maxFileBytes} bytes: ${relativePath}`,
       );
     }
-    const finalMetadata = await handle.stat();
-    if (finalMetadata.size !== bytes) {
+    const finalMetadata = await handle.stat({ bigint: true });
+    if (
+      !unchangedOpenFile(openedMetadata, finalMetadata) ||
+      finalMetadata.size !== BigInt(bytes)
+    ) {
       throw new Error(
-        `Web artifact sidecar changed while scanning: ${relativePath}`,
+        `${label} changed while scanning: ${relativePath}`,
       );
+    }
+    const finalRealEvidence = await realpath(absolutePath).catch(() => undefined);
+    if (!finalRealEvidence?.startsWith(`${realSources}${path.sep}`)) {
+      throw new Error(
+        `${label} must stay inside the brain sources tree: ${relativePath}`,
+      );
+    }
+    const finalPathMetadata = await lstat(absolutePath, { bigint: true }).catch(
+      () => undefined,
+    );
+    if (
+      !finalPathMetadata?.isFile() ||
+      finalPathMetadata.isSymbolicLink() ||
+      !sameFileIdentity(openedMetadata, finalPathMetadata)
+    ) {
+      throw new Error(`${label} path changed while scanning: ${relativePath}`);
     }
     return Buffer.concat(chunks, bytes);
   } finally {
@@ -166,6 +224,7 @@ async function readManifest(root: string): Promise<SourceManifestV1> {
 export async function scanSources(
   root: string,
   writeManifest?: SourceManifestWriter,
+  testOptions: SourceScanTestOptions = {},
 ): Promise<SourceScanResult> {
   const config = await loadBrainConfig(root);
   const manifest = await readManifest(root);
@@ -193,28 +252,35 @@ export async function scanSources(
         .split(path.sep)
         .join("/");
       seenPaths.add(relativePath);
-      const fileStats = await stat(absolutePath);
-      const exceedsSizeLimit = fileStats.size > config.sources.maxFileBytes;
       const sourceFormat = sourceFormatForPath(absolutePath);
       const markdown = sourceFormat === "markdown";
       const isManagedWebEvidence = relativePath.startsWith("sources/web/");
-      if (isManagedWebEvidence && exceedsSizeLimit) {
-        throw new Error(
-          `Web artifact ${relativePath} exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
-        );
-      }
+      const managedContent = isManagedWebEvidence
+        ? await readBoundedWebEvidenceFile(
+            root,
+            relativePath,
+            config.sources.maxFileBytes,
+            "artifact",
+            testOptions,
+          )
+        : undefined;
+      const fileStats = isManagedWebEvidence ? undefined : await stat(absolutePath);
+      const sourceBytes = managedContent?.byteLength ?? fileStats?.size ?? 0;
+      const exceedsSizeLimit = sourceBytes > config.sources.maxFileBytes;
       const content = exceedsSizeLimit
         ? undefined
-        : await readFile(absolutePath);
+        : managedContent ?? (await readFile(absolutePath));
       const digest = content ? sha256(content) : await sha256File(absolutePath);
       let webArtifact: ValidatedWebArtifactV1 | undefined;
       let webCapture: ReturnType<typeof parseWebCaptureMetadata>;
       if (isManagedWebEvidence) {
         const relativeSidecarPath = webArtifactSidecarPath(relativePath);
-        const sidecarContent = await readBoundedWebSidecar(
+        const sidecarContent = await readBoundedWebEvidenceFile(
           root,
           relativeSidecarPath,
           config.sources.maxFileBytes,
+          "sidecar",
+          testOptions,
         );
         if (sidecarContent) {
           try {
@@ -381,7 +447,7 @@ export async function scanSources(
           path: relativePath,
           sourceId: duplicate.id,
           sha256: digest,
-          bytes: fileStats.size,
+          bytes: sourceBytes,
           ...(webArtifact
             ? {
                 sidecarPath: webArtifactSidecarPath(relativePath),
@@ -426,7 +492,7 @@ export async function scanSources(
                             : epub
                               ? "application/epub+zip"
                               : "application/octet-stream",
-        bytes: content?.byteLength ?? fileStats.size,
+        bytes: content?.byteLength ?? sourceBytes,
         discoveredAt: new Date().toISOString(),
         extractionStatus: extractionError
           ? "failed"

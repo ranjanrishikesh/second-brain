@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -543,6 +544,100 @@ describe("scanSources", () => {
       result.added.some((source) => source.path.endsWith(".web.json")),
     ).toBe(false);
   });
+
+  test("exposes the validated-path boundary for deterministic web evidence race probes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-web-path-probe-"));
+    await initBrain(root, {
+      name: "Test",
+      description: "Web path race probe test",
+    });
+    const bytes = new TextEncoder().encode("Stable web evidence.\n");
+    const { sourcePath, sidecarPath } = await writeWebArtifact(
+      root,
+      "orbits-0123456789ab.txt",
+      bytes,
+      {
+        ...artifactSidecar(
+          `${webArtifactDirectory}/orbits-0123456789ab.txt`,
+          bytes,
+        ),
+        format: "text",
+        mediaType: "text/plain",
+      },
+    );
+    const boundaries: string[] = [];
+
+    await scanSources(root, undefined, {
+      afterInitialWebEvidencePathValidation: (kind, relativePath) => {
+        boundaries.push(`${kind}:${relativePath}`);
+      },
+    });
+
+    expect(boundaries).toEqual([
+      `artifact:${sourcePath}`,
+      `sidecar:${sidecarPath}`,
+    ]);
+  });
+
+  test.each(["artifact", "sidecar"] as const)(
+    "rejects a web %s path replaced with outside bytes after initial validation",
+    async (replacedKind) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-web-path-race-"));
+      await initBrain(root, {
+        name: "Test",
+        description: "Web path identity race test",
+      });
+      const insideBytes = new TextEncoder().encode("Inside evidence.\n");
+      const outsideBytes = new TextEncoder().encode("Outside evidence.\n");
+      const fileName = "orbits-0123456789ab.txt";
+      const sourcePath = `${webArtifactDirectory}/${fileName}`;
+      const declaredBytes =
+        replacedKind === "artifact" ? outsideBytes : insideBytes;
+      const { sidecarPath } = await writeWebArtifact(
+        root,
+        fileName,
+        insideBytes,
+        {
+          ...artifactSidecar(sourcePath, declaredBytes),
+          title: "Outside-controlled evidence",
+          format: "text",
+          mediaType: "text/plain",
+        },
+      );
+      const outside = await mkdtemp(
+        path.join(tmpdir(), "brain-web-path-race-outside-"),
+      );
+      let swapped = false;
+
+      await expect(
+        scanSources(root, undefined, {
+          afterInitialWebEvidencePathValidation: async (
+            kind,
+            relativePath,
+          ) => {
+            if (swapped || kind !== replacedKind) return;
+            swapped = true;
+            if (kind === "artifact") {
+              const outsideArtifact = path.join(outside, fileName);
+              await writeFile(outsideArtifact, outsideBytes);
+              await rm(path.join(root, relativePath));
+              await symlink(outsideArtifact, path.join(root, relativePath));
+              return;
+            }
+
+            await writeFile(
+              path.join(outside, path.basename(sidecarPath)),
+              await readFile(path.join(root, sidecarPath)),
+            );
+            const parent = path.dirname(path.join(root, relativePath));
+            await rename(parent, `${parent}-validated`);
+            await symlink(outside, parent);
+          },
+        }),
+      ).rejects.toThrow(/changed|regular|symlink|sources tree/i);
+      expect(swapped).toBe(true);
+    },
+  );
 
   test("uses a Markdown artifact sidecar instead of hostile capture frontmatter", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-web-markdown-"));

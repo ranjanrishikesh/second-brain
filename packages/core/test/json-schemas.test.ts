@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { brainJsonSchemasV1 } from "../src/index.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -47,5 +48,54 @@ describe("public JSON schemas", () => {
         title: name,
       });
     }
+  });
+
+  it("emits complete duplicate companion fingerprints as an all-or-none shape", () => {
+    const emittedBrainState = z.fromJSONSchema(
+      brainJsonSchemasV1.BrainStateV1 as Parameters<
+        typeof z.fromJSONSchema
+      >[0],
+    );
+    const state = {
+      version: 1,
+      catalogRevision: "empty",
+      knowledgeMutations: 0,
+      lastSemanticAuditMutation: 0,
+      sourceDuplicates: [
+        {
+          path: "sources/web/2026/08/copy.txt",
+          sourceId: "src_0123456789abcdef",
+          sha256: "a".repeat(64),
+          bytes: 12,
+          sidecarPath: "sources/web/2026/08/.copy.txt.web.json",
+        },
+      ],
+    };
+
+    expect(emittedBrainState.safeParse(state).success).toBe(false);
+    expect(
+      emittedBrainState.safeParse({
+        ...state,
+        sourceDuplicates: [
+          {
+            path: "sources/copy.txt",
+            sourceId: "src_0123456789abcdef",
+            sha256: "a".repeat(64),
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      emittedBrainState.safeParse({
+        ...state,
+        sourceDuplicates: [
+          {
+            ...state.sourceDuplicates[0],
+            sidecarSha256: "b".repeat(64),
+            sidecarBytes: 34,
+          },
+        ],
+      }).success,
+    ).toBe(true);
   });
 });

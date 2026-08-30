@@ -46,41 +46,116 @@
       "default": [],
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "minLength": 1
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sourceId": {
+                "type": "string",
+                "pattern": "^src_[a-f0-9]{16}$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "sidecarPath": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sidecarSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "sidecarBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "path",
+              "sourceId",
+              "sha256",
+              "bytes",
+              "sidecarPath",
+              "sidecarSha256",
+              "sidecarBytes"
+            ],
+            "additionalProperties": false
           },
-          "sourceId": {
-            "type": "string",
-            "pattern": "^src_[a-f0-9]{16}$"
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sourceId": {
+                "type": "string",
+                "pattern": "^src_[a-f0-9]{16}$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "sidecarPath": {
+                "not": {}
+              },
+              "sidecarSha256": {
+                "not": {}
+              },
+              "sidecarBytes": {
+                "not": {}
+              }
+            },
+            "required": ["path", "sourceId", "sha256", "bytes"],
+            "additionalProperties": false
           },
-          "sha256": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
-          },
-          "bytes": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          },
-          "sidecarPath": {
-            "type": "string",
-            "minLength": 1
-          },
-          "sidecarSha256": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
-          },
-          "sidecarBytes": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sourceId": {
+                "type": "string",
+                "pattern": "^src_[a-f0-9]{16}$"
+              },
+              "sha256": {
+                "not": {}
+              },
+              "bytes": {
+                "not": {}
+              },
+              "sidecarPath": {
+                "not": {}
+              },
+              "sidecarSha256": {
+                "not": {}
+              },
+              "sidecarBytes": {
+                "not": {}
+              }
+            },
+            "required": ["path", "sourceId"],
+            "additionalProperties": false
           }
-        },
-        "required": ["path", "sourceId"],
-        "additionalProperties": false
+        ]
       }
     },
     "setup": {

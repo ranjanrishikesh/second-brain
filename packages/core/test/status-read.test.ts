@@ -307,6 +307,49 @@ describe("brain status and reading", () => {
     await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
 
     await expect(readBrainState(root)).rejects.toThrow(/sidecar/i);
+
+    state.sourceDuplicates[0] = {
+      ...state.sourceDuplicates[0],
+      sidecarSha256: "b".repeat(64),
+      sidecarBytes: 34,
+    };
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await expect(readBrainState(root)).resolves.toMatchObject({
+      sourceDuplicates: [
+        expect.objectContaining({
+          sidecarPath: "sources/web/2026/08/.copy.txt.web.json",
+          sidecarSha256: "b".repeat(64),
+          sidecarBytes: 34,
+        }),
+      ],
+    });
+  });
+
+  test("rejects a partial primary fingerprint while preserving legacy duplicate state", async () => {
+    const root = await initializedBrain("Partial duplicate fingerprint");
+    const statePath = path.join(root, ".brain", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.sourceDuplicates = [
+      {
+        path: "sources/copy.txt",
+        sourceId: "src_0123456789abcdef",
+        sha256: "a".repeat(64),
+      },
+    ];
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    await expect(readBrainState(root)).rejects.toThrow();
+
+    delete state.sourceDuplicates[0].sha256;
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await expect(readBrainState(root)).resolves.toMatchObject({
+      sourceDuplicates: [
+        {
+          path: "sources/copy.txt",
+          sourceId: "src_0123456789abcdef",
+        },
+      ],
+    });
   });
 
   test("reports blocked extraction, pending charter, active setup, and completed setup", async () => {
