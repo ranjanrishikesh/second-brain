@@ -92,18 +92,18 @@
             },
             "url": {
               "type": "string",
-              "format": "uri"
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
             },
             "finalUrl": {
               "type": "string",
-              "format": "uri"
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
             },
             "redirectChain": {
               "maxItems": 5,
               "type": "array",
               "items": {
                 "type": "string",
-                "format": "uri"
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
               }
             },
             "retrievedAt": {
@@ -146,18 +146,18 @@
                 "properties": {
                   "originalUrl": {
                     "type": "string",
-                    "format": "uri"
+                    "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
                   },
                   "finalUrl": {
                     "type": "string",
-                    "format": "uri"
+                    "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
                   },
                   "redirectChain": {
                     "maxItems": 5,
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "format": "uri"
+                      "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
                     }
                   },
                   "retrievedAt": {
@@ -324,18 +324,18 @@
             },
             "url": {
               "type": "string",
-              "format": "uri"
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
             },
             "finalUrl": {
               "type": "string",
-              "format": "uri"
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
             },
             "redirectChain": {
               "maxItems": 5,
               "type": "array",
               "items": {
                 "type": "string",
-                "format": "uri"
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
               }
             },
             "retrievedAt": {
@@ -378,18 +378,18 @@
                 "properties": {
                   "originalUrl": {
                     "type": "string",
-                    "format": "uri"
+                    "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
                   },
                   "finalUrl": {
                     "type": "string",
-                    "format": "uri"
+                    "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
                   },
                   "redirectChain": {
                     "maxItems": 5,
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "format": "uri"
+                      "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
                     }
                   },
                   "retrievedAt": {

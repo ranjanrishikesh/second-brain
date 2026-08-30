@@ -10,6 +10,12 @@ const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const sourceIdSchema = z.string().regex(/^src_[a-f0-9]{16}$/);
 const queryIdSchema = z.string().regex(/^qry_[a-f0-9]{32}$/);
 const webCaptureKindV1Schema = z.enum(["page", "snippet"]);
+const absoluteHttpUrlWithoutCredentialsPattern =
+  /^https?:\/\/(?![^/?#\s]*@)[^/?#\s]+(?:[/?#].*)?$/;
+
+export const webHttpUrlV1Schema = z
+  .url()
+  .regex(absoluteHttpUrlWithoutCredentialsPattern);
 
 export const webCaptureRepresentationV1Schema = z.enum(["text", "artifact"]);
 export type WebCaptureRepresentationV1 = z.infer<
@@ -23,9 +29,9 @@ export type WebCaptureCompletenessV1 = z.infer<
 
 export const webDiscoveryV1Schema = z
   .object({
-    originalUrl: z.url(),
-    finalUrl: z.url(),
-    redirectChain: z.array(z.url()).max(5),
+    originalUrl: webHttpUrlV1Schema,
+    finalUrl: webHttpUrlV1Schema,
+    redirectChain: z.array(webHttpUrlV1Schema).max(5),
     retrievedAt: z.string().datetime(),
     queryId: queryIdSchema,
     questionHash: sha256Schema,
@@ -34,6 +40,7 @@ export const webDiscoveryV1Schema = z
     completeness: webCaptureCompletenessV1Schema,
     captureKind: webCaptureKindV1Schema.optional(),
   })
+  .strict()
   .superRefine((discovery, context) => {
     try {
       validateWebUrlChain(discovery);
@@ -46,30 +53,50 @@ export const webDiscoveryV1Schema = z
   });
 export type WebDiscoveryV1 = z.infer<typeof webDiscoveryV1Schema>;
 
-const webArtifactFormatV1Schema = z.enum([
-  "markdown",
-  "text",
-  "json",
-  "jsonl",
-  "csv",
-  "tsv",
-  "pdf",
-  "docx",
-  "epub",
-]);
+const webArtifactSidecarBaseV1Schema = z.object({
+  brainWebArtifact: z.literal(1),
+  artifactSha256: sha256Schema,
+  artifactBytes: z.number().int().nonnegative(),
+  title: z.string().trim().min(1),
+  mediaType: z.string().trim().min(1),
+  discovery: webDiscoveryV1Schema,
+  supersedes: sourceIdSchema.optional(),
+});
+
+function webArtifactSourcePathSchema(extensionPattern: string) {
+  return z
+    .string()
+    .regex(
+      new RegExp(
+        `^sources/web/(?:[^./\\\\][^/\\\\]*/)*[^./\\\\][^/\\\\]*\\.(?:${extensionPattern})$`,
+      ),
+    );
+}
+
+function webArtifactSidecarVariant(
+  format: WebArtifactSourceFormatV1,
+  extensionPattern: string,
+) {
+  return webArtifactSidecarBaseV1Schema
+    .extend({
+      format: z.literal(format),
+      sourcePath: webArtifactSourcePathSchema(extensionPattern),
+    })
+    .strict();
+}
 
 export const webArtifactSidecarV1Schema = z
-  .object({
-    brainWebArtifact: z.literal(1),
-    sourcePath: z.string().min(1),
-    artifactSha256: sha256Schema,
-    artifactBytes: z.number().int().nonnegative(),
-    title: z.string().trim().min(1),
-    format: webArtifactFormatV1Schema,
-    mediaType: z.string().trim().min(1),
-    discovery: webDiscoveryV1Schema,
-    supersedes: sourceIdSchema.optional(),
-  })
+  .union([
+    webArtifactSidecarVariant("markdown", "md|markdown"),
+    webArtifactSidecarVariant("text", "txt"),
+    webArtifactSidecarVariant("json", "json"),
+    webArtifactSidecarVariant("jsonl", "jsonl"),
+    webArtifactSidecarVariant("csv", "csv"),
+    webArtifactSidecarVariant("tsv", "tsv"),
+    webArtifactSidecarVariant("pdf", "pdf"),
+    webArtifactSidecarVariant("docx", "docx"),
+    webArtifactSidecarVariant("epub", "epub"),
+  ])
   .superRefine((sidecar, context) => {
     try {
       assertWebArtifactSourcePath(sidecar.sourcePath);
@@ -105,10 +132,10 @@ export interface DetectedWebArtifactV1 {
 export const webCaptureMetadataV1Schema = z
   .object({
     brainWebCapture: z.literal(1),
-    url: z.url(),
-    originalUrl: z.url().optional(),
-    finalUrl: z.url().optional(),
-    redirectChain: z.array(z.url()).max(5).optional(),
+    url: webHttpUrlV1Schema,
+    originalUrl: webHttpUrlV1Schema.optional(),
+    finalUrl: webHttpUrlV1Schema.optional(),
+    redirectChain: z.array(webHttpUrlV1Schema).max(5).optional(),
     retrievedAt: z.string().datetime(),
     query: z.string().trim().min(1),
     captureKind: webCaptureKindV1Schema,
@@ -117,6 +144,7 @@ export const webCaptureMetadataV1Schema = z
     contentSha256: sha256Schema,
     supersedes: sourceIdSchema.optional(),
   })
+  .strict()
   .superRefine((metadata, context) => {
     try {
       validateWebUrlChain({ originalUrl: metadata.url });
@@ -423,9 +451,30 @@ export function parseWebCaptureMetadata(
   if (!content.startsWith("---\n")) return undefined;
   const closingMarker = content.indexOf("\n---\n", 4);
   if (closingMarker < 0) return undefined;
-  return webCaptureMetadataV1Schema.safeParse(
-    parse(content.slice(4, closingMarker)),
-  ).data;
+  const frontmatter = content.slice(4, closingMarker);
+  let metadata: unknown;
+  try {
+    metadata = parse(frontmatter);
+  } catch (error) {
+    if (!/^brainWebCapture\s*:/mu.test(frontmatter)) return undefined;
+    throw new Error(
+      `Invalid web capture metadata: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (
+    !metadata ||
+    typeof metadata !== "object" ||
+    !("brainWebCapture" in metadata)
+  ) {
+    return undefined;
+  }
+  const parsed = webCaptureMetadataV1Schema.safeParse(metadata);
+  if (!parsed.success) {
+    throw new Error(`Invalid web capture metadata: ${parsed.error.message}`);
+  }
+  return parsed.data;
 }
 
 export function renderWebArtifactSidecar(
@@ -433,5 +482,16 @@ export function renderWebArtifactSidecar(
 ): string {
   const parsed = webArtifactSidecarV1Schema.parse(sidecar);
   webArtifactSidecarPath(parsed.sourcePath);
-  return `${JSON.stringify(parsed, null, 2)}\n`;
+  const canonical = {
+    brainWebArtifact: parsed.brainWebArtifact,
+    sourcePath: parsed.sourcePath,
+    artifactSha256: parsed.artifactSha256,
+    artifactBytes: parsed.artifactBytes,
+    title: parsed.title,
+    format: parsed.format,
+    mediaType: parsed.mediaType,
+    discovery: parsed.discovery,
+    ...(parsed.supersedes ? { supersedes: parsed.supersedes } : {}),
+  };
+  return `${JSON.stringify(canonical, null, 2)}\n`;
 }

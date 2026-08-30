@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
+  brainJsonSchemasV1,
   detectWebArtifact,
+  parseWebCaptureMetadata,
   renderWebArtifactSidecar,
   sourceRecordV1Schema,
   validateWebUrlChain,
@@ -32,6 +34,58 @@ describe("durable web evidence contracts", () => {
         provenance: { kind: "file" },
       }),
     ).toMatchObject({ provenance: { kind: "file" } });
+  });
+
+  test.each([
+    ["a non-HTTP source URL", { url: "file:///tmp/orbits.pdf" }],
+    [
+      "credentials in a source URL",
+      { url: "https://user:pass@example.com/orbits.pdf" },
+    ],
+    [
+      "a private final URL",
+      {
+        url: "https://example.com/orbits.pdf",
+        finalUrl: "https://192.168.1.8/orbits.pdf",
+      },
+    ],
+    [
+      "an overlong redirect chain",
+      {
+        url: "https://example.com/orbits.pdf",
+        redirectChain: [
+          "https://one.example/orbits.pdf",
+          "https://two.example/orbits.pdf",
+          "https://three.example/orbits.pdf",
+          "https://four.example/orbits.pdf",
+          "https://five.example/orbits.pdf",
+          "https://six.example/orbits.pdf",
+        ],
+      },
+    ],
+    [
+      "an HTTPS downgrade",
+      {
+        url: "https://example.com/orbits.pdf",
+        finalUrl: "http://example.com/orbits.pdf",
+      },
+    ],
+  ])("rejects unsafe web source provenance: %s", (_reason, provenance) => {
+    expect(() =>
+      sourceRecordV1Schema.parse({
+        version: 1,
+        id: "src_0123456789abcdef",
+        sha256: "a".repeat(64),
+        path: "sources/web/2026/08/orbits.pdf",
+        title: "Orbits",
+        mediaType: "application/pdf",
+        bytes: 9,
+        discoveredAt: "2026-08-30T00:00:00.000Z",
+        extractor: "pdf-v1",
+        extractionStatus: "extraction-required",
+        provenance: { kind: "web", ...provenance },
+      }),
+    ).toThrow();
   });
 
   test("round-trips structured artifact provenance and its sidecar", () => {
@@ -94,6 +148,75 @@ describe("durable web evidence contracts", () => {
     expect(renderWebArtifactSidecar(sidecar)).toBe(
       `${JSON.stringify(sidecar, null, 2)}\n`,
     );
+  });
+
+  test("rejects unknown fields in public web contracts", () => {
+    const discovery = {
+      originalUrl: "https://example.com/orbits.pdf",
+      finalUrl: "https://example.com/orbits.pdf",
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What does the orbit report conclude?",
+      representation: "artifact",
+      completeness: "complete",
+    };
+    const sidecar = {
+      brainWebArtifact: 1,
+      sourcePath: "sources/web/2026/08/orbits-0716f9264c9f.pdf",
+      artifactSha256: pdfSha256,
+      artifactBytes: 9,
+      title: "Orbits",
+      format: "pdf",
+      mediaType: "application/pdf",
+      discovery,
+    };
+
+    expect(
+      webDiscoveryV1Schema.safeParse({ ...discovery, unexpected: true })
+        .success,
+    ).toBe(false);
+    expect(
+      webArtifactSidecarV1Schema.safeParse({ ...sidecar, unexpected: true })
+        .success,
+    ).toBe(false);
+  });
+
+  test("publishes structural URL and artifact-path constraints", () => {
+    const schema = brainJsonSchemasV1.WebArtifactSidecarV1 as {
+      anyOf?: Array<{
+        additionalProperties?: boolean;
+        properties?: Record<string, unknown>;
+      }>;
+    };
+    const pdfVariant = schema.anyOf?.find(
+      (variant) =>
+        (variant.properties?.format as { const?: unknown } | undefined)
+          ?.const === "pdf",
+    );
+    const discovery = pdfVariant?.properties?.discovery as
+      | { properties?: Record<string, unknown>; additionalProperties?: boolean }
+      | undefined;
+
+    expect(pdfVariant?.additionalProperties).toBe(false);
+    expect(pdfVariant?.properties?.sourcePath).toMatchObject({
+      pattern: expect.stringContaining("pdf"),
+    });
+    expect(discovery?.additionalProperties).toBe(false);
+    expect(discovery?.properties?.originalUrl).toMatchObject({
+      pattern: expect.stringContaining("^https?"),
+    });
+
+    const sourceSchema = brainJsonSchemasV1.SourceRecordV1 as {
+      anyOf?: Array<{ properties?: Record<string, unknown> }>;
+    };
+    const provenance = sourceSchema.anyOf?.[0]?.properties?.provenance as
+      | { properties?: Record<string, unknown> }
+      | undefined;
+    expect(provenance?.properties?.url).toMatchObject({
+      pattern: expect.stringContaining("^https?"),
+    });
   });
 
   test("derives a deterministic hidden sidecar path", () => {
@@ -211,6 +334,20 @@ describe("durable web evidence contracts", () => {
         contentSha256: pdfSha256,
       }),
     ).toThrow();
+  });
+
+  test("fails closed for marked invalid web capture metadata", () => {
+    expect(() =>
+      parseWebCaptureMetadata(
+        "---\nbrainWebCapture: 1\nurl: file:///tmp/orbits\n---\n# Orbits\n",
+      ),
+    ).toThrow("Invalid web capture metadata");
+  });
+
+  test("ignores ordinary non-web frontmatter", () => {
+    expect(
+      parseWebCaptureMetadata("---\ntitle: Orbits\n---\n# Orbits\n"),
+    ).toBeUndefined();
   });
 
   test.each([
