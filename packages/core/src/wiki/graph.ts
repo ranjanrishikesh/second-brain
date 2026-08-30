@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "../config.js";
 import { loadExtractedSourceCache } from "../sources/rebuild-cache.js";
 import { sourceRecordV1Schema } from "../sources/types.js";
+import { inspectWebEvidenceIntegrity } from "../sources/web-evidence.js";
 import {
   extractCitations,
   extractHeadingAnchors,
@@ -35,6 +36,11 @@ export const auditReportV1Schema = z.object({
 });
 
 export type AuditReportV1 = z.infer<typeof auditReportV1Schema>;
+
+interface WikiGraphTestOptions {
+  /** Deterministic test seam for observing integrity-inspection scheduling. */
+  inspectWebEvidenceIntegrity?: typeof inspectWebEvidenceIntegrity;
+}
 
 async function pageFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -82,7 +88,10 @@ export function calculateCatalogRevision(pages: WikiPageV1[]): string {
   return createHash("sha256").update(JSON.stringify(catalog)).digest("hex");
 }
 
-export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
+export async function validateWikiGraph(
+  root: string,
+  testOptions: WikiGraphTestOptions = {},
+): Promise<AuditReportV1> {
   const config = await loadBrainConfig(root);
   const pages = await loadWikiPages(root);
   const manifest = z
@@ -96,6 +105,17 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
       ),
     );
   const sourceIds = new Set(manifest.sources.map((source) => source.id));
+  const sourcesById = new Map(
+    manifest.sources.map((source) => [source.id, source]),
+  );
+  const integrityIssues: Awaited<
+    ReturnType<typeof inspectWebEvidenceIntegrity>
+  > = [];
+  const integrityInspector =
+    testOptions.inspectWebEvidenceIntegrity ?? inspectWebEvidenceIntegrity;
+  for (const source of manifest.sources) {
+    integrityIssues.push(...(await integrityInspector(root, source)));
+  }
   const validLocators = new Map<string, Set<string>>();
   for (const source of manifest.sources) {
     if (source.extractionStatus !== "ready") continue;
@@ -125,7 +145,12 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
     }
   }
   const degrees = new Map(pages.map((page) => [page.id, 0]));
-  const issues: AuditIssueV1[] = [];
+  const issues: AuditIssueV1[] = integrityIssues.map((issue) => ({
+    code: issue.code,
+    severity: "error",
+    message: issue.message,
+    path: issue.path,
+  }));
   const pageIdCounts = new Map<string, number>();
   for (const page of pages)
     pageIdCounts.set(page.id, (pageIdCounts.get(page.id) ?? 0) + 1);
@@ -205,6 +230,15 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
       page.sources.map((source) => [source.id, new Set(source.locators)]),
     );
     for (const citation of citations) {
+      const citedSource = sourcesById.get(citation.sourceId);
+      if (citedSource && citedSource.extractionStatus !== "ready") {
+        issues.push({
+          code: "SOURCE_NOT_READY_FOR_CITATION",
+          severity: "error",
+          message: `Inline citation requires a ready source: ${citation.sourceId}`,
+          pageId: page.id,
+        });
+      }
       if (!citation.locator) {
         issues.push({
           code: "MISSING_CITATION_LOCATOR",

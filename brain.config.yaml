@@ -3,6 +3,8 @@ brain:
   name: Portable Second Brain
   description: A self-maintaining personal knowledge base.
   language: en
+support:
+  issueTrackerUrl: https://github.com/ranjanrishikesh/second-brain/issues
 sources:
   roots:
     - sources

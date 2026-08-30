@@ -1,5 +1,11 @@
 # V1 Knowledge Workflow Hardening — Design
 
+> **Historical record:** User-facing version and roadmap handoff language in
+> this document is superseded by
+> [Public Template and Capability Support Design](2026-08-30-public-template-and-capability-support-design.md).
+> Active hosts follow `AGENTS.md` and the second-brain skill; this file is not
+> a runtime instruction or release promise.
+
 **Status:** Approved for planning on 2026-08-27
 
 ## Goal

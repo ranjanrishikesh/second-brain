@@ -1,6 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
-import { loadBrainConfig } from "./config.js";
+import { loadBrainConfig, type BrainConfigV1 } from "./config.js";
 import { inspectOnboarding, type OnboardingStatusV1 } from "./onboarding.js";
 import { pendingBootstrapSourceIds } from "./query.js";
 import { readBrainState, type SyncStatusV1 } from "./state.js";
@@ -18,6 +18,7 @@ import { syncStatus } from "./sync.js";
 export interface BrainStatusV1 {
   version: 1;
   brain: { name: string; description: string; language: string };
+  support: BrainConfigV1["support"];
   sources: {
     total: number;
     ready: number;
@@ -96,6 +97,7 @@ export async function statusBrain(root: string): Promise<BrainStatusV1> {
   return {
     version: 1,
     brain: config.brain,
+    support: config.support,
     sources: {
       total: sources.length,
       ready: extractionCount("ready"),

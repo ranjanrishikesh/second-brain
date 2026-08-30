@@ -12,6 +12,11 @@ export type SupportedSourceFormatV1 =
   | "docx"
   | "epub";
 
+export type WebArtifactSourceFormatV1 = Exclude<
+  SupportedSourceFormatV1,
+  "html"
+>;
+
 const sourceFormatsByExtension: Readonly<
   Record<string, SupportedSourceFormatV1>
 > = {

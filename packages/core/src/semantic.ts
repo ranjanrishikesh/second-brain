@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   open,
-  readFile,
   readdir,
+  readFile,
   rename,
   rm,
   writeFile,
@@ -11,9 +11,9 @@ import {
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
+import type { SearchResult, SearchScope } from "./search.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { SourceRecordV1 } from "./sources/types.js";
-import type { SearchResult, SearchScope } from "./search.js";
 import { parseWikiPage } from "./wiki/page.js";
 
 export interface EmbeddingProvider {
@@ -71,6 +71,9 @@ async function markdownFiles(directory: string): Promise<string[]> {
 
 async function semanticCorpusRevision(root: string): Promise<string> {
   const hash = createHash("sha256");
+  const config = await loadBrainConfig(root);
+  hash.update("semantic-corpus-v2\0");
+  hash.update(JSON.stringify(config.sources));
   hash.update(
     await readFile(path.join(root, ".brain", "source-manifest.json")),
   );

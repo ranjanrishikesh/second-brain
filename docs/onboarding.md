@@ -45,4 +45,8 @@ When synchronization cannot complete, local committed knowledge remains usable a
 
 Text PDFs and Word DOCX files are first-class v1 inputs alongside Markdown, text, HTML, EPUB, JSON/JSONL, CSV, and TSV. Image-only PDFs need extraction/OCR and are reported as such. Legacy `.doc`, images, audio, video, and unsupported Office formats are not silently skipped.
 
-For command-level troubleshooting, run `pnpm brain --help` or ask the host agent to inspect the failing phase. The [recovery guide](recovery.md) documents canonical safety behavior; the [v1 exit checklist](V1_EXIT_CHECKLIST.md) separates deterministic verification from real Codex and Claude live smokes.
+For command-level troubleshooting, run `pnpm brain --help` or ask the host
+agent to inspect the failing phase. The [recovery guide](recovery.md) documents
+canonical safety behavior; the
+[maintainer release checklist](maintainers/template-release-checklist.md)
+separates deterministic verification from real Codex and Claude live smokes.

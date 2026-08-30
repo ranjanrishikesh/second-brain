@@ -4,6 +4,7 @@ import {
   brainCharterV1Schema,
   onboardingStatusV1Schema,
   operationRecordV1Schema,
+  webArtifactSidecarV1Schema,
 } from "../src/index.js";
 
 describe("versioned public schemas", () => {
@@ -83,5 +84,31 @@ describe("versioned public schemas", () => {
       }),
     ).toMatchObject({ version: 1, origin: "inferred" });
     expect(() => onboardingStatusV1Schema.parse({ version: 2 })).toThrow();
+  });
+
+  test("exports the durable web artifact sidecar contract", () => {
+    expect(
+      webArtifactSidecarV1Schema.parse({
+        brainWebArtifact: 1,
+        sourcePath: "sources/web/2026/08/orbits-0716f9264c9f.pdf",
+        artifactSha256:
+          "0716f9264c9fe19f5d7455276107f3ddcc1d3497f63d60689a73558ae8a1bf5e",
+        artifactBytes: 9,
+        title: "Orbits",
+        format: "pdf",
+        mediaType: "application/pdf",
+        discovery: {
+          originalUrl: "https://example.com/orbits.pdf",
+          finalUrl: "https://example.com/orbits.pdf",
+          redirectChain: [],
+          retrievedAt: "2026-08-30T00:00:00.000Z",
+          queryId: "qry_0123456789abcdef0123456789abcdef",
+          questionHash: "c".repeat(64),
+          query: "What does the orbit report conclude?",
+          representation: "artifact",
+          completeness: "complete",
+        },
+      }),
+    ).toMatchObject({ brainWebArtifact: 1, format: "pdf" });
   });
 });

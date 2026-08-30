@@ -26,10 +26,39 @@
       "required": ["name", "description", "language"],
       "additionalProperties": false
     },
+    "support": {
+      "default": {
+        "issueTrackerUrl": "https://github.com/ranjanrishikesh/second-brain/issues"
+      },
+      "type": "object",
+      "properties": {
+        "issueTrackerUrl": {
+          "default": "https://github.com/ranjanrishikesh/second-brain/issues",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https:\\/\\/.*"
+        }
+      },
+      "required": ["issueTrackerUrl"],
+      "additionalProperties": false
+    },
     "sources": {
       "default": {
         "roots": ["sources"],
-        "maxFileBytes": 104857600
+        "maxFileBytes": 104857600,
+        "textExtraction": {
+          "maxExtractedBytes": 8388608,
+          "maxChunks": 10000
+        },
+        "pdf": {
+          "maxPages": 2000,
+          "maxExtractedBytes": 104857600
+        },
+        "epub": {
+          "maxEntries": 1000,
+          "maxExpandedBytes": 104857600,
+          "maxExtractedBytes": 104857600
+        }
       },
       "type": "object",
       "properties": {
@@ -39,7 +68,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^(?![A-Za-z]:)(?!\\s*$)(?!\\.{1,2}(?:\\/|$))[^/\\\\\\u0000-\\u001f\\u007f\\u2028\\u2029]+(?:\\/(?!\\.{1,2}(?:\\/|$))[^/\\\\\\u0000-\\u001f\\u007f\\u2028\\u2029]+)*$"
           }
         },
         "maxFileBytes": {
@@ -47,9 +76,85 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
+        },
+        "textExtraction": {
+          "default": {
+            "maxExtractedBytes": 8388608,
+            "maxChunks": 10000
+          },
+          "type": "object",
+          "properties": {
+            "maxExtractedBytes": {
+              "default": 8388608,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxChunks": {
+              "default": 10000,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["maxExtractedBytes", "maxChunks"],
+          "additionalProperties": false
+        },
+        "pdf": {
+          "default": {
+            "maxPages": 2000,
+            "maxExtractedBytes": 104857600
+          },
+          "type": "object",
+          "properties": {
+            "maxPages": {
+              "default": 2000,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxExtractedBytes": {
+              "default": 104857600,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["maxPages", "maxExtractedBytes"],
+          "additionalProperties": false
+        },
+        "epub": {
+          "default": {
+            "maxEntries": 1000,
+            "maxExpandedBytes": 104857600,
+            "maxExtractedBytes": 104857600
+          },
+          "type": "object",
+          "properties": {
+            "maxEntries": {
+              "default": 1000,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxExpandedBytes": {
+              "default": 104857600,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxExtractedBytes": {
+              "default": 104857600,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["maxEntries", "maxExpandedBytes", "maxExtractedBytes"],
+          "additionalProperties": false
         }
       },
-      "required": ["roots", "maxFileBytes"],
+      "required": ["roots", "maxFileBytes", "textExtraction", "pdf", "epub"],
       "additionalProperties": false
     },
     "bootstrap": {
@@ -249,6 +354,7 @@
   "required": [
     "version",
     "brain",
+    "support",
     "sources",
     "bootstrap",
     "learning",

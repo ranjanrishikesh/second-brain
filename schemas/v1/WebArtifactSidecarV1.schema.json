@@ -1,0 +1,1006 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "markdown"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[mM][dD]|[mM][aA][rR][kK][dD][oO][wW][nN])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "text"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[tT][xX][tT])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "json"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[jJ][sS][oO][nN])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "jsonl"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[jJ][sS][oO][nN][lL])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "csv"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[cC][sS][vV])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "tsv"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[tT][sS][vV])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "pdf"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[pP][dD][fF])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "docx"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[dD][oO][cC][xX])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "brainWebArtifact": {
+          "type": "number",
+          "const": 1
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "discovery": {
+          "type": "object",
+          "properties": {
+            "originalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "finalUrl": {
+              "type": "string",
+              "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+            },
+            "redirectChain": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^https?:\\/\\/(?![^/?#\\s]*@)[^/?#\\s]+(?:[/?#].*)?$"
+              }
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "queryId": {
+              "type": "string",
+              "pattern": "^qry_[a-f0-9]{32}$"
+            },
+            "questionHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "query": {
+              "type": "string",
+              "minLength": 1
+            },
+            "representation": {
+              "type": "string",
+              "enum": ["text", "artifact"]
+            },
+            "completeness": {
+              "type": "string",
+              "enum": ["complete", "partial"]
+            },
+            "captureKind": {
+              "type": "string",
+              "enum": ["page", "snippet"]
+            }
+          },
+          "required": [
+            "originalUrl",
+            "finalUrl",
+            "redirectChain",
+            "retrievedAt",
+            "queryId",
+            "questionHash",
+            "query",
+            "representation",
+            "completeness"
+          ],
+          "additionalProperties": false
+        },
+        "supersedes": {
+          "type": "string",
+          "pattern": "^src_[a-f0-9]{16}$"
+        },
+        "format": {
+          "type": "string",
+          "const": "epub"
+        },
+        "sourcePath": {
+          "type": "string",
+          "pattern": "^sources\\/web\\/(?:[^./\\\\][^/\\\\]*\\/)*(?![^/\\\\]*\\.[wW][eE][bB]\\.[jJ][sS][oO][nN]$)[^./\\\\][^/\\\\]*\\.(?:[eE][pP][uU][bB])$"
+        }
+      },
+      "required": [
+        "brainWebArtifact",
+        "artifactSha256",
+        "artifactBytes",
+        "title",
+        "mediaType",
+        "discovery",
+        "format",
+        "sourcePath"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$id": "https://portable-second-brain.dev/schemas/v1/WebArtifactSidecarV1.schema.json",
+  "title": "WebArtifactSidecarV1"
+}

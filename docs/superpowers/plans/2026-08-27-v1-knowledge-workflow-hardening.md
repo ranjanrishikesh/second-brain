@@ -1,5 +1,11 @@
 # V1 Knowledge Workflow Hardening Implementation Plan
 
+> **Historical record:** User-facing version and roadmap handoff language in
+> this document is superseded by
+> [Public Template and Capability Support Design](../specs/2026-08-30-public-template-and-capability-support-design.md).
+> Active hosts follow `AGENTS.md` and the second-brain skill; this file is not
+> a runtime instruction or release promise.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the template into a safely self-compounding knowledge system with explicit setup, whole-graph hybrid reconciliation, question-scoped web approval, and safe Git synchronization.

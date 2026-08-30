@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { z } from "zod";
+import { loadBrainConfig } from "./config.js";
+import { type BrainRuntimeServices, semanticSearch } from "./semantic.js";
 import { extractMarkdown } from "./sources/extract.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { SourceRecordV1 } from "./sources/types.js";
-import { semanticSearch, type BrainRuntimeServices } from "./semantic.js";
 import { parseWikiPage } from "./wiki/page.js";
 
 export type SearchScope = "wiki" | "sources" | "all";
@@ -45,6 +46,9 @@ async function markdownFiles(directory: string): Promise<string[]> {
 
 async function currentSearchRevision(root: string): Promise<string> {
   const hash = createHash("sha256");
+  const config = await loadBrainConfig(root);
+  hash.update("search-index-v2\0");
+  hash.update(JSON.stringify(config.sources));
   hash.update(
     await readFile(path.join(root, ".brain", "source-manifest.json")),
   );

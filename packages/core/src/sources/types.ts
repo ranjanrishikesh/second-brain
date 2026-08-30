@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  webCaptureCompletenessV1Schema,
+  webCaptureRepresentationV1Schema,
+  webDiscoveryV1Schema,
+  webHttpUrlV1Schema,
+  validateWebUrlChain,
+} from "./web-evidence.js";
 
 const extractedSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -10,6 +17,50 @@ export const docxOutputPolicyV1Schema = z.object({
 });
 
 export type DocxOutputPolicyV1 = z.infer<typeof docxOutputPolicyV1Schema>;
+
+const sourceProvenanceV1Schema = z
+  .object({
+    kind: z.enum(["file", "web"]),
+    url: webHttpUrlV1Schema.optional(),
+    finalUrl: webHttpUrlV1Schema.optional(),
+    redirectChain: z.array(webHttpUrlV1Schema).max(5).optional(),
+    retrievedAt: z.string().datetime().optional(),
+    query: z.string().optional(),
+    captureKind: z.enum(["page", "snippet"]).optional(),
+    completeness: webCaptureCompletenessV1Schema.optional(),
+    representation: webCaptureRepresentationV1Schema.optional(),
+    sidecarPath: z.string().min(1).optional(),
+    sidecarSha256: extractedSha256Schema.optional(),
+    sidecarBytes: z.number().int().nonnegative().optional(),
+    webDiscoveries: z.array(webDiscoveryV1Schema).optional(),
+  })
+  .strict()
+  .superRefine((provenance, context) => {
+    if (provenance.kind !== "web") return;
+    if (!provenance.url) {
+      if (provenance.finalUrl || provenance.redirectChain?.length) {
+        context.addIssue({
+          code: "custom",
+          message: "Web provenance URL is required with final URL or redirects",
+        });
+      }
+      return;
+    }
+    try {
+      validateWebUrlChain({
+        originalUrl: provenance.url,
+        ...(provenance.finalUrl ? { finalUrl: provenance.finalUrl } : {}),
+        ...(provenance.redirectChain
+          ? { redirectChain: provenance.redirectChain }
+          : {}),
+      });
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
 
 const sourceRecordBaseV1Schema = z.object({
   version: z.literal(1),
@@ -23,16 +74,11 @@ const sourceRecordBaseV1Schema = z.object({
   extractor: z.string().min(1),
   error: z.string().optional(),
   docxOutputPolicy: docxOutputPolicyV1Schema.optional(),
-  supersedes: z.string().optional(),
-  provenance: z
-    .object({
-      kind: z.enum(["file", "web"]),
-      url: z.string().url().optional(),
-      retrievedAt: z.string().datetime().optional(),
-      query: z.string().optional(),
-      captureKind: z.enum(["page", "snippet"]).optional(),
-    })
-    .default({ kind: "file" }),
+  supersedes: z
+    .string()
+    .regex(/^src_[a-f0-9]{16}$/)
+    .optional(),
+  provenance: sourceProvenanceV1Schema.default({ kind: "file" }),
 });
 
 export const sourceRecordV1Schema = z.union([
@@ -82,5 +128,8 @@ export interface SourceScanResult {
     sourceId: string;
     sha256: string;
     bytes: number;
+    sidecarPath?: string;
+    sidecarSha256?: string;
+    sidecarBytes?: number;
   }>;
 }

@@ -1,5 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -9,10 +17,62 @@ import {
   initBrain,
   loadBrainConfig,
   recoverBrain,
+  type SourceRecordV1,
   scanSources,
 } from "../src/index.js";
 
 const execFile = promisify(execFileCallback);
+
+const webArtifactDirectory = "sources/web/2026/08";
+
+function sha256(content: Uint8Array | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function registeredWebArtifact(root: string) {
+  const artifact = new TextEncoder().encode("Integrity evidence.\n");
+  const sourcePath = `${webArtifactDirectory}/integrity.txt`;
+  const sidecarPath = `${webArtifactDirectory}/.integrity.txt.web.json`;
+  const sidecar = {
+    brainWebArtifact: 1,
+    sourcePath,
+    artifactSha256: sha256(artifact),
+    artifactBytes: artifact.byteLength,
+    title: "Integrity evidence",
+    format: "text",
+    mediaType: "text/plain",
+    discovery: {
+      originalUrl: "https://example.com/integrity.txt",
+      finalUrl: "https://example.com/integrity.txt",
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What does the integrity evidence say?",
+      representation: "artifact",
+      completeness: "complete",
+    },
+  };
+  await mkdir(path.join(root, webArtifactDirectory), { recursive: true });
+  await writeFile(path.join(root, sourcePath), artifact);
+  await writeFile(
+    path.join(root, sidecarPath),
+    `${JSON.stringify(sidecar, null, 2)}\n`,
+  );
+  const source = (await scanSources(root)).added[0];
+  if (!source) throw new Error("Expected registered web artifact");
+  return { sourcePath, sidecarPath };
+}
+
+async function updateRegisteredSource(
+  root: string,
+  update: (source: SourceRecordV1) => void,
+): Promise<void> {
+  const manifestPath = path.join(root, ".brain", "source-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  update(manifest.sources[0] as SourceRecordV1);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
 
 async function git(root: string, args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd: root })).stdout.trim();
@@ -58,8 +118,23 @@ describe("loadBrainConfig", () => {
 
     expect(config.version).toBe(1);
     expect(config.brain.name).toBe("Astronomy");
+    expect(config.support).toEqual({
+      issueTrackerUrl: "https://github.com/ranjanrishikesh/second-brain/issues",
+    });
     expect(config.bootstrap.mode).toBe("catalog-map");
     expect(config).toMatchObject({
+      sources: {
+        textExtraction: {
+          maxExtractedBytes: 8_388_608,
+          maxChunks: 10_000,
+        },
+        pdf: { maxPages: 2_000, maxExtractedBytes: 104_857_600 },
+        epub: {
+          maxEntries: 1_000,
+          maxExpandedBytes: 104_857_600,
+          maxExtractedBytes: 104_857_600,
+        },
+      },
       web: { approvalTtlHours: 24 },
       graph: {
         semanticModel: {
@@ -70,9 +145,174 @@ describe("loadBrainConfig", () => {
       git: { autoPush: false },
     });
   });
+
+  test("loads independent PDF and EPUB extraction budgets", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-budget-config-"));
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Budget test",
+        "sources:",
+        "  pdf:",
+        "    maxPages: 3",
+        "    maxExtractedBytes: 4096",
+        "  epub:",
+        "    maxEntries: 7",
+        "    maxExpandedBytes: 8192",
+        "    maxExtractedBytes: 2048",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).resolves.toMatchObject({
+      sources: {
+        pdf: { maxPages: 3, maxExtractedBytes: 4_096 },
+        epub: {
+          maxEntries: 7,
+          maxExpandedBytes: 8_192,
+          maxExtractedBytes: 2_048,
+        },
+      },
+    });
+  });
+
+  test("loads a bounded text extraction policy without requiring existing configs to declare it", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-text-budget-config-"),
+    );
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Text budget test",
+        "sources:",
+        "  textExtraction:",
+        "    maxExtractedBytes: 4096",
+        "    maxChunks: 12",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).resolves.toMatchObject({
+      sources: {
+        textExtraction: {
+          maxExtractedBytes: 4_096,
+          maxChunks: 12,
+        },
+      },
+    });
+  });
+
+  test("accepts only an absolute HTTPS issue tracker URL", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-support-config-"));
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Support test",
+        "support:",
+        "  issueTrackerUrl: http://example.test/issues",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).rejects.toThrow(
+      "support.issueTrackerUrl must be an absolute HTTPS URL",
+    );
+
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Support test",
+        "support:",
+        "  issueTrackerUrl: https://example.test/brain/issues",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).resolves.toMatchObject({
+      support: { issueTrackerUrl: "https://example.test/brain/issues" },
+    });
+  });
 });
 
 describe("doctorBrain", () => {
+  test.each([
+    [
+      "WEB_ARTIFACT_SIDECAR_MISSING",
+      async (root: string, sidecarPath: string) => {
+        await rm(path.join(root, sidecarPath));
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SIDECAR_INVALID",
+      async (root: string, sidecarPath: string) => {
+        await writeFile(path.join(root, sidecarPath), "{}\n");
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SIDECAR_PATH_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          source.provenance.sidecarPath = `${webArtifactDirectory}/.different.txt.web.json`;
+        });
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SIDECAR_HASH_MISMATCH",
+      async (root: string, sidecarPath: string) => {
+        const current = await readFile(path.join(root, sidecarPath), "utf8");
+        await writeFile(path.join(root, sidecarPath), `${current}\n`);
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          source.provenance.url = "https://example.com/different.txt";
+        });
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          delete source.provenance.representation;
+        });
+      },
+    ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          delete source.provenance.representation;
+          delete source.provenance.sidecarPath;
+          delete source.provenance.sidecarSha256;
+          delete source.provenance.sidecarBytes;
+          delete source.provenance.webDiscoveries;
+        });
+      },
+    ],
+  ])("reports %s for registered artifact corruption", async (code, corrupt) => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-doctor-web-"));
+    await initBrain(root, { name: "Doctor", description: "Web integrity" });
+    const { sidecarPath } = await registeredWebArtifact(root);
+    await corrupt(root, sidecarPath);
+
+    const report = await doctorBrain(root);
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code, severity: "error" }),
+    );
+  });
+
   test("reports incomplete template onboarding as non-fatal warnings", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-doctor-template-"));
     await initBrain(root, {
@@ -167,7 +407,7 @@ describe("doctorBrain", () => {
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "OPERATIONS_INVALID" }),
-        expect.objectContaining({ code: "SOURCE_HASH_MISMATCH" }),
+        expect.objectContaining({ code: "SOURCE_SIZE_MISMATCH" }),
         expect.objectContaining({ code: "RECOVERY_REQUIRED" }),
       ]),
     );

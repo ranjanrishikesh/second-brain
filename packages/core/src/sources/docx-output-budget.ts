@@ -5,6 +5,12 @@ interface OutputBudget {
   usedBytes: number;
 }
 
+const semanticElementCostBytes = 32;
+
+export function maximumDocxLogicalBlocks(maxBytes: number): number {
+  return Math.max(1, Math.floor(maxBytes / semanticElementCostBytes));
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 function asRecord(value: unknown): UnknownRecord | undefined {
@@ -45,7 +51,7 @@ function measureTree(
   if (!element) return;
 
   // Every parsed element can produce HTML structure even when it has no text.
-  addToBudget(budget, 32);
+  addToBudget(budget, semanticElementCostBytes);
   if (element.type === "text" && typeof element.value === "string") {
     addToBudget(budget, Buffer.byteLength(element.value, "utf8"));
   } else if (element.type === "tab" || element.type === "break") {

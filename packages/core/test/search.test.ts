@@ -1,7 +1,16 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import {
   initBrain,
   rebuildSearchIndex,
@@ -10,8 +19,208 @@ import {
   searchBrain,
   type WikiPageV1,
 } from "../src/index.js";
+import { loadExtractedSourceCache } from "../src/sources/rebuild-cache.js";
+
+function sha256(content: Uint8Array | string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function registeredWebTextArtifact(
+  root: string,
+  fileName = "cache-parity.txt",
+) {
+  const directory = "sources/web/2026/08";
+  const sourcePath = `${directory}/${fileName}`;
+  const sidecarPath = `${directory}/.${fileName}.web.json`;
+  const markdown = fileName.endsWith(".md");
+  const artifact = new TextEncoder().encode("Cache parity evidence.\n");
+  const sidecar = {
+    brainWebArtifact: 1,
+    sourcePath,
+    artifactSha256: sha256(artifact),
+    artifactBytes: artifact.byteLength,
+    title: "Cache parity evidence",
+    format: markdown ? "markdown" : "text",
+    mediaType: markdown ? "text/markdown" : "text/plain",
+    discovery: {
+      originalUrl: "https://example.com/cache-parity.txt",
+      finalUrl: "https://example.com/cache-parity.txt",
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: "qry_0123456789abcdef0123456789abcdef",
+      questionHash: "c".repeat(64),
+      query: "What does the cache parity evidence say?",
+      representation: "artifact",
+      completeness: "complete",
+    },
+  };
+  await mkdir(path.join(root, directory), { recursive: true });
+  await writeFile(path.join(root, sourcePath), artifact);
+  await writeFile(
+    path.join(root, sidecarPath),
+    `${JSON.stringify(sidecar, null, 2)}\n`,
+  );
+  const source = (await scanSources(root)).added[0];
+  if (!source) throw new Error("Expected registered web artifact");
+  return { source, sidecarPath };
+}
 
 describe("brain search", () => {
+  test.each(["policy", "cache"] as const)(
+    "reads the extracted %s through its bounded opened handle",
+    async (kind) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), `brain-search-open-${kind}-`),
+      );
+      await initBrain(root, { name: "Search", description: "Opened cache" });
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.textExtraction = {
+        maxExtractedBytes: 1_024,
+        maxChunks: 10,
+      };
+      await writeFile(configPath, stringify(config));
+      await writeFile(
+        path.join(root, "sources", "opened.md"),
+        "# Opened cache\n\nStable evidence.\n",
+      );
+      const source = (await scanSources(root)).added[0];
+      if (!source) throw new Error("Expected registered source");
+      await loadExtractedSourceCache(root, source);
+
+      let replaced = false;
+      await expect(
+        loadExtractedSourceCache(root, source, {
+          async afterFileOpen(openedKind, filePath) {
+            if (openedKind !== kind) return;
+            replaced = true;
+            await rename(filePath, `${filePath}.opened`);
+            await writeFile(
+              filePath,
+              kind === "policy" ? "x".repeat(257) : "x".repeat(100_000),
+            );
+          },
+        }),
+      ).resolves.toMatchObject({ sourceId: source.id });
+      expect(replaced).toBe(true);
+    },
+  );
+
+  test.each([
+    ["cached extraction", false],
+    ["rebuilt extraction", true],
+  ])("rejects corrupt web evidence for %s", async (_label, removeCache) => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-web-cache-"));
+    await initBrain(root, { name: "Search", description: "Cache parity" });
+    const { source, sidecarPath } = await registeredWebTextArtifact(root);
+    await loadExtractedSourceCache(root, source);
+    await writeFile(path.join(root, sidecarPath), "{}\n");
+    if (removeCache) {
+      await rm(path.join(root, ".brain", "cache"), {
+        recursive: true,
+        force: true,
+      });
+    }
+
+    await expect(loadExtractedSourceCache(root, source)).rejects.toThrow(
+      /web artifact sidecar/i,
+    );
+  });
+
+  test("cannot bypass cache integrity by removing the artifact representation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-web-signal-"));
+    await initBrain(root, {
+      name: "Search",
+      description: "Artifact classification",
+    });
+    const { source, sidecarPath } = await registeredWebTextArtifact(root);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.sources[0].provenance.representation;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const tamperedSource = manifest.sources[0];
+    await writeFile(path.join(root, sidecarPath), "{}\n");
+
+    await expect(
+      loadExtractedSourceCache(root, tamperedSource),
+    ).rejects.toThrow(/web artifact|artifact provenance/i);
+    expect(source.provenance.sidecarPath).toBe(sidecarPath);
+  });
+
+  test.each(["cache-parity.txt", "original-download.md"])(
+    "cannot bypass %s artifact integrity by stripping every optional signal",
+    async (fileName) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "brain-search-web-stripped-"),
+      );
+      await initBrain(root, {
+        name: "Search",
+        description: "Stripped artifact classification",
+      });
+      await registeredWebTextArtifact(root, fileName);
+      const manifestPath = path.join(root, ".brain", "source-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const provenance = manifest.sources[0].provenance;
+      delete provenance.representation;
+      delete provenance.sidecarPath;
+      delete provenance.sidecarSha256;
+      delete provenance.sidecarBytes;
+      delete provenance.webDiscoveries;
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      await expect(
+        loadExtractedSourceCache(root, manifest.sources[0]),
+      ).rejects.toThrow(/web artifact|artifact provenance|source mismatch/i);
+    },
+  );
+
+  test("keeps a marked legacy web text capture cache-readable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-web-legacy-"));
+    await initBrain(root, { name: "Search", description: "Legacy web text" });
+    const directory = "sources/web/2026/08";
+    const sourcePath = `${directory}/legacy.md`;
+    const body = "# Legacy evidence\n\nA legacy captured fact.\n";
+    await mkdir(path.join(root, directory), { recursive: true });
+    await writeFile(
+      path.join(root, sourcePath),
+      `---\nbrainWebCapture: 1\nurl: https://example.com/legacy\nretrievedAt: 2026-08-30T00:00:00.000Z\nquery: What is the legacy fact?\ncaptureKind: page\ntitle: Legacy evidence\ncontentSha256: ${sha256(body)}\n---\n${body}`,
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected legacy web capture");
+
+    await expect(loadExtractedSourceCache(root, source)).resolves.toMatchObject(
+      { sourceId: source.id },
+    );
+  });
+
+  test("keeps a reused local source cache-readable after web discovery enrichment", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-local-web-"));
+    await initBrain(root, { name: "Search", description: "Local web reuse" });
+    await writeFile(
+      path.join(root, "sources", "local.md"),
+      "# Local\n\nLocally supplied evidence.\n",
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected local source");
+    source.provenance.webDiscoveries = [
+      {
+        originalUrl: "https://example.com/local-copy.md",
+        finalUrl: "https://example.com/local-copy.md",
+        redirectChain: [],
+        retrievedAt: "2026-08-30T00:00:00.000Z",
+        queryId: "qry_0123456789abcdef0123456789abcdef",
+        questionHash: "c".repeat(64),
+        query: "What does the local source say?",
+        representation: "artifact",
+        completeness: "complete",
+      },
+    ];
+
+    await expect(loadExtractedSourceCache(root, source)).resolves.toMatchObject(
+      { sourceId: source.id },
+    );
+  });
+
   test("finds extracted source chunks with stable locators", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-search-"));
     await initBrain(root, { name: "Search", description: "Search test" });
@@ -58,6 +267,38 @@ describe("brain search", () => {
     });
 
     expect(results[0]?.path).toBe("sources/second.md");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("invalidates an existing search index when extraction policy is lowered", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-policy-"));
+    await initBrain(root, {
+      name: "Search",
+      description: "Extraction policy revision",
+    });
+    await writeFile(
+      path.join(root, "sources", "sections.md"),
+      "# First\n\nSearchable one.\n\n# Second\n\nSearchable two.\n",
+    );
+    await scanSources(root);
+    await expect(
+      searchBrain(root, { query: "searchable", scope: "sources" }),
+    ).resolves.toHaveLength(2);
+
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.textExtraction = {
+      maxExtractedBytes: 1_000_000,
+      maxChunks: 1,
+    };
+    await writeFile(configPath, stringify(config));
+
+    await expect(rebuildSearchIndex(root)).rejects.toThrow(
+      /extracted Markdown content exceeds.*1 chunks/i,
+    );
+    await expect(
+      searchBrain(root, { query: "searchable", scope: "sources" }),
+    ).rejects.toThrow(/extracted Markdown content exceeds.*1 chunks/i);
     await rm(root, { recursive: true, force: true });
   });
 

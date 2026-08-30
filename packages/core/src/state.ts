@@ -5,17 +5,41 @@ import { z } from "zod";
 
 const sourceIdV1Schema = z.string().regex(/^src_[a-f0-9]{16}$/);
 
-export const sourceDuplicateAcknowledgementV1Schema = z.object({
+const duplicateAcknowledgementIdentityV1Shape = {
   path: z.string().trim().min(1),
   sourceId: sourceIdV1Schema,
-  // Optional only so older v1 state can be loaded and upgraded by the next
-  // source scan. Unsealed legacy acknowledgements are never trusted.
-  sha256: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
-  bytes: z.number().int().nonnegative().optional(),
-});
+};
+const duplicateSha256V1Schema = z.string().regex(/^[a-f0-9]{64}$/);
+const absentDuplicateFieldV1Schema = z.never().optional();
+
+export const sourceDuplicateAcknowledgementV1Schema = z.union([
+  z.strictObject({
+    ...duplicateAcknowledgementIdentityV1Shape,
+    sha256: duplicateSha256V1Schema,
+    bytes: z.number().int().nonnegative(),
+    sidecarPath: z.string().trim().min(1),
+    sidecarSha256: duplicateSha256V1Schema,
+    sidecarBytes: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    ...duplicateAcknowledgementIdentityV1Shape,
+    sha256: duplicateSha256V1Schema,
+    bytes: z.number().int().nonnegative(),
+    sidecarPath: absentDuplicateFieldV1Schema,
+    sidecarSha256: absentDuplicateFieldV1Schema,
+    sidecarBytes: absentDuplicateFieldV1Schema,
+  }),
+  // Older v1 state recorded only path/source identity. It remains loadable so
+  // the next source scan can replace it with a sealed acknowledgement.
+  z.strictObject({
+    ...duplicateAcknowledgementIdentityV1Shape,
+    sha256: absentDuplicateFieldV1Schema,
+    bytes: absentDuplicateFieldV1Schema,
+    sidecarPath: absentDuplicateFieldV1Schema,
+    sidecarSha256: absentDuplicateFieldV1Schema,
+    sidecarBytes: absentDuplicateFieldV1Schema,
+  }),
+]);
 
 export type SourceDuplicateAcknowledgementV1 = z.infer<
   typeof sourceDuplicateAcknowledgementV1Schema

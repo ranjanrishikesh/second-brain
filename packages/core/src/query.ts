@@ -1,19 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import { searchBrain, searchResultV1Schema } from "./search.js";
 import { scanAndRegisterSources } from "./source-transaction.js";
-import { readBrainState, syncStatusV1Schema } from "./state.js";
 import { loadExtractedSourceCache } from "./sources/rebuild-cache.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./sources/types.js";
+import { readBrainState, syncStatusV1Schema } from "./state.js";
+import type { BrainReadResultV1 } from "./status-read.js";
 import { attemptManagedSync } from "./sync.js";
 import { recoverBrain } from "./transaction.js";
 import { assertWebApproval, webApprovalV1Schema } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
-import { readReceiptV1Schema, type ReadReceiptV1 } from "./wiki/types.js";
-import type { BrainReadResultV1 } from "./status-read.js";
+import { type ReadReceiptV1, readReceiptV1Schema } from "./wiki/types.js";
 
 export const querySessionV1Schema = z.object({
   version: z.literal(1),
@@ -97,7 +97,61 @@ export async function writeQuerySession(
 ): Promise<void> {
   const filePath = sessionPath(root, session.id);
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  const temporaryPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${randomUUID()}.tmp`,
+  );
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(session, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    await rename(temporaryPath, filePath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+export interface MergeWebEvidenceOptions {
+  /** Deterministic fault injection; never use outside tests. */
+  simulateSessionWriteFailure?: boolean;
+  /** Pauses after the lock-held session read for deterministic race tests. */
+  afterSessionRead?: () => Promise<void> | void;
+}
+
+/**
+ * Merges one committed source into an open web query. The caller must retain
+ * the canonical writer lock for the duration of this read/merge/write cycle.
+ */
+export async function mergeCommittedWebEvidenceSource(
+  root: string,
+  queryId: string,
+  sourceId: string,
+  options: MergeWebEvidenceOptions = {},
+): Promise<QuerySessionV1> {
+  const session = await readQuerySession(root, queryId);
+  await options.afterSessionRead?.();
+  if (session.status !== "open" || session.currentTier !== "web") {
+    throw new Error(
+      "Web evidence can only be linked to an open query at the web tier",
+    );
+  }
+  await assertWebApproval(root, queryId);
+  const manifest = JSON.parse(
+    await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
+  ) as { sources?: Array<{ id?: string }> };
+  if (!(manifest.sources ?? []).some((source) => source.id === sourceId)) {
+    throw new Error(`Cannot link unregistered web evidence: ${sourceId}`);
+  }
+  session.webEvidenceSourceIds = [
+    ...new Set([...session.webEvidenceSourceIds, sourceId]),
+  ].sort();
+  await refreshQueryBootstrap(root, session);
+  if (options.simulateSessionWriteFailure) {
+    throw new Error("Simulated query session write failure");
+  }
+  await writeQuerySession(root, session);
+  return session;
 }
 
 export async function pendingBootstrapSourceIds(

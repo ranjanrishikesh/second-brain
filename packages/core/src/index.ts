@@ -1,5 +1,8 @@
 export { brainConfigV1Schema, loadBrainConfig } from "./config.js";
-export { defaultSemanticModelV1 } from "./config.js";
+export {
+  defaultIssueTrackerUrl,
+  defaultSemanticModelV1,
+} from "./config.js";
 export type { BrainConfigV1 } from "./config.js";
 export {
   beginSetup,
@@ -58,6 +61,27 @@ export {
   docxOutputPolicyV1Schema,
   sourceRecordV1Schema,
 } from "./sources/types.js";
+export {
+  detectWebArtifact,
+  parseWebArtifactSidecar,
+  parseWebCaptureMetadata,
+  renderWebArtifactSidecar,
+  validateWebUrlChain,
+  webArtifactSidecarPath,
+  webArtifactSidecarV1Schema,
+  webCaptureCompletenessV1Schema,
+  webCaptureMetadataV1Schema,
+  webCaptureRepresentationV1Schema,
+  webDiscoveryV1Schema,
+} from "./sources/web-evidence.js";
+export type {
+  DetectedWebArtifactV1,
+  WebArtifactSidecarV1,
+  WebCaptureCompletenessV1,
+  WebCaptureMetadataV1,
+  WebCaptureRepresentationV1,
+  WebDiscoveryV1,
+} from "./sources/web-evidence.js";
 export type {
   DocxOutputPolicyV1,
   ExtractedSourceV1,
@@ -183,15 +207,23 @@ export type {
   ConfigureSyncTargetResult,
 } from "./sync.js";
 export {
+  enrichSourceWebDiscovery,
   scanAndRegisterSources,
   supersedeRegisteredSource,
 } from "./source-transaction.js";
-export type { SourceSupersessionResult } from "./source-transaction.js";
+export type {
+  SourceSupersessionResult,
+  SourceWebDiscoveryEnrichmentResult,
+} from "./source-transaction.js";
 export { captureWebEvidence } from "./web-capture.js";
 export type {
   WebCaptureInput,
+  WebCaptureProvenanceV1,
   WebCaptureResult,
   WebCaptureTestOptions,
+  WebArtifactCaptureInputV1,
+  WebTextCaptureInputV1,
+  LegacyWebCaptureInput,
 } from "./web-capture.js";
 export { attachQueryChange, finishQuery } from "./query-finish.js";
 export type {

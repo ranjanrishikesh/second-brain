@@ -13,6 +13,7 @@ The public v1 contracts are exported as Zod schemas and checked-in JSON Schema 2
 - `SetupSessionV1`
 - `SyncTargetV1` and `SyncStatusV1`
 - `WebApprovalRequestV1` and `WebApprovalV1`
+- `WebArtifactSidecarV1`
 
 Regenerate them with `pnpm schemas:generate`; CI rejects drift.
 
@@ -54,6 +55,14 @@ Contradictory claims remain cited in a conflicts section and use `supports` or `
 `QuerySessionV1` records the exact question, tiers used, source/search results, setup and delta state, read receipts, captured web source IDs, query-bound mutation IDs, and derived sync status. Runtime query records are operational and disposable; the durable evidence and operations they bind are canonical. A query that uses raw or web evidence cannot finish without a query-bound cited mutation. An unanswered query cannot finish without a query-bound `question` page.
 
 Web approval records are runtime-scoped but bound to the active query ID, its SHA-256 normalized-question hash, and host session. A request has `requested`, `approved`, `denied`, or `expired` state and a configured expiry. `brain query expand --tier web` and `brain web capture` both reject unless the same query has an unexpired approval. Captured evidence becomes an immutable registered source under `sources/web/`; the approval itself never substitutes for evidence.
+
+The web-capture core API and `brain web capture` command do not search the web or fetch a URL. The host agent performs approved public-web retrieval and supplies the exact downloaded bytes or accessible snapshot text plus its observed URL metadata. This network boundary applies to web evidence capture, not every core workflow; initial semantic setup may download the separately pinned model described in the configuration reference.
+
+Web text evidence is a complete or partial Markdown snapshot with versioned provenance frontmatter and an exact captured-body hash. A downloadable supported artifact retains its original bytes and has a hidden tracked `.<artifact>.web.json` sidecar. The sidecar records the artifact path/hash/size, original and final public URL, ordered redirect chain, retrieval time, query identity, completeness, detected format, media type, and optional supersession. The artifact and sidecar are one immutable portable pair: missing, moved, malformed, or changed companions fail integrity checks.
+
+An oversized local file discovered during source scanning is still registered with a visible failed-extraction diagnostic, so it cannot disappear silently. An oversized downloaded web artifact is rejected by the capture boundary before an artifact, sidecar, or source record is prepared. The host may report that gap or, with owner approval, retry only after an intentional policy change.
+
+Source provenance also carries sorted structured web discoveries. Identical compatible bytes found through another approved URL reuse the source and add a discovery without changing the sealed first-capture sidecar; changed bytes create a new superseding source. Runtime download paths, credentials, cookies, and authorization data are never canonical provenance or managed commit content. Capture links the registered source to the active runtime query and refreshes bootstrap state, but durable reuse comes from the canonical source pair, manifest, cited wiki mutation, and managed operation.
 
 ## Synchronization contract
 

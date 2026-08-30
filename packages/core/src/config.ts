@@ -10,6 +10,17 @@ export const defaultSemanticModelV1 = {
     "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
 } as const;
 
+export const defaultIssueTrackerUrl =
+  "https://github.com/ranjanrishikesh/second-brain/issues";
+
+const absoluteHttpsUrlV1Schema = z
+  .string()
+  .url()
+  .startsWith(
+    "https://",
+    "support.issueTrackerUrl must be an absolute HTTPS URL",
+  );
+
 const semanticModelV1Schema = z.object({
   id: z.literal(defaultSemanticModelV1.id).default(defaultSemanticModelV1.id),
   revision: z
@@ -19,6 +30,34 @@ const semanticModelV1Schema = z.object({
     .literal(defaultSemanticModelV1.artifactSha256)
     .default(defaultSemanticModelV1.artifactSha256),
 });
+
+const defaultPdfSourcePolicyV1 = {
+  maxPages: 2_000,
+  maxExtractedBytes: 104_857_600,
+} as const;
+
+const defaultEpubSourcePolicyV1 = {
+  maxEntries: 1_000,
+  maxExpandedBytes: 104_857_600,
+  maxExtractedBytes: 104_857_600,
+} as const;
+
+export const defaultTextExtractionPolicyV1 = {
+  maxExtractedBytes: 8_388_608,
+  maxChunks: 10_000,
+} as const;
+
+// biome-ignore lint/complexity/useRegexLiterals: String.raw keeps forbidden control ranges escaped in the emitted JSON Schema.
+const sourceRootV1Pattern = new RegExp(
+  String.raw`^(?![A-Za-z]:)(?!\s*$)(?!\.{1,2}(?:/|$))[^/\\\u0000-\u001f\u007f\u2028\u2029]+(?:/(?!\.{1,2}(?:/|$))[^/\\\u0000-\u001f\u007f\u2028\u2029]+)*$`,
+);
+
+export const sourceRootV1Schema = z
+  .string()
+  .regex(
+    sourceRootV1Pattern,
+    "sources.roots entries must be canonical repository-relative paths",
+  );
 
 export const brainConfigV1Schema = z.object({
   version: z.literal(1),
@@ -30,12 +69,42 @@ export const brainConfigV1Schema = z.object({
       .default("A self-maintaining personal knowledge base."),
     language: z.string().trim().min(2).default("en"),
   }),
+  support: z
+    .object({
+      issueTrackerUrl: absoluteHttpsUrlV1Schema.default(defaultIssueTrackerUrl),
+    })
+    .default({ issueTrackerUrl: defaultIssueTrackerUrl }),
   sources: z
     .object({
-      roots: z.array(z.string().trim().min(1)).min(1).default(["sources"]),
+      roots: z.array(sourceRootV1Schema).min(1).default(["sources"]),
       maxFileBytes: z.number().int().positive().default(104_857_600),
+      textExtraction: z
+        .object({
+          maxExtractedBytes: z.number().int().positive().default(8_388_608),
+          maxChunks: z.number().int().positive().default(10_000),
+        })
+        .default(defaultTextExtractionPolicyV1),
+      pdf: z
+        .object({
+          maxPages: z.number().int().positive().default(2_000),
+          maxExtractedBytes: z.number().int().positive().default(104_857_600),
+        })
+        .default(defaultPdfSourcePolicyV1),
+      epub: z
+        .object({
+          maxEntries: z.number().int().positive().default(1_000),
+          maxExpandedBytes: z.number().int().positive().default(104_857_600),
+          maxExtractedBytes: z.number().int().positive().default(104_857_600),
+        })
+        .default(defaultEpubSourcePolicyV1),
     })
-    .default({ roots: ["sources"], maxFileBytes: 104_857_600 }),
+    .default({
+      roots: ["sources"],
+      maxFileBytes: 104_857_600,
+      textExtraction: defaultTextExtractionPolicyV1,
+      pdf: defaultPdfSourcePolicyV1,
+      epub: defaultEpubSourcePolicyV1,
+    }),
   bootstrap: z
     .object({
       mode: z.literal("catalog-map").default("catalog-map"),

@@ -1,14 +1,23 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { PDFDocument } from "pdf-lib";
 import { describe, expect, test } from "vitest";
 import {
   applyChangeSetTransaction,
   attachQueryChange,
   beginQuery,
+  type ChangeSetV1,
   calculateCatalogRevision,
   captureWebEvidence,
   expandQuery,
@@ -16,14 +25,18 @@ import {
   initBrain,
   loadWikiPages,
   nextBootstrapBatch,
-  readQuerySession,
+  planReconciliation,
   readBrainState,
+  readQuerySession,
+  recoverBrain,
   renderWikiPage,
   requestWebApproval,
   resolveWebApproval,
+  scanAndRegisterSources,
   scanSources,
-  writeBrainState,
   type WikiPageV1,
+  writeBrainState,
+  writeQuerySession,
 } from "../src/index.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
 
@@ -42,23 +55,6 @@ async function approveWebForQuery(
     approved: true,
     decidedBy: "query-test-owner",
   });
-}
-
-async function findFileNamed(
-  directory: string,
-  fileName: string,
-): Promise<string | undefined> {
-  const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries) {
-    const absolutePath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      const nested = await findFileNamed(absolutePath, fileName);
-      if (nested) return nested;
-    } else if (entry.isFile() && entry.name === fileName) {
-      return absolutePath;
-    }
-  }
-  return undefined;
 }
 
 async function queryBrain(): Promise<string> {
@@ -118,6 +114,147 @@ async function queryBrain(): Promise<string> {
   await execFile("git", ["add", "."], { cwd: root });
   await execFile("git", ["commit", "-m", "initial brain"], { cwd: root });
   return root;
+}
+
+async function attachWebGap(
+  root: string,
+  options: {
+    imageOnly: boolean;
+    discoveryQueryId?: string;
+    operationId: string;
+    sourceInlineCitation?: boolean;
+  },
+) {
+  const session = await beginQuery(root, "What did the web report conclude?");
+  await expandQuery(root, session.id, {
+    tier: "sources",
+    reason: "The local evidence does not contain the web report.",
+  });
+  await approveWebForQuery(root, session.id);
+  await expandQuery(root, session.id, {
+    tier: "web",
+    reason: "The raw sources do not contain the web report.",
+  });
+  const directory = "sources/web/2026/08";
+  const fileName = options.imageOnly ? "image-only.pdf" : "current-query.txt";
+  const sourcePath = `${directory}/${fileName}`;
+  const sidecarPath = `${directory}/.${fileName}.web.json`;
+  const bytes = options.imageOnly
+    ? await PDFDocument.create().then(async (document) => {
+        document.addPage();
+        return await document.save();
+      })
+    : new TextEncoder().encode("The current-query report found evidence.\n");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const sidecar = {
+    brainWebArtifact: 1,
+    sourcePath,
+    artifactSha256: digest,
+    artifactBytes: bytes.byteLength,
+    title: "Web report",
+    format: options.imageOnly ? "pdf" : "text",
+    mediaType: options.imageOnly ? "application/pdf" : "text/plain",
+    discovery: {
+      originalUrl: `https://example.com/${fileName}`,
+      finalUrl: `https://example.com/${fileName}`,
+      redirectChain: [],
+      retrievedAt: "2026-08-30T00:00:00.000Z",
+      queryId: options.discoveryQueryId ?? session.id,
+      questionHash: createHash("sha256").update(session.question).digest("hex"),
+      query: session.question,
+      representation: "artifact",
+      completeness: "complete",
+    },
+  };
+  await mkdir(path.join(root, directory), { recursive: true });
+  await writeFile(path.join(root, sourcePath), bytes);
+  await writeFile(
+    path.join(root, sidecarPath),
+    `${JSON.stringify(sidecar, null, 2)}\n`,
+  );
+  const source = (await scanAndRegisterSources(root)).added[0];
+  if (!source) throw new Error("Expected registered web artifact");
+  const currentSession = await readQuerySession(root, session.id);
+  currentSession.webEvidenceSourceIds.push(source.id);
+  await writeQuerySession(root, currentSession);
+  const pages = await loadWikiPages(root);
+  const gap: WikiPageV1 = {
+    schema: 1,
+    id: `pg_${options.operationId.replace(/^op_/, "")}`,
+    path: `wiki/pages/questions/${options.operationId.replaceAll("_", "-")}.md`,
+    title: `Unresolved report ${options.operationId}`,
+    type: "question",
+    status: "active",
+    summary: "The captured web evidence does not yet support an answer.",
+    aliases: [],
+    tags: ["evidence-gap"],
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    revision: "pending",
+    sources: [{ id: source.id, locators: [] }],
+    relations: [],
+    body: "# Unresolved report\n\nThe captured evidence cannot support a factual claim yet.",
+  };
+  const sourcePage: WikiPageV1 | undefined = options.imageOnly
+    ? undefined
+    : {
+        schema: 1,
+        id: `pg_${options.operationId.replace(/^op_/, "")}_source`,
+        path: `wiki/pages/sources/${options.operationId.replaceAll("_", "-")}.md`,
+        title: `Web report source ${options.operationId}`,
+        type: "source",
+        status: "active",
+        summary: "A catalog page for the captured web report.",
+        aliases: [],
+        tags: ["web-evidence"],
+        createdAt: "2026-08-30T00:00:00.000Z",
+        updatedAt: "2026-08-30T00:00:00.000Z",
+        revision: "pending",
+        sources: [
+          {
+            id: source.id,
+            locators:
+              options.sourceInlineCitation === false ? [] : ["lines=1-1"],
+          },
+        ],
+        relations: [],
+        body:
+          options.sourceInlineCitation === false
+            ? "# Web report source\n\nThe evidence is listed for follow-up."
+            : `# Web report source\n\nThe report found evidence. [@${source.id}#lines=1-1]`,
+      };
+  const changeSet: ChangeSetV1 = {
+    version: 1,
+    operationId: options.operationId,
+    catalogRevision: calculateCatalogRevision(pages),
+    reason: "Persist the web evidence gap",
+    pages: [gap, ...(sourcePage ? [sourcePage] : [])].map((page) => ({
+      action: "create" as const,
+      page,
+    })),
+    reconciliation: { candidatePageIds: [], reviewed: [] },
+  };
+  const plan = await planReconciliation(root, changeSet, runtimeServices);
+  changeSet.reconciliation = {
+    plan,
+    candidatePageIds: plan.candidates.map((candidate) => candidate.pageId),
+    readReceipts: plan.candidates.map((candidate) => ({
+      pageId: candidate.pageId,
+      revision: candidate.revision,
+      readAt: "2026-08-30T00:00:00.000Z",
+    })),
+    reviewed: plan.candidates.map((candidate) => ({
+      pageId: candidate.pageId,
+      decision: "no-change" as const,
+      reason: "The existing page does not resolve this evidence gap.",
+    })),
+  };
+  const mutation = await applyChangeSetTransaction(root, changeSet, {
+    queryId: session.id,
+    runtimeServices,
+  });
+  await attachQueryChange(root, session.id, mutation.operationId);
+  return { session, source, sidecarPath };
 }
 
 describe("query lifecycle", () => {
@@ -412,6 +549,10 @@ describe("query lifecycle", () => {
       ).then((result) => result.stdout.trim()),
     ).toBe("");
 
+    expect(
+      (await readQuerySession(root, session.id)).webEvidenceSourceIds,
+    ).toEqual([]);
+    await expect(recoverBrain(root)).resolves.toBe("committed");
     const retry = await captureWebEvidence(root, session.id, input);
     expect(retry.created).toBe(false);
     expect(retry.session.webEvidenceSourceIds).toContain(source.id);
@@ -421,7 +562,7 @@ describe("query lifecycle", () => {
     });
   });
 
-  test("does not delete prepared web evidence while another canonical writer is active", async () => {
+  test("does not prepare or link web evidence while another canonical writer needs recovery", async () => {
     const root = await queryBrain();
     const session = await beginQuery(
       root,
@@ -442,46 +583,33 @@ describe("query lifecycle", () => {
       captureKind: "page" as const,
       content: "The concurrent survey found a candidate.",
     };
-    const digest = createHash("sha256")
-      .update(`${input.url}\0${input.content}`)
-      .digest("hex")
-      .slice(0, 12);
-    const evidenceName = `concurrent-capture-${digest}.md`;
     await writeFile(
       path.join(root, ".brain", "runtime", "writer.lock"),
       `${JSON.stringify({
-        pid: process.pid,
+        pid: 2_147_483_647,
         operationId: "op_concurrent_capture",
         recoverable: false,
       })}\n`,
     );
 
     await expect(captureWebEvidence(root, session.id, input)).rejects.toThrow(
-      /exist|lock|writer/i,
+      /recover|stale|writer/i,
     );
-
-    const evidencePath = await findFileNamed(
-      path.join(root, "sources", "web"),
-      evidenceName,
-    );
-    if (!evidencePath) throw new Error("Expected prepared web evidence");
-    const preparedEvidence = await readFile(evidencePath, "utf8");
-    expect(preparedEvidence).toContain("concurrent survey found a candidate");
+    await expect(
+      readdir(path.join(root, "sources", "web")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      (await readQuerySession(root, session.id)).webEvidenceSourceIds,
+    ).toEqual([]);
 
     await rm(path.join(root, ".brain", "runtime", "writer.lock"));
-    await writeFile(evidencePath, "mismatched prepared bytes\n");
-    await expect(captureWebEvidence(root, session.id, input)).rejects.toThrow(
-      /prepared web evidence bytes do not match/i,
-    );
-    await writeFile(evidencePath, preparedEvidence);
-    await new Promise((resolve) => setTimeout(resolve, 5));
     const resumed = await captureWebEvidence(root, session.id, input);
 
     expect(resumed.created).toBe(true);
     expect(resumed.session.webEvidenceSourceIds).toContain(resumed.source.id);
-    expect(resumed.source.path).toBe(
-      path.relative(root, evidencePath).split(path.sep).join("/"),
-    );
+    expect(
+      await readFile(path.join(root, resumed.source.path), "utf8"),
+    ).toContain("concurrent survey found a candidate");
   });
 
   test("finishes a wiki-only answer with a log-only knowledge operation", async () => {
@@ -509,6 +637,92 @@ describe("query lifecycle", () => {
       kind: "query",
       status: "completed",
       tiersUsed: ["wiki"],
+    });
+  });
+
+  test("does not let an extraction-required artifact satisfy an answered web query", async () => {
+    const root = await queryBrain();
+    const { session, source } = await attachWebGap(root, {
+      imageOnly: true,
+      operationId: "op_web_image_gap",
+    });
+    expect(source.extractionStatus).toBe("extraction-required");
+
+    await expect(
+      finishQuery(root, session.id, {
+        outcome: "answered",
+        answerSummary: "The image-only PDF answered the question.",
+      }),
+    ).rejects.toThrow(/ready|usable|web evidence/i);
+  });
+
+  test("does not let evidence discovered for another query satisfy a web answer", async () => {
+    const root = await queryBrain();
+    const { session, source } = await attachWebGap(root, {
+      imageOnly: false,
+      discoveryQueryId: "qry_0123456789abcdef0123456789abcdef",
+      operationId: "op_web_wrong_query",
+    });
+    expect(source.extractionStatus).toBe("ready");
+
+    await expect(
+      finishQuery(root, session.id, {
+        outcome: "answered",
+        answerSummary: "Evidence from another query answered this one.",
+      }),
+    ).rejects.toThrow(/current query|web evidence/i);
+  });
+
+  test("rejects artifact corruption introduced after the wiki mutation", async () => {
+    const root = await queryBrain();
+    const { session, sidecarPath } = await attachWebGap(root, {
+      imageOnly: false,
+      operationId: "op_web_corrupt_finish",
+    });
+    await writeFile(path.join(root, sidecarPath), "{}\n");
+
+    await expect(
+      finishQuery(root, session.id, {
+        outcome: "answered",
+        answerSummary: "The corrupted artifact answered the question.",
+      }),
+    ).rejects.toThrow(/web artifact sidecar|integrity/i);
+  });
+
+  test.each(["answered", "partial"] as const)(
+    "does not let a locator-free metadata reference satisfy a %s web query",
+    async (outcome) => {
+      const root = await queryBrain();
+      const { session } = await attachWebGap(root, {
+        imageOnly: false,
+        operationId: `op_web_${outcome}_metadata_only`,
+        sourceInlineCitation: false,
+      });
+
+      await expect(
+        finishQuery(root, session.id, {
+          outcome,
+          answerSummary: "The metadata-only reference answered the question.",
+        }),
+      ).rejects.toThrow(/inline citation|cite.*web evidence/i);
+    },
+  );
+
+  test("allows an unanswered web query with a durable evidence gap", async () => {
+    const root = await queryBrain();
+    const { session } = await attachWebGap(root, {
+      imageOnly: true,
+      operationId: "op_web_unanswered_gap",
+    });
+
+    const finished = await finishQuery(root, session.id, {
+      outcome: "unanswered",
+      answerSummary: "The captured image-only PDF requires extraction.",
+    });
+
+    expect(finished.session).toMatchObject({
+      status: "finished",
+      outcome: "unanswered",
     });
   });
 

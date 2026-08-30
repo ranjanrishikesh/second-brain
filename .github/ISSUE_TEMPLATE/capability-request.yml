@@ -1,0 +1,50 @@
+name: Capability request
+description: Suggest a missing capability for the second-brain template
+title: "[Capability]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the template. Requests are considered; no release or delivery date is promised.
+  - type: dropdown
+    id: capability-area
+    attributes:
+      label: Capability area
+      options:
+        - Source format or extraction
+        - Knowledge graph or reconciliation
+        - Agent workflow
+        - Search or retrieval
+        - Synchronization or portability
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What are you trying to accomplish?
+      description: Describe the outcome without including private brain content.
+    validations:
+      required: true
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: What happens with the template today?
+      description: Include non-sensitive diagnostics or an exact public reproduction when available.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What behavior would help?
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private source content, credentials, and personal paths
+          required: true

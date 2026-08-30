@@ -2,19 +2,22 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import {
   access,
   chmod,
+  cp,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import {
   applyChangeSetTransaction,
+  type ChangeSetV1,
   calculateCatalogRevision,
   calculatePageRevision,
   doctorBrain,
@@ -22,9 +25,9 @@ import {
   loadWikiPages,
   recoverBrain,
   renderWikiPage,
-  type ChangeSetV1,
   type WikiPageV1,
 } from "../src/index.js";
+import { runCanonicalWrite } from "../src/transaction.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -142,6 +145,345 @@ function createSourcePageChangeSet(
 }
 
 describe("applyChangeSetTransaction", () => {
+  test("an opted-in canonical writer waits for a live owner and cleans up ownership", async () => {
+    const root = await initializedGitBrain();
+    let releaseFirst!: () => void;
+    const firstPaused = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstReachedBarrier!: () => void;
+    const barrierReached = new Promise<void>((resolve) => {
+      firstReachedBarrier = resolve;
+    });
+    const order: string[] = [];
+
+    const first = runCanonicalWrite(
+      root,
+      {
+        operationId: "op_wait_owner_first",
+        commitMessage: "test first writer",
+        testOptions: {
+          afterMutationBeforeSeal: async () => {
+            firstReachedBarrier();
+            await firstPaused;
+          },
+        },
+      },
+      async () => {
+        order.push("first");
+        return { value: "first", stagePaths: [] };
+      },
+    );
+    await barrierReached;
+
+    const second = runCanonicalWrite(
+      root,
+      {
+        operationId: "op_wait_owner_second",
+        commitMessage: "test second writer",
+        waitForWriter: { timeoutMs: 1_000, pollIntervalMs: 5 },
+      },
+      async () => {
+        order.push("second");
+        return { value: "second", stagePaths: [] };
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(order).toEqual(["first"]);
+
+    releaseFirst();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(order).toEqual(["first", "second"]);
+    await expect(
+      access(path.join(root, ".brain", "runtime", "writer.lock")),
+    ).rejects.toThrow();
+    await expect(
+      access(path.join(root, ".brain", "runtime", "transaction.json")),
+    ).rejects.toThrow();
+  });
+
+  test.each([
+    ["stale", { pid: 2_147_483_647, operationId: "op_stale_writer" }],
+    [
+      "recoverable",
+      {
+        pid: process.pid,
+        operationId: "op_recoverable_writer",
+        recoverable: true,
+      },
+    ],
+    ["malformed", { pid: "not-a-pid", operationId: "op_bad_writer" }],
+  ])(
+    "an opted-in canonical writer refuses a %s owner",
+    async (_kind, marker) => {
+      const root = await initializedGitBrain();
+      const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+      await writeFile(lockPath, `${JSON.stringify(marker)}\n`);
+
+      await expect(
+        runCanonicalWrite(
+          root,
+          {
+            operationId: "op_wait_refusal",
+            commitMessage: "must refuse",
+            waitForWriter: { timeoutMs: 100, pollIntervalMs: 5 },
+          },
+          async () => ({ value: undefined, stagePaths: [] }),
+        ),
+      ).rejects.toThrow(/recover/i);
+      await expect(readFile(lockPath, "utf8")).resolves.toContain(
+        String(marker.operationId),
+      );
+    },
+  );
+
+  test("an opted-in canonical writer refuses journal-only recovery state", async () => {
+    const root = await initializedGitBrain();
+    const journalPath = path.join(
+      root,
+      ".brain",
+      "runtime",
+      "transaction.json",
+    );
+    await writeFile(journalPath, "{}\n");
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_wait_journal_only",
+          commitMessage: "must refuse",
+          waitForWriter: { timeoutMs: 100, pollIntervalMs: 5 },
+        },
+        async () => ({ value: undefined, stagePaths: [] }),
+      ),
+    ).rejects.toThrow(/recover/i);
+    await expect(readFile(journalPath, "utf8")).resolves.toBe("{}\n");
+  });
+
+  test("an opted-in canonical writer times out without stealing a live lock", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ pid: process.pid, operationId: "op_live_timeout" })}\n`,
+    );
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_wait_timeout",
+          commitMessage: "must time out",
+          waitForWriter: { timeoutMs: 25, pollIntervalMs: 5 },
+        },
+        async () => ({ value: undefined, stagePaths: [] }),
+      ),
+    ).rejects.toThrow(/timed out.*canonical writer/i);
+    await expect(readFile(lockPath, "utf8")).resolves.toContain(
+      "op_live_timeout",
+    );
+  });
+
+  test("an opted-in writer loops when an exited owner removes its lock after inspection", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ pid: 2_147_483_647, operationId: "op_owner_exited" })}\n`,
+    );
+    const options = {
+      operationId: "op_owner_exit_waiter",
+      commitMessage: "continue after owner cleanup",
+      waitForWriter: { timeoutMs: 100, pollIntervalMs: 5 },
+      testOptions: {
+        afterWriterOwnerRead: async () => {
+          await rm(lockPath);
+        },
+      },
+    } as unknown as Parameters<typeof runCanonicalWrite<string>>[1];
+
+    await expect(
+      runCanonicalWrite(root, options, async () => ({
+        value: "acquired",
+        stagePaths: [],
+      })),
+    ).resolves.toMatchObject({ value: "acquired" });
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  test("re-evaluates a malformed writer marker replaced after its raw snapshot", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(lockPath, "not-json\n");
+    let snapshots = 0;
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_malformed_replacement_waiter",
+          commitMessage: "continue after malformed owner replacement",
+          waitForWriter: { timeoutMs: 250, pollIntervalMs: 5 },
+          testOptions: {
+            afterWriterOwnerRead: async () => {
+              snapshots += 1;
+              if (snapshots === 1) {
+                await writeFile(
+                  lockPath,
+                  `${JSON.stringify({ pid: process.pid, operationId: "op_replacement_owner" })}\n`,
+                );
+              } else {
+                await rm(lockPath);
+              }
+            },
+          },
+        },
+        async () => ({ value: "acquired", stagePaths: [] }),
+      ),
+    ).resolves.toMatchObject({ value: "acquired" });
+    expect(snapshots).toBeGreaterThanOrEqual(2);
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  test("re-evaluates a recoverable writer marker that disappears after its raw snapshot", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        operationId: "op_recoverable_disappeared",
+        recoverable: true,
+      })}\n`,
+    );
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_recoverable_disappearance_waiter",
+          commitMessage: "continue after recoverable owner cleanup",
+          waitForWriter: { timeoutMs: 100, pollIntervalMs: 5 },
+          testOptions: {
+            afterWriterOwnerRead: async () => {
+              await rm(lockPath);
+            },
+          },
+        },
+        async () => ({ value: "acquired", stagePaths: [] }),
+      ),
+    ).resolves.toMatchObject({ value: "acquired" });
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  test("re-evaluates a changed live marker before reporting writer timeout", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ pid: process.pid, operationId: "op_live_replaced" })}\n`,
+    );
+    let snapshots = 0;
+
+    await expect(
+      runCanonicalWrite(
+        root,
+        {
+          operationId: "op_timeout_replacement_waiter",
+          commitMessage: "continue after live owner replacement",
+          waitForWriter: { timeoutMs: 5, pollIntervalMs: 1 },
+          testOptions: {
+            afterWriterOwnerRead: async () => {
+              snapshots += 1;
+              if (snapshots === 1) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                await writeFile(
+                  lockPath,
+                  `${JSON.stringify({ pid: process.pid, operationId: "op_new_live_owner" })}\n`,
+                );
+              } else {
+                await rm(lockPath);
+              }
+            },
+          },
+        },
+        async () => ({ value: "acquired", stagePaths: [] }),
+      ),
+    ).resolves.toMatchObject({ value: "acquired" });
+    expect(snapshots).toBeGreaterThanOrEqual(2);
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
+  test("preserves committed Git recovery state when a post-commit action fails", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const brainPath = path.join(root, "BRAIN.md");
+    const updated = `${await readFile(brainPath, "utf8")}\nCommitted callback seam.\n`;
+    const options = {
+      operationId: "op_post_commit_git",
+      commitMessage: "test post commit failure",
+      managedRootPaths: ["BRAIN.md"],
+      afterCanonicalCommit: async () => {
+        expect(await readFile(brainPath, "utf8")).toBe(updated);
+        throw new Error("post-commit callback failed");
+      },
+    } as unknown as Parameters<typeof runCanonicalWrite<string>>[1];
+
+    await expect(
+      runCanonicalWrite(root, options, async (writer) => {
+        await writer.writeText("BRAIN.md", updated);
+        return { value: "committed", stagePaths: ["BRAIN.md"] };
+      }),
+    ).rejects.toThrow(/post-commit callback failed/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).not.toBe(beforeHead);
+    await expect(
+      readFile(
+        path.join(root, ".brain", "runtime", "transaction.json"),
+        "utf8",
+      ),
+    ).resolves.toContain('"phase": "committed"');
+    await expect(
+      readFile(path.join(root, ".brain", "runtime", "writer.lock"), "utf8"),
+    ).resolves.toContain('"recoverable":true');
+    await expect(recoverBrain(root)).resolves.toBe("committed");
+    await expect(readFile(brainPath, "utf8")).resolves.toBe(updated);
+  });
+
+  test("keeps a non-Git canonical mutation when a post-commit action fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-post-commit-"));
+    await initBrain(root, {
+      name: "Post Commit",
+      description: "Non-Git callback test",
+    });
+    const brainPath = path.join(root, "BRAIN.md");
+    const updated = `${await readFile(brainPath, "utf8")}\nCommitted without Git.\n`;
+    const options = {
+      operationId: "op_post_commit_no_git",
+      commitMessage: "test post commit failure",
+      managedRootPaths: ["BRAIN.md"],
+      afterCanonicalCommit: async () => {
+        expect(await readFile(brainPath, "utf8")).toBe(updated);
+        throw new Error("non-git post-commit callback failed");
+      },
+    } as unknown as Parameters<typeof runCanonicalWrite<string>>[1];
+
+    await expect(
+      runCanonicalWrite(root, options, async (writer) => {
+        await writer.writeText("BRAIN.md", updated);
+        return { value: "committed", stagePaths: ["BRAIN.md"] };
+      }),
+    ).rejects.toThrow(/non-git post-commit callback failed/i);
+    await expect(readFile(brainPath, "utf8")).resolves.toBe(updated);
+    await expect(
+      access(path.join(root, ".brain", "runtime", "transaction.json")),
+    ).rejects.toThrow();
+    await expect(
+      access(path.join(root, ".brain", "runtime", "writer.lock")),
+    ).rejects.toThrow();
+  });
+
   test("does not recover over a live canonical writer", async () => {
     const root = await initializedGitBrain();
     await writeFile(
@@ -327,6 +669,105 @@ describe("applyChangeSetTransaction", () => {
         options,
       ),
     ).rejects.toThrow(/regular|symlink|unvalidated/i);
+  });
+
+  test("rejects a same-content wiki reached through a swapped ancestor symlink without touching outside files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-wiki-ancestor-"));
+    await initBrain(root, {
+      name: "Transactions",
+      description: "Wiki ancestor containment test",
+    });
+    const outside = await mkdtemp(
+      path.join(tmpdir(), "brain-wiki-ancestor-outside-"),
+    );
+    const outsideWiki = path.join(outside, "wiki");
+    const canonicalPaths = [
+      ".brain/state.json",
+      ".brain/operations.jsonl",
+      "wiki/log.md",
+    ];
+    const before = await Promise.all(
+      canonicalPaths.map((relativePath) =>
+        readFile(path.join(root, relativePath), "utf8"),
+      ),
+    );
+    let outsideLog = "";
+    let outsidePage = "";
+    const options = {
+      afterMutation: async () => {
+        await cp(path.join(root, "wiki"), outsideWiki, { recursive: true });
+        outsideLog = await readFile(path.join(outsideWiki, "log.md"), "utf8");
+        outsidePage = await readFile(
+          path.join(outsideWiki, "pages", "sources", "orbits.md"),
+          "utf8",
+        );
+        await rename(path.join(root, "wiki"), path.join(root, "wiki-original"));
+        await symlink(outsideWiki, path.join(root, "wiki"));
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_wiki_ancestor_symlink"),
+        options,
+      ),
+    ).rejects.toThrow(/symbolic link|outside.*brain root|unvalidated|changed/i);
+
+    expect(
+      await Promise.all(
+        canonicalPaths.map((relativePath) =>
+          readFile(path.join(root, relativePath), "utf8"),
+        ),
+      ),
+    ).toEqual(before);
+    expect(await readFile(path.join(outsideWiki, "log.md"), "utf8")).toBe(
+      outsideLog,
+    );
+    expect(
+      await readFile(
+        path.join(outsideWiki, "pages", "sources", "orbits.md"),
+        "utf8",
+      ),
+    ).toBe(outsidePage);
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
+    await expect(
+      readFile(path.join(root, ".brain", "runtime", "transaction.json")),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a same-byte managed-file inode replacement while preserving HEAD and unrelated work", async () => {
+    const root = await initializedGitBrain();
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const logPath = path.join(root, "wiki", "log.md");
+    const beforeLog = await readFile(logPath, "utf8");
+    const displacedPath = path.join(root, "generated-log-original.md");
+    const options = {
+      afterMutation: async () => {
+        const generatedLog = await readFile(logPath, "utf8");
+        await rename(logPath, displacedPath);
+        await writeFile(logPath, generatedLog);
+      },
+    } as unknown as Parameters<typeof applyChangeSetTransaction>[2];
+
+    await expect(
+      applyChangeSetTransaction(
+        root,
+        createSourcePageChangeSet("op_managed_inode_swap"),
+        options,
+      ),
+    ).rejects.toThrow(/changed|identity|unvalidated/i);
+
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+    expect(await readFile(logPath, "utf8")).toBe(beforeLog);
+    await expect(readFile(displacedPath, "utf8")).resolves.toContain(
+      "op_managed_inode_swap",
+    );
+    await expect(
+      readFile(path.join(root, "wiki", "pages", "sources", "orbits.md")),
+    ).rejects.toThrow();
   });
 
   test("rejects a generated wiki log overwrite before initial transaction sealing", async () => {

@@ -8,6 +8,7 @@ import { brainConfigV1Schema } from "./config.js";
 import { querySessionV1Schema } from "./query.js";
 import { setupSessionV1Schema } from "./setup.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
+import { webArtifactSidecarV1Schema } from "./sources/web-evidence.js";
 import {
   webApprovalRequestV1Schema,
   webApprovalV1Schema,
@@ -50,6 +51,7 @@ export type PublicSchemaNameV1 =
   | "SyncTargetV1"
   | "WebApprovalRequestV1"
   | "WebApprovalV1"
+  | "WebArtifactSidecarV1"
   | "WikiPageV1";
 
 function jsonSchema(
@@ -102,5 +104,9 @@ export const brainJsonSchemasV1: Record<
     webApprovalRequestV1Schema,
   ),
   WebApprovalV1: jsonSchema("WebApprovalV1", webApprovalV1Schema),
+  WebArtifactSidecarV1: jsonSchema(
+    "WebArtifactSidecarV1",
+    webArtifactSidecarV1Schema,
+  ),
   WikiPageV1: jsonSchema("WikiPageV1", wikiPageV1Schema),
 };

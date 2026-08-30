@@ -15,6 +15,7 @@ import {
   finishQuery,
   formatSyncWarning,
   initBrain,
+  loadBrainConfig,
   nextBootstrapBatch,
   nextSetupBatch,
   planReconciliation,
@@ -35,9 +36,12 @@ import {
   type BrainRuntimeServices,
   type BrainCharterV1,
   type SearchScope,
+  type WebCaptureResult,
 } from "@second-brain/core";
 import { Command, CommanderError, Option } from "commander";
-import { readFile } from "node:fs/promises";
+import { type BigIntStats, constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
+import path from "node:path";
 
 export interface CliOutput {
   write(value: string): void;
@@ -45,6 +49,114 @@ export interface CliOutput {
 
 export interface CliRuntimeOptions {
   runtimeServices?: BrainRuntimeServices;
+  /** Deterministic file-read observations; never use outside tests. */
+  webInputFileTestOptions?: WebInputFileTestOptions;
+}
+
+export interface WebInputFileObservation {
+  filePath: string;
+  size: number;
+}
+
+export interface WebInputChunkObservation {
+  filePath: string;
+  totalBytes: number;
+}
+
+export interface WebInputFileTestOptions {
+  afterInitialStat?: (
+    observation: WebInputFileObservation,
+  ) => Promise<void> | void;
+  afterChunkRead?: (
+    observation: WebInputChunkObservation,
+  ) => Promise<void> | void;
+  beforeFinalStat?: (
+    observation: WebInputFileObservation,
+  ) => Promise<void> | void;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function sameOpenedFileVersion(
+  initial: BigIntStats,
+  final: BigIntStats,
+): boolean {
+  return (
+    initial.dev === final.dev &&
+    initial.ino === final.ino &&
+    initial.size === final.size &&
+    initial.mtimeNs === final.mtimeNs &&
+    initial.ctimeNs === final.ctimeNs
+  );
+}
+
+async function readBoundedFile(
+  filePath: string,
+  maxBytes: number,
+  testOptions: WebInputFileTestOptions = {},
+): Promise<Buffer> {
+  const file = await open(filePath, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const initial = await file.stat({ bigint: true });
+    if (!initial.isFile()) {
+      throw new Error(`Web capture input must be a regular file: ${filePath}`);
+    }
+    await testOptions.afterInitialStat?.({
+      filePath,
+      size: Number(initial.size),
+    });
+    if (initial.size > BigInt(maxBytes)) {
+      throw new Error(
+        `Web capture input exceeds configured maximum of ${maxBytes} bytes`,
+      );
+    }
+
+    const content = Buffer.alloc(Number(initial.size));
+    let totalBytes = 0;
+    while (totalBytes < content.byteLength) {
+      const length = Math.min(64 * 1_024, content.byteLength - totalBytes);
+      const read = await file.read(content, totalBytes, length, totalBytes);
+      if (read.bytesRead === 0) break;
+      totalBytes += read.bytesRead;
+      await testOptions.afterChunkRead?.({ filePath, totalBytes });
+    }
+    const growthProbe = Buffer.alloc(1);
+    const extra = await file.read(growthProbe, 0, 1, totalBytes);
+    await testOptions.beforeFinalStat?.({
+      filePath,
+      size: Number(initial.size),
+    });
+    const final = await file.stat({ bigint: true });
+    if (
+      BigInt(totalBytes) !== initial.size ||
+      extra.bytesRead !== 0 ||
+      !sameOpenedFileVersion(initial, final)
+    ) {
+      throw new Error(
+        `Web capture input changed while it was being read: ${filePath}`,
+      );
+    }
+    return content;
+  } finally {
+    await file.close();
+  }
+}
+
+async function readUtf8File(
+  filePath: string,
+  maxBytes: number,
+  testOptions?: WebInputFileTestOptions,
+): Promise<string> {
+  const bytes = await readBoundedFile(filePath, maxBytes, testOptions);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`Content file must contain valid UTF-8: ${filePath}`, {
+      cause: error,
+    });
+  }
 }
 
 export async function runCli(
@@ -473,6 +585,17 @@ export async function runCli(
     .requiredOption("--kind <kind>")
     .option("--content <content>")
     .option("--content-file <path>")
+    .option("--artifact-file <path>")
+    .option("--file-name <name>")
+    .option("--media-type <type>")
+    .option("--final-url <url>")
+    .option("--completeness <completeness>")
+    .option(
+      "--redirect-url <url>",
+      "redirect URL in observed order",
+      collectOption,
+      [],
+    )
     .option("--retrieved-at <timestamp>")
     .option("--root <path>", "brain repository root", process.cwd())
     .option("--json", "emit machine-readable JSON")
@@ -482,33 +605,138 @@ export async function runCli(
         options: {
           url: string;
           title: string;
-          kind: "page" | "snippet";
+          kind: "page" | "snippet" | "artifact";
           content?: string;
           contentFile?: string;
+          artifactFile?: string;
+          fileName?: string;
+          mediaType?: string;
+          finalUrl?: string;
+          completeness?: "complete" | "partial";
+          redirectUrl: string[];
           retrievedAt?: string;
           root: string;
+          json?: boolean;
         },
       ) => {
-        if (options.kind !== "page" && options.kind !== "snippet") {
+        if (
+          options.kind !== "page" &&
+          options.kind !== "snippet" &&
+          options.kind !== "artifact"
+        ) {
           throw new Error(`Unknown web capture kind: ${options.kind}`);
         }
-        if (Boolean(options.content) === Boolean(options.contentFile)) {
-          throw new Error("Provide exactly one of --content or --content-file");
+        const hasContent = options.content !== undefined;
+        const hasContentFile = options.contentFile !== undefined;
+        const hasArtifactFile = options.artifactFile !== undefined;
+        if (options.kind === "artifact") {
+          if (!hasArtifactFile || hasContent || hasContentFile) {
+            throw new Error(
+              "Artifact capture requires --artifact-file and no text input",
+            );
+          }
+          if (options.completeness !== undefined) {
+            throw new Error("Artifact capture does not accept --completeness");
+          }
+        } else {
+          if (
+            hasArtifactFile ||
+            options.fileName !== undefined ||
+            options.mediaType !== undefined ||
+            hasContent === hasContentFile
+          ) {
+            throw new Error(
+              "Text capture requires exactly one of --content or --content-file",
+            );
+          }
+          if (
+            options.completeness !== undefined &&
+            options.completeness !== "complete" &&
+            options.completeness !== "partial"
+          ) {
+            throw new Error(
+              `Unknown web capture completeness: ${options.completeness}`,
+            );
+          }
+          if (
+            options.kind === "snippet" &&
+            options.completeness === "complete"
+          ) {
+            throw new Error("A snippet capture must be partial");
+          }
         }
-        const content = options.contentFile
-          ? await readFile(options.contentFile, "utf8")
-          : (options.content ?? "");
-        json(
-          await captureWebEvidence(options.root, queryId, {
-            url: options.url,
-            title: options.title,
-            captureKind: options.kind,
-            content,
-            ...(options.retrievedAt
-              ? { retrievedAt: options.retrievedAt }
+        const provenance = {
+          originalUrl: options.url,
+          title: options.title,
+          ...(options.finalUrl !== undefined
+            ? { finalUrl: options.finalUrl }
+            : {}),
+          ...(options.redirectUrl.length > 0
+            ? { redirectChain: options.redirectUrl }
+            : {}),
+          ...(options.retrievedAt !== undefined
+            ? { retrievedAt: options.retrievedAt }
+            : {}),
+        };
+        let result: WebCaptureResult;
+        const maxFileBytes =
+          options.kind === "artifact" || options.contentFile !== undefined
+            ? (await loadBrainConfig(options.root)).sources.maxFileBytes
+            : undefined;
+        if (options.kind === "artifact") {
+          const artifactFile = options.artifactFile;
+          if (artifactFile === undefined) {
+            throw new Error("Artifact capture requires --artifact-file");
+          }
+          if (maxFileBytes === undefined) {
+            throw new Error("Artifact capture file limit is unavailable");
+          }
+          const content = await readBoundedFile(
+            artifactFile,
+            maxFileBytes,
+            runtimeOptions.webInputFileTestOptions,
+          );
+          result = await captureWebEvidence(options.root, queryId, {
+            ...provenance,
+            representation: "artifact",
+            fileName: options.fileName ?? path.basename(artifactFile),
+            ...(options.mediaType !== undefined
+              ? { declaredMediaType: options.mediaType }
               : {}),
-          }),
-        );
+            responseComplete: true,
+            content,
+          });
+        } else {
+          let content = options.content;
+          if (options.contentFile !== undefined) {
+            if (maxFileBytes === undefined) {
+              throw new Error("Text capture file limit is unavailable");
+            }
+            content = await readUtf8File(
+              options.contentFile,
+              maxFileBytes,
+              runtimeOptions.webInputFileTestOptions,
+            );
+          }
+          if (content === undefined) {
+            throw new Error("Text capture requires content");
+          }
+          result = await captureWebEvidence(options.root, queryId, {
+            ...provenance,
+            representation: "text",
+            captureKind: options.kind,
+            completeness:
+              options.completeness ??
+              (options.kind === "snippet" ? "partial" : "complete"),
+            content,
+          });
+        }
+        if (options.json) json(result);
+        else {
+          output.write(
+            `${result.created ? "Captured" : "Reused"} ${result.source.path} (${result.source.extractionStatus}).\n`,
+          );
+        }
       },
     );
 

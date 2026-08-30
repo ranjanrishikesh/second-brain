@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -190,6 +190,9 @@ describe("question-scoped web approval", () => {
         retrievedAt: "2026-08-27T00:00:00.000Z",
       }),
     ).rejects.toThrow(/web approval/i);
+    await expect(
+      readdir(path.join(root, "sources", "web")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("rejects an approved request after its 24-hour lifetime", async () => {
