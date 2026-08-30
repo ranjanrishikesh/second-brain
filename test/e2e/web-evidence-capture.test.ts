@@ -1,14 +1,14 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { PDFDocument, StandardFonts } from "pdf-lib";
-import { describe, expect, test } from "vitest";
 import {
   applyChangeSetTransaction,
   attachQueryChange,
   attachSetupChange,
+  type BootstrapSourceContextV1,
+  type BrainRuntimeServices,
   beginQuery,
   beginSetup,
   calculateCatalogRevision,
@@ -17,6 +17,7 @@ import {
   finishQuery,
   finishSetup,
   initBrain,
+  type KnowledgeMutationContext,
   loadWikiPages,
   nextBootstrapBatch,
   nextSemanticAuditBatch,
@@ -25,13 +26,12 @@ import {
   recordSemanticAuditBatch,
   requestWebApproval,
   resolveWebApproval,
-  searchBrain,
-  type BootstrapSourceContextV1,
-  type BrainRuntimeServices,
-  type KnowledgeMutationContext,
   type SetupSourceContextV1,
+  searchBrain,
   type WikiPageV1,
 } from "@second-brain/core";
+import { PDFDocument, StandardFonts } from "pdf-lib";
+import { describe, expect, test } from "vitest";
 
 const execFile = promisify(execFileCallback);
 const fixedTime = "2026-08-30T12:00:00.000Z";
@@ -347,11 +347,39 @@ describe("fake host durable web evidence", () => {
     await expect(
       expandQuery(root, denied.id, { tier: "web", reason: "Denied." }),
     ).rejects.toThrow(/denied/i);
+    const beforeDeniedManifest = await readFile(
+      path.join(root, ".brain", "source-manifest.json"),
+      "utf8",
+    );
+    const beforeDeniedOperations = await readFile(
+      path.join(root, ".brain", "operations.jsonl"),
+      "utf8",
+    );
+    const beforeDeniedHead = await git(root, ["rev-parse", "HEAD"]);
+    await expect(
+      captureWebEvidence(root, denied.id, {
+        representation: "text",
+        originalUrl: "https://example.test/denied-site",
+        title: "Denied site",
+        captureKind: "page",
+        completeness: "complete",
+        content: "This denied content must never become durable evidence.",
+        retrievedAt: "2026-08-30T12:45:00.000Z",
+      }),
+    ).rejects.toThrow(/web tier|denied|approval/i);
     expect(
       (
         await readdir(path.join(root, "sources", "web"), { recursive: true })
       ).sort(),
     ).toEqual(beforeDenied);
+    await expect(
+      readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
+    ).resolves.toBe(beforeDeniedManifest);
+    await expect(
+      readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
+    ).resolves.toBe(beforeDeniedOperations);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeDeniedHead);
+    expect(await git(root, ["status", "--short", "--", "sources"])).toBe("");
     expect(
       await searchBrain(root, { query: "denied site", scope: "sources" }),
     ).toEqual([]);

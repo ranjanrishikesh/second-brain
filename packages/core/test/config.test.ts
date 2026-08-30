@@ -123,6 +123,14 @@ describe("loadBrainConfig", () => {
     });
     expect(config.bootstrap.mode).toBe("catalog-map");
     expect(config).toMatchObject({
+      sources: {
+        pdf: { maxPages: 2_000, maxExtractedBytes: 104_857_600 },
+        epub: {
+          maxEntries: 1_000,
+          maxExpandedBytes: 104_857_600,
+          maxExtractedBytes: 104_857_600,
+        },
+      },
       web: { approvalTtlHours: 24 },
       graph: {
         semanticModel: {
@@ -131,6 +139,38 @@ describe("loadBrainConfig", () => {
         },
       },
       git: { autoPush: false },
+    });
+  });
+
+  test("loads independent PDF and EPUB extraction budgets", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-budget-config-"));
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Budget test",
+        "sources:",
+        "  pdf:",
+        "    maxPages: 3",
+        "    maxExtractedBytes: 4096",
+        "  epub:",
+        "    maxEntries: 7",
+        "    maxExpandedBytes: 8192",
+        "    maxExtractedBytes: 2048",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).resolves.toMatchObject({
+      sources: {
+        pdf: { maxPages: 3, maxExtractedBytes: 4_096 },
+        epub: {
+          maxEntries: 7,
+          maxExpandedBytes: 8_192,
+          maxExtractedBytes: 2_048,
+        },
+      },
     });
   });
 

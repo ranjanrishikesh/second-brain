@@ -6,15 +6,17 @@ import path from "node:path";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
-import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import {
-  webDiscoveryV1Schema,
   type WebDiscoveryV1,
+  webDiscoveryV1Schema,
 } from "./sources/web-evidence.js";
 import { readBrainState } from "./state.js";
 import {
-  runCanonicalWrite,
+  type CanonicalMutationResult,
+  type CanonicalMutationWriter,
   type OperationRecordV1,
+  runCanonicalWrite,
   type TransactionTestOptions,
 } from "./transaction.js";
 
@@ -167,17 +169,228 @@ async function assertSourceInputsAreStable(
   }
 }
 
-export async function scanAndRegisterSources(
+async function sourceRegistrationMutation(
   root: string,
-  testOptions: TransactionTestOptions = {},
-): Promise<SourceScanResult> {
-  const operationId = `op_source_${randomUUID().replaceAll("-", "")}`;
+  operationId: string,
+  writer: CanonicalMutationWriter,
+): Promise<CanonicalMutationResult<SourceScanResult>> {
   const canonicalPaths = [
     ".brain/source-manifest.json",
     ".brain/state.json",
     ".brain/operations.jsonl",
     "wiki/log.md",
   ] as const;
+  const state = await readBrainState(root);
+  const protectedWebDuplicates = state.sourceDuplicates.filter(
+    (duplicate) =>
+      duplicate.sidecarPath !== undefined &&
+      duplicate.sidecarSha256 !== undefined &&
+      duplicate.sidecarBytes !== undefined,
+  );
+  let manifestChanged = false;
+  let result: SourceScanResult;
+  try {
+    result = await scanSources(root, async (content) => {
+      manifestChanged = true;
+      await writer.writeText(".brain/source-manifest.json", content);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const affected = protectedWebDuplicates.find(
+      (duplicate) =>
+        message.includes(duplicate.path) ||
+        (duplicate.sidecarPath
+          ? message.includes(duplicate.sidecarPath)
+          : false),
+    );
+    if (affected) {
+      throw new Error(
+        `Immutable source violation: ${affected.path}${
+          affected.sidecarPath ? `, ${affected.sidecarPath}` : ""
+        }`,
+      );
+    }
+    throw error;
+  }
+  const currentDuplicatesByPath = new Map(
+    result.duplicates.map((duplicate) => [duplicate.path, duplicate]),
+  );
+  const changedAcknowledgements = protectedWebDuplicates.filter((previous) => {
+    const current = currentDuplicatesByPath.get(previous.path);
+    return (
+      !current ||
+      current.sourceId !== previous.sourceId ||
+      current.sha256 !== previous.sha256 ||
+      current.bytes !== previous.bytes ||
+      current.sidecarPath !== previous.sidecarPath ||
+      current.sidecarSha256 !== previous.sidecarSha256 ||
+      current.sidecarBytes !== previous.sidecarBytes
+    );
+  });
+  if (changedAcknowledgements.length > 0) {
+    throw new Error(
+      `Immutable source violation: ${changedAcknowledgements
+        .flatMap((duplicate) => [
+          duplicate.path,
+          ...(duplicate.sidecarPath ? [duplicate.sidecarPath] : []),
+        ])
+        .join(", ")}`,
+    );
+  }
+  if (result.modified.length || result.deleted.length) {
+    throw new Error(
+      `Immutable source violation: ${[
+        ...result.modified.map((source) => source.path),
+        ...result.deleted.map((source) => source.path),
+      ].join(", ")}`,
+    );
+  }
+  const addedInputs = result.added.flatMap(immutableInputs);
+  for (const source of addedInputs) {
+    await writer.sealExisting(source.path, {
+      bytes: source.bytes,
+      sha256: source.sha256,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const sourceDuplicates = result.duplicates
+    .map((duplicate) => ({
+      path: duplicate.path,
+      sourceId: duplicate.sourceId,
+      sha256: duplicate.sha256,
+      bytes: duplicate.bytes,
+      ...(duplicate.sidecarPath &&
+      duplicate.sidecarSha256 &&
+      duplicate.sidecarBytes !== undefined
+        ? {
+            sidecarPath: duplicate.sidecarPath,
+            sidecarSha256: duplicate.sidecarSha256,
+            sidecarBytes: duplicate.sidecarBytes,
+          }
+        : {}),
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const duplicateAcknowledgementsChanged =
+    JSON.stringify(state.sourceDuplicates ?? []) !==
+    JSON.stringify(sourceDuplicates);
+  if (
+    result.added.length === 0 &&
+    !manifestChanged &&
+    !duplicateAcknowledgementsChanged
+  ) {
+    return { value: result, stagePaths: [] };
+  }
+  if (duplicateAcknowledgementsChanged) {
+    for (const duplicate of result.duplicates.flatMap(
+      duplicateImmutableInputs,
+    )) {
+      await writer.sealExisting(duplicate.path, {
+        bytes: duplicate.bytes,
+        sha256: duplicate.sha256,
+      });
+    }
+  }
+  const pendingSourceIds = [
+    ...new Set([
+      ...(state.bootstrap?.pendingSourceIds ?? []),
+      ...result.added.map((source) => source.id),
+    ]),
+  ].sort();
+  const setup =
+    state.setup?.status === "in-progress"
+      ? {
+          ...state.setup,
+          initialSourceIds: [
+            ...new Set([
+              ...(state.setup.initialSourceIds ?? []),
+              ...result.added.map((source) => source.id),
+            ]),
+          ].sort(),
+          pendingSourceIds: [
+            ...new Set([
+              ...(state.setup.pendingSourceIds ?? []),
+              ...result.added
+                .filter((source) => source.extractionStatus === "ready")
+                .map((source) => source.id),
+            ]),
+          ].sort(),
+        }
+      : state.setup;
+  await writer.writeText(
+    ".brain/state.json",
+    `${JSON.stringify(
+      {
+        ...state,
+        sourceDuplicates,
+        bootstrap: { status: "pending", pendingSourceIds },
+        ...(setup ? { setup } : {}),
+        ...(state.setup?.status === "in-progress" &&
+        result.added.some((source) => source.extractionStatus === "ready")
+          ? { semanticAuditDue: true }
+          : {}),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const record: OperationRecordV1 = {
+    version: 1,
+    id: operationId,
+    kind: "source-scan",
+    status: "completed",
+    startedAt: now,
+    completedAt: now,
+    summary:
+      result.added.length > 0
+        ? `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}`
+        : `Acknowledged ${sourceDuplicates.length} duplicate source path${sourceDuplicates.length === 1 ? "" : "s"}`,
+    pageIds: [],
+    tiersUsed: [],
+  };
+  const operationsPath = path.join(root, ".brain", "operations.jsonl");
+  const existingOperations = await readFile(operationsPath, "utf8");
+  await writer.writeText(
+    ".brain/operations.jsonl",
+    `${existingOperations}${JSON.stringify(record)}\n`,
+  );
+  const logPath = path.join(root, "wiki", "log.md");
+  const existingLog = await readFile(logPath, "utf8");
+  await writer.writeText(
+    "wiki/log.md",
+    `${existingLog.trimEnd()}\n\n## [${now}] source | ${result.added.length > 0 ? `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}` : `Acknowledged ${sourceDuplicates.length} duplicate source path${sourceDuplicates.length === 1 ? "" : "s"}`}\n\n- Operation: \`${operationId}\`\n${result.added.map((source) => `- \`${source.id}\` — \`${source.path}\` (${source.extractionStatus})`).join("\n")}${sourceDuplicates.map((duplicate) => `\n- \`${duplicate.path}\` duplicates \`${duplicate.sourceId}\``).join("")}\n`,
+  );
+  return {
+    value: result,
+    stagePaths: [
+      ...addedInputs.map((source) => source.path),
+      ...(duplicateAcknowledgementsChanged
+        ? result.duplicates
+            .flatMap(duplicateImmutableInputs)
+            .map((duplicate) => duplicate.path)
+        : []),
+      ...(manifestChanged ? [canonicalPaths[0]] : []),
+      ...canonicalPaths.slice(1),
+    ],
+    verifyBeforeCommit: async (context) =>
+      assertSourceInputsAreStable(
+        root,
+        [
+          ...addedInputs,
+          ...(duplicateAcknowledgementsChanged
+            ? result.duplicates.flatMap(duplicateImmutableInputs)
+            : []),
+        ],
+        context,
+      ),
+  };
+}
+
+export async function scanAndRegisterSources(
+  root: string,
+  testOptions: TransactionTestOptions = {},
+): Promise<SourceScanResult> {
+  const operationId = `op_source_${randomUUID().replaceAll("-", "")}`;
   const transaction = await runCanonicalWrite<SourceScanResult>(
     root,
     {
@@ -188,214 +401,7 @@ export async function scanAndRegisterSources(
           : `brain(source): acknowledge duplicate paths [op:${operationId}]`,
       testOptions,
     },
-    async (writer) => {
-      const state = await readBrainState(root);
-      const protectedWebDuplicates = state.sourceDuplicates.filter(
-        (duplicate) =>
-          duplicate.sidecarPath !== undefined &&
-          duplicate.sidecarSha256 !== undefined &&
-          duplicate.sidecarBytes !== undefined,
-      );
-      let manifestChanged = false;
-      let result: SourceScanResult;
-      try {
-        result = await scanSources(root, async (content) => {
-          manifestChanged = true;
-          await writer.writeText(".brain/source-manifest.json", content);
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const affected = protectedWebDuplicates.find(
-          (duplicate) =>
-            message.includes(duplicate.path) ||
-            (duplicate.sidecarPath
-              ? message.includes(duplicate.sidecarPath)
-              : false),
-        );
-        if (affected) {
-          throw new Error(
-            `Immutable source violation: ${affected.path}${
-              affected.sidecarPath ? `, ${affected.sidecarPath}` : ""
-            }`,
-          );
-        }
-        throw error;
-      }
-      const currentDuplicatesByPath = new Map(
-        result.duplicates.map((duplicate) => [duplicate.path, duplicate]),
-      );
-      const changedAcknowledgements = protectedWebDuplicates.filter(
-        (previous) => {
-          const current = currentDuplicatesByPath.get(previous.path);
-          return (
-            !current ||
-            current.sourceId !== previous.sourceId ||
-            current.sha256 !== previous.sha256 ||
-            current.bytes !== previous.bytes ||
-            current.sidecarPath !== previous.sidecarPath ||
-            current.sidecarSha256 !== previous.sidecarSha256 ||
-            current.sidecarBytes !== previous.sidecarBytes
-          );
-        },
-      );
-      if (changedAcknowledgements.length > 0) {
-        throw new Error(
-          `Immutable source violation: ${changedAcknowledgements
-            .flatMap((duplicate) => [
-              duplicate.path,
-              ...(duplicate.sidecarPath ? [duplicate.sidecarPath] : []),
-            ])
-            .join(", ")}`,
-        );
-      }
-      if (result.modified.length || result.deleted.length) {
-        throw new Error(
-          `Immutable source violation: ${[
-            ...result.modified.map((source) => source.path),
-            ...result.deleted.map((source) => source.path),
-          ].join(", ")}`,
-        );
-      }
-      const addedInputs = result.added.flatMap(immutableInputs);
-      for (const source of addedInputs) {
-        await writer.sealExisting(source.path, {
-          bytes: source.bytes,
-          sha256: source.sha256,
-        });
-      }
-
-      const now = new Date().toISOString();
-      const sourceDuplicates = result.duplicates
-        .map((duplicate) => ({
-          path: duplicate.path,
-          sourceId: duplicate.sourceId,
-          sha256: duplicate.sha256,
-          bytes: duplicate.bytes,
-          ...(duplicate.sidecarPath &&
-          duplicate.sidecarSha256 &&
-          duplicate.sidecarBytes !== undefined
-            ? {
-                sidecarPath: duplicate.sidecarPath,
-                sidecarSha256: duplicate.sidecarSha256,
-                sidecarBytes: duplicate.sidecarBytes,
-              }
-            : {}),
-        }))
-        .sort((left, right) => left.path.localeCompare(right.path));
-      const duplicateAcknowledgementsChanged =
-        JSON.stringify(state.sourceDuplicates ?? []) !==
-        JSON.stringify(sourceDuplicates);
-      if (
-        result.added.length === 0 &&
-        !manifestChanged &&
-        !duplicateAcknowledgementsChanged
-      ) {
-        return { value: result, stagePaths: [] };
-      }
-      if (duplicateAcknowledgementsChanged) {
-        for (const duplicate of result.duplicates.flatMap(
-          duplicateImmutableInputs,
-        )) {
-          await writer.sealExisting(duplicate.path, {
-            bytes: duplicate.bytes,
-            sha256: duplicate.sha256,
-          });
-        }
-      }
-      const pendingSourceIds = [
-        ...new Set([
-          ...(state.bootstrap?.pendingSourceIds ?? []),
-          ...result.added.map((source) => source.id),
-        ]),
-      ].sort();
-      const setup =
-        state.setup?.status === "in-progress"
-          ? {
-              ...state.setup,
-              initialSourceIds: [
-                ...new Set([
-                  ...(state.setup.initialSourceIds ?? []),
-                  ...result.added.map((source) => source.id),
-                ]),
-              ].sort(),
-              pendingSourceIds: [
-                ...new Set([
-                  ...(state.setup.pendingSourceIds ?? []),
-                  ...result.added
-                    .filter((source) => source.extractionStatus === "ready")
-                    .map((source) => source.id),
-                ]),
-              ].sort(),
-            }
-          : state.setup;
-      await writer.writeText(
-        ".brain/state.json",
-        `${JSON.stringify(
-          {
-            ...state,
-            sourceDuplicates,
-            bootstrap: { status: "pending", pendingSourceIds },
-            ...(setup ? { setup } : {}),
-            ...(state.setup?.status === "in-progress" &&
-            result.added.some((source) => source.extractionStatus === "ready")
-              ? { semanticAuditDue: true }
-              : {}),
-          },
-          null,
-          2,
-        )}\n`,
-      );
-      const record: OperationRecordV1 = {
-        version: 1,
-        id: operationId,
-        kind: "source-scan",
-        status: "completed",
-        startedAt: now,
-        completedAt: now,
-        summary:
-          result.added.length > 0
-            ? `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}`
-            : `Acknowledged ${sourceDuplicates.length} duplicate source path${sourceDuplicates.length === 1 ? "" : "s"}`,
-        pageIds: [],
-        tiersUsed: [],
-      };
-      const operationsPath = path.join(root, ".brain", "operations.jsonl");
-      const existingOperations = await readFile(operationsPath, "utf8");
-      await writer.writeText(
-        ".brain/operations.jsonl",
-        `${existingOperations}${JSON.stringify(record)}\n`,
-      );
-      const logPath = path.join(root, "wiki", "log.md");
-      const existingLog = await readFile(logPath, "utf8");
-      await writer.writeText(
-        "wiki/log.md",
-        `${existingLog.trimEnd()}\n\n## [${now}] source | ${result.added.length > 0 ? `Registered ${result.added.length} source${result.added.length === 1 ? "" : "s"}` : `Acknowledged ${sourceDuplicates.length} duplicate source path${sourceDuplicates.length === 1 ? "" : "s"}`}\n\n- Operation: \`${operationId}\`\n${result.added.map((source) => `- \`${source.id}\` — \`${source.path}\` (${source.extractionStatus})`).join("\n")}${sourceDuplicates.map((duplicate) => `\n- \`${duplicate.path}\` duplicates \`${duplicate.sourceId}\``).join("")}\n`,
-      );
-      return {
-        value: result,
-        stagePaths: [
-          ...addedInputs.map((source) => source.path),
-          ...(duplicateAcknowledgementsChanged
-            ? result.duplicates
-                .flatMap(duplicateImmutableInputs)
-                .map((duplicate) => duplicate.path)
-            : []),
-          ...(manifestChanged ? [canonicalPaths[0]] : []),
-          ...canonicalPaths.slice(1),
-        ],
-        verifyBeforeCommit: async (context) =>
-          assertSourceInputsAreStable(
-            root,
-            [
-              ...addedInputs,
-              ...(duplicateAcknowledgementsChanged
-                ? result.duplicates.flatMap(duplicateImmutableInputs)
-                : []),
-            ],
-            context,
-          ),
-      };
-    },
+    (writer) => sourceRegistrationMutation(root, operationId, writer),
   );
   return transaction.value;
 }
@@ -406,6 +412,24 @@ export interface SourceWebDiscoveryEnrichmentResult {
   commit?: string;
   changed: boolean;
 }
+
+export interface PreparedWebSourceCapture {
+  /** Existing canonical source selected from a manifest read under the lock. */
+  sourceId?: string;
+  /** Newly prepared source path to resolve after the in-transaction scan. */
+  sourcePath?: string;
+  discovery: WebDiscoveryV1;
+}
+
+export interface RegisteredWebSourceCapture {
+  source: SourceRecordV1;
+  created: boolean;
+  commit?: string;
+}
+
+export type CommittedWebSourceCaptureHandler = (
+  result: Pick<RegisteredWebSourceCapture, "source" | "created">,
+) => Promise<void>;
 
 function compareWebDiscoveries(
   left: WebDiscoveryV1,
@@ -427,6 +451,85 @@ function compareWebDiscoveries(
  * sealed artifact sidecar. The manifest is re-read only after the canonical
  * writer lock is held, so concurrent enrichments cannot replace one another.
  */
+async function sourceWebDiscoveryMutation(
+  root: string,
+  sourceId: string,
+  discovery: WebDiscoveryV1,
+  operationId: string,
+  writer: CanonicalMutationWriter,
+): Promise<
+  CanonicalMutationResult<{
+    source: SourceRecordV1;
+    changed: boolean;
+  }>
+> {
+  const manifestPath = path.join(root, ".brain", "source-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    version: 1;
+    sources: unknown[];
+  };
+  const sources = manifest.sources.map((item) =>
+    sourceRecordV1Schema.parse(item),
+  );
+  const index = sources.findIndex((source) => source.id === sourceId);
+  if (index < 0) throw new Error(`Unknown source: ${sourceId}`);
+  const current = sources[index] as SourceRecordV1;
+  const existing = current.provenance.webDiscoveries ?? [];
+  if (
+    existing.some(
+      (candidate) => JSON.stringify(candidate) === JSON.stringify(discovery),
+    )
+  ) {
+    return {
+      value: { source: current, changed: false },
+      stagePaths: [],
+    };
+  }
+  const updated = sourceRecordV1Schema.parse({
+    ...current,
+    provenance: {
+      ...current.provenance,
+      webDiscoveries: [...existing, discovery].sort(compareWebDiscoveries),
+    },
+  });
+  sources[index] = updated;
+  await writer.writeText(
+    ".brain/source-manifest.json",
+    `${JSON.stringify({ version: 1, sources }, null, 2)}\n`,
+  );
+  const now = new Date().toISOString();
+  const operation: OperationRecordV1 = {
+    version: 1,
+    id: operationId,
+    kind: "web-capture",
+    status: "completed",
+    startedAt: now,
+    completedAt: now,
+    summary: `Recorded web discovery for ${sourceId}`,
+    pageIds: [],
+    tiersUsed: ["web"],
+    queryId: discovery.queryId,
+  };
+  const operationsPath = path.join(root, ".brain", "operations.jsonl");
+  await writer.writeText(
+    ".brain/operations.jsonl",
+    `${await readFile(operationsPath, "utf8")}${JSON.stringify(operation)}\n`,
+  );
+  const logPath = path.join(root, "wiki", "log.md");
+  await writer.writeText(
+    "wiki/log.md",
+    `${(await readFile(logPath, "utf8")).trimEnd()}\n\n## [${now}] web-capture | Recorded discovery\n\n- Operation: \`${operationId}\`\n- Source: \`${sourceId}\`\n- Query: \`${discovery.queryId}\`\n- URL: ${discovery.originalUrl}\n`,
+  );
+  return {
+    value: { source: updated, changed: true },
+    stagePaths: [
+      ".brain/source-manifest.json",
+      ".brain/operations.jsonl",
+      "wiki/log.md",
+    ],
+  };
+}
+
 export async function enrichSourceWebDiscovery(
   root: string,
   sourceId: string,
@@ -445,78 +548,116 @@ export async function enrichSourceWebDiscovery(
       commitMessage: `brain(web): record discovery for ${sourceId} [op:${operationId}]`,
       testOptions,
     },
+    (writer) =>
+      sourceWebDiscoveryMutation(
+        root,
+        sourceId,
+        discovery,
+        operationId,
+        writer,
+      ),
+  );
+  return {
+    ...transaction.value,
+    ...(transaction.value.changed ? { operationId } : {}),
+    ...(transaction.commit ? { commit: transaction.commit } : {}),
+  };
+}
+
+/**
+ * Serializes the entire capture identity lifecycle with canonical source
+ * registration. The preparation callback runs only after the recovery-aware
+ * writer lock is held, so it must re-read the manifest before selecting reuse
+ * or supersession.
+ */
+export async function registerWebSourceCapture(
+  root: string,
+  prepare: () => Promise<PreparedWebSourceCapture>,
+  testOptions: TransactionTestOptions = {},
+  afterCanonicalCommit?: CommittedWebSourceCaptureHandler,
+): Promise<RegisteredWebSourceCapture> {
+  const operationId = `op_web_capture_${randomUUID().replaceAll("-", "")}`;
+  const scanOperationId = `op_source_${randomUUID().replaceAll("-", "")}`;
+  const discoveryOperationId = `op_web_capture_${randomUUID().replaceAll("-", "")}`;
+  const transaction = await runCanonicalWrite<{
+    source: SourceRecordV1;
+    created: boolean;
+  }>(
+    root,
+    {
+      operationId,
+      commitMessage: (result) =>
+        result.created
+          ? `brain(web): capture ${result.source.id} [op:${operationId}]`
+          : `brain(web): record discovery for ${result.source.id} [op:${operationId}]`,
+      testOptions,
+      waitForWriter: { timeoutMs: 30_000 },
+      ...(afterCanonicalCommit ? { afterCanonicalCommit } : {}),
+    },
     async (writer) => {
-      const manifestPath = path.join(root, ".brain", "source-manifest.json");
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-        version: 1;
-        sources: unknown[];
-      };
-      const sources = manifest.sources.map((item) =>
+      const prepared = await prepare();
+      if (
+        (!prepared.sourceId && !prepared.sourcePath) ||
+        (prepared.sourceId && prepared.sourcePath)
+      ) {
+        throw new Error(
+          "Prepared web capture must identify exactly one source ID or source path",
+        );
+      }
+      const discovery = webDiscoveryV1Schema.parse(prepared.discovery);
+      const scan = await sourceRegistrationMutation(
+        root,
+        scanOperationId,
+        writer,
+      );
+      const manifest = JSON.parse(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      ) as { sources?: unknown[] };
+      const sources = (manifest.sources ?? []).map((item) =>
         sourceRecordV1Schema.parse(item),
       );
-      const index = sources.findIndex((source) => source.id === sourceId);
-      if (index < 0) throw new Error(`Unknown source: ${sourceId}`);
-      const current = sources[index] as SourceRecordV1;
-      const existing = current.provenance.webDiscoveries ?? [];
-      if (
-        existing.some(
-          (candidate) =>
-            JSON.stringify(candidate) === JSON.stringify(discovery),
-        )
-      ) {
-        return {
-          value: { source: current, changed: false },
-          stagePaths: [],
-        };
+      const source = prepared.sourceId
+        ? sources.find((candidate) => candidate.id === prepared.sourceId)
+        : sources.find((candidate) => candidate.path === prepared.sourcePath);
+      if (!source) {
+        throw new Error(
+          prepared.sourceId
+            ? `Registered source disappeared: ${prepared.sourceId}`
+            : `Captured source was not registered: ${prepared.sourcePath}`,
+        );
       }
-      const updated = sourceRecordV1Schema.parse({
-        ...current,
-        provenance: {
-          ...current.provenance,
-          webDiscoveries: [...existing, discovery].sort(compareWebDiscoveries),
-        },
-      });
-      sources[index] = updated;
-      await writer.writeText(
-        ".brain/source-manifest.json",
-        `${JSON.stringify({ version: 1, sources }, null, 2)}\n`,
+      const enrichment = await sourceWebDiscoveryMutation(
+        root,
+        source.id,
+        discovery,
+        discoveryOperationId,
+        writer,
       );
-      const now = new Date().toISOString();
-      const operation: OperationRecordV1 = {
-        version: 1,
-        id: operationId,
-        kind: "web-capture",
-        status: "completed",
-        startedAt: now,
-        completedAt: now,
-        summary: `Recorded web discovery for ${sourceId}`,
-        pageIds: [],
-        tiersUsed: ["web"],
-        queryId: discovery.queryId,
-      };
-      const operationsPath = path.join(root, ".brain", "operations.jsonl");
-      await writer.writeText(
-        ".brain/operations.jsonl",
-        `${await readFile(operationsPath, "utf8")}${JSON.stringify(operation)}\n`,
-      );
-      const logPath = path.join(root, "wiki", "log.md");
-      await writer.writeText(
-        "wiki/log.md",
-        `${(await readFile(logPath, "utf8")).trimEnd()}\n\n## [${now}] web-capture | Recorded discovery\n\n- Operation: \`${operationId}\`\n- Source: \`${sourceId}\`\n- Query: \`${discovery.queryId}\`\n- URL: ${discovery.originalUrl}\n`,
-      );
+      const stagePaths = [
+        ...new Set([...scan.stagePaths, ...enrichment.stagePaths]),
+      ];
       return {
-        value: { source: updated, changed: true },
-        stagePaths: [
-          ".brain/source-manifest.json",
-          ".brain/operations.jsonl",
-          "wiki/log.md",
-        ],
+        value: {
+          source: enrichment.value.source,
+          created: scan.value.added.some((item) => item.id === source.id),
+        },
+        stagePaths,
+        verifyBeforeCommit: async (context) => {
+          await scan.verifyBeforeCommit?.(context);
+          await enrichment.verifyBeforeCommit?.(context);
+        },
+        verifySealedState: async () => {
+          await scan.verifySealedState?.();
+          await enrichment.verifySealedState?.();
+        },
       };
     },
   );
   return {
     ...transaction.value,
-    ...(transaction.value.changed ? { operationId } : {}),
     ...(transaction.commit ? { commit: transaction.commit } : {}),
   };
 }

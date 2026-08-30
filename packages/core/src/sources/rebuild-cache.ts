@@ -21,6 +21,7 @@ import {
 } from "./extract.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./types.js";
 import { assertWebEvidenceIntegrity } from "./web-evidence.js";
+import { validateZipArchiveBudget } from "./zip-archive-budget.js";
 
 async function readCanonicalSourceContent(
   root: string,
@@ -39,12 +40,26 @@ async function readCanonicalSourceContent(
   return content;
 }
 
+function assertCurrentInputBudget(
+  source: SourceRecordV1,
+  content: Buffer,
+  maxFileBytes: number,
+): void {
+  if (content.byteLength > maxFileBytes) {
+    throw new Error(
+      `Source exceeds configured maximum of ${maxFileBytes} bytes: ${source.path}`,
+    );
+  }
+}
+
 export async function rebuildExtractedSourceCache(
   root: string,
   source: SourceRecordV1,
 ): Promise<ExtractedSourceV1> {
   await assertWebEvidenceIntegrity(root, source);
   const content = await readCanonicalSourceContent(root, source);
+  const config = await loadBrainConfig(root);
+  assertCurrentInputBudget(source, content, config.sources.maxFileBytes);
 
   const text = content.toString("utf8");
   const extracted =
@@ -72,19 +87,21 @@ export async function rebuildExtractedSourceCache(
                       source.id,
                       source.path,
                       new Uint8Array(content),
+                      config.sources.pdf,
                     )
                   : source.extractor === "docx-v1"
                     ? await extractDocx(
                         source.id,
                         source.path,
                         new Uint8Array(content),
-                        (await loadBrainConfig(root)).sources.maxFileBytes,
+                        config.sources.maxFileBytes,
                       )
                     : source.extractor === "epub-v1"
                       ? await extractEpub(
                           source.id,
                           source.path,
                           new Uint8Array(content),
+                          config.sources.epub,
                         )
                       : undefined;
   if (!extracted) {
@@ -147,6 +164,40 @@ export async function loadExtractedSourceCache(
       assertCanonicalExtractedSource(revalidated, source);
     }
     assertDocxOutputSize(cached.text, config.sources.maxFileBytes);
+  }
+  if (source.extractor === "epub-v1") {
+    const [content, config] = await Promise.all([
+      readCanonicalSourceContent(root, source),
+      loadBrainConfig(root),
+    ]);
+    assertCurrentInputBudget(source, content, config.sources.maxFileBytes);
+    await validateZipArchiveBudget(new Uint8Array(content), {
+      label: "EPUB",
+      maxEntries: config.sources.epub.maxEntries,
+      maxExpandedBytes: config.sources.epub.maxExpandedBytes,
+    });
+    if (
+      Buffer.byteLength(cached.text, "utf8") >
+      config.sources.epub.maxExtractedBytes
+    ) {
+      throw new Error(
+        `Extracted EPUB content exceeds configured maximum of ${config.sources.epub.maxExtractedBytes} bytes`,
+      );
+    }
+  }
+  if (source.extractor === "pdf-v1") {
+    const [content, config] = await Promise.all([
+      readCanonicalSourceContent(root, source),
+      loadBrainConfig(root),
+    ]);
+    assertCurrentInputBudget(source, content, config.sources.maxFileBytes);
+    const revalidated = await extractPdf(
+      source.id,
+      source.path,
+      new Uint8Array(content),
+      config.sources.pdf,
+    );
+    assertCanonicalExtractedSource(revalidated, source);
   }
   return cached;
 }

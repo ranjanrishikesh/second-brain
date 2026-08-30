@@ -28,6 +28,7 @@ import {
   planReconciliation,
   readBrainState,
   readQuerySession,
+  recoverBrain,
   renderWikiPage,
   requestWebApproval,
   resolveWebApproval,
@@ -54,23 +55,6 @@ async function approveWebForQuery(
     approved: true,
     decidedBy: "query-test-owner",
   });
-}
-
-async function findFileNamed(
-  directory: string,
-  fileName: string,
-): Promise<string | undefined> {
-  const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries) {
-    const absolutePath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      const nested = await findFileNamed(absolutePath, fileName);
-      if (nested) return nested;
-    } else if (entry.isFile() && entry.name === fileName) {
-      return absolutePath;
-    }
-  }
-  return undefined;
 }
 
 async function queryBrain(): Promise<string> {
@@ -565,6 +549,10 @@ describe("query lifecycle", () => {
       ).then((result) => result.stdout.trim()),
     ).toBe("");
 
+    expect(
+      (await readQuerySession(root, session.id)).webEvidenceSourceIds,
+    ).toEqual([]);
+    await expect(recoverBrain(root)).resolves.toBe("committed");
     const retry = await captureWebEvidence(root, session.id, input);
     expect(retry.created).toBe(false);
     expect(retry.session.webEvidenceSourceIds).toContain(source.id);
@@ -574,7 +562,7 @@ describe("query lifecycle", () => {
     });
   });
 
-  test("does not delete prepared web evidence while another canonical writer is active", async () => {
+  test("does not prepare or link web evidence while another canonical writer needs recovery", async () => {
     const root = await queryBrain();
     const session = await beginQuery(
       root,
@@ -595,55 +583,33 @@ describe("query lifecycle", () => {
       captureKind: "page" as const,
       content: "The concurrent survey found a candidate.",
     };
-    const digest = createHash("sha256")
-      .update(
-        JSON.stringify([
-          input.url,
-          input.url,
-          [],
-          input.captureKind,
-          "complete",
-          input.content,
-        ]),
-      )
-      .digest("hex")
-      .slice(0, 12);
-    const evidenceName = `concurrent-capture-${digest}.md`;
     await writeFile(
       path.join(root, ".brain", "runtime", "writer.lock"),
       `${JSON.stringify({
-        pid: process.pid,
+        pid: 2_147_483_647,
         operationId: "op_concurrent_capture",
         recoverable: false,
       })}\n`,
     );
 
     await expect(captureWebEvidence(root, session.id, input)).rejects.toThrow(
-      /exist|lock|writer/i,
+      /recover|stale|writer/i,
     );
-
-    const evidencePath = await findFileNamed(
-      path.join(root, "sources", "web"),
-      evidenceName,
-    );
-    if (!evidencePath) throw new Error("Expected prepared web evidence");
-    const preparedEvidence = await readFile(evidencePath, "utf8");
-    expect(preparedEvidence).toContain("concurrent survey found a candidate");
+    await expect(
+      readdir(path.join(root, "sources", "web")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      (await readQuerySession(root, session.id)).webEvidenceSourceIds,
+    ).toEqual([]);
 
     await rm(path.join(root, ".brain", "runtime", "writer.lock"));
-    await writeFile(evidencePath, "mismatched prepared bytes\n");
-    await expect(captureWebEvidence(root, session.id, input)).rejects.toThrow(
-      /prepared web evidence bytes do not match/i,
-    );
-    await writeFile(evidencePath, preparedEvidence);
-    await new Promise((resolve) => setTimeout(resolve, 5));
     const resumed = await captureWebEvidence(root, session.id, input);
 
     expect(resumed.created).toBe(true);
     expect(resumed.session.webEvidenceSourceIds).toContain(resumed.source.id);
-    expect(resumed.source.path).toBe(
-      path.relative(root, evidencePath).split(path.sep).join("/"),
-    );
+    expect(
+      await readFile(path.join(root, resumed.source.path), "utf8"),
+    ).toContain("concurrent survey found a candidate");
   });
 
   test("finishes a wiki-only answer with a log-only knowledge operation", async () => {

@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   rm,
   stat,
   writeFile,
@@ -14,8 +14,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import JSZip from "jszip";
 import { PDFDocument, StandardFonts } from "pdf-lib";
-import { parse, stringify } from "yaml";
 import { describe, expect, test } from "vitest";
+import { parse, stringify } from "yaml";
 import {
   beginQuery,
   captureWebEvidence,
@@ -140,7 +140,9 @@ async function docxBytes(): Promise<Uint8Array> {
   return await archive.generateAsync({ type: "uint8array" });
 }
 
-async function epubBytes(): Promise<Uint8Array> {
+async function epubBytes(
+  chapter = "<h1>Evidence</h1><p>Exact EPUB evidence.</p>",
+): Promise<Uint8Array> {
   const archive = new JSZip();
   archive.file("mimetype", "application/epub+zip");
   archive.file(
@@ -151,14 +153,242 @@ async function epubBytes(): Promise<Uint8Array> {
     "OEBPS/content.opf",
     '<?xml version="1.0"?><package><metadata><title>Web book</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>',
   );
-  archive.file(
-    "OEBPS/chapter.xhtml",
-    "<html><body><h1>Evidence</h1><p>Exact EPUB evidence.</p></body></html>",
-  );
-  return await archive.generateAsync({ type: "uint8array" });
+  archive.file("OEBPS/chapter.xhtml", `<html><body>${chapter}</body></html>`);
+  return await archive.generateAsync({
+    type: "uint8array",
+    compression: "DEFLATE",
+  });
 }
 
 describe("durable web evidence capture", () => {
+  test("serializes concurrent alternate-URL artifact capture into one canonical pair", async () => {
+    const { root, queryId } = await approvedBrain();
+    const bytes = await textPdf("Concurrent mirror evidence");
+    let enteredWriter: (() => void) | undefined;
+    const writerEntered = new Promise<void>((resolve) => {
+      enteredWriter = resolve;
+    });
+    let releaseWriter: (() => void) | undefined;
+    const writerReleased = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    const first = captureWebEvidence(
+      root,
+      queryId,
+      {
+        representation: "artifact",
+        originalUrl: "https://a.example.test/concurrent.pdf",
+        title: "Concurrent primary",
+        fileName: "primary.pdf",
+        responseComplete: true,
+        content: bytes,
+        retrievedAt: "2026-08-30T00:10:00.000Z",
+      },
+      {
+        transactionTestOptions: {
+          afterMutationBeforeSeal: async () => {
+            enteredWriter?.();
+            await writerReleased;
+          },
+        },
+      },
+    );
+    await writerEntered;
+    const second = captureWebEvidence(root, queryId, {
+      representation: "artifact",
+      originalUrl: "https://b.example.test/concurrent.pdf",
+      title: "Concurrent mirror",
+      fileName: "mirror.pdf",
+      responseComplete: true,
+      content: bytes,
+      retrievedAt: "2026-08-30T00:11:00.000Z",
+    });
+    releaseWriter?.();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.source.id).toBe(secondResult.source.id);
+    const captures = await webFiles(root);
+    expect(captures.filter((item) => !item.endsWith(".web.json"))).toHaveLength(
+      1,
+    );
+    expect(captures.filter((item) => item.endsWith(".web.json"))).toHaveLength(
+      1,
+    );
+    const manifest = JSON.parse(
+      await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
+    );
+    expect(manifest.sources).toHaveLength(1);
+    expect(
+      manifest.sources[0].provenance.webDiscoveries.map(
+        (item: { originalUrl: string }) => item.originalUrl,
+      ),
+    ).toEqual([
+      "https://a.example.test/concurrent.pdf",
+      "https://b.example.test/concurrent.pdf",
+    ]);
+    expect((await readBrainState(root)).sourceDuplicates).toEqual([]);
+  });
+
+  test("serializes concurrent changed bytes into one linear supersession chain", async () => {
+    const { root, queryId } = await approvedBrain();
+    const originalUrl = "https://example.test/serial-report.txt";
+    const base = await captureWebEvidence(root, queryId, {
+      representation: "artifact",
+      originalUrl,
+      title: "Serial base",
+      fileName: "serial.txt",
+      responseComplete: true,
+      content: encoder.encode("base version\n"),
+      retrievedAt: "2026-08-30T00:20:00.000Z",
+    });
+    let enteredWriter: (() => void) | undefined;
+    const writerEntered = new Promise<void>((resolve) => {
+      enteredWriter = resolve;
+    });
+    let releaseWriter: (() => void) | undefined;
+    const writerReleased = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    const first = captureWebEvidence(
+      root,
+      queryId,
+      {
+        representation: "artifact",
+        originalUrl,
+        title: "Serial middle",
+        fileName: "serial.txt",
+        responseComplete: true,
+        content: encoder.encode("middle version\n"),
+        retrievedAt: "2026-08-30T00:21:00.000Z",
+      },
+      {
+        transactionTestOptions: {
+          afterMutationBeforeSeal: async () => {
+            enteredWriter?.();
+            await writerReleased;
+          },
+        },
+      },
+    );
+    await writerEntered;
+    const second = captureWebEvidence(root, queryId, {
+      representation: "artifact",
+      originalUrl,
+      title: "Serial newest",
+      fileName: "serial.txt",
+      responseComplete: true,
+      content: encoder.encode("newest version\n"),
+      retrievedAt: "2026-08-30T00:22:00.000Z",
+    });
+    releaseWriter?.();
+
+    const [middle, newest] = await Promise.all([first, second]);
+    expect(middle.source.supersedes).toBe(base.source.id);
+    expect(newest.source.supersedes).toBe(middle.source.id);
+    const manifest = JSON.parse(
+      await readFile(path.join(root, ".brain", "source-manifest.json"), "utf8"),
+    );
+    expect(manifest.sources).toHaveLength(3);
+    expect((await readBrainState(root)).sourceDuplicates).toEqual([]);
+    expect(
+      (await webFiles(root)).filter((item) => !item.endsWith(".web.json")),
+    ).toHaveLength(3);
+  });
+
+  test("atomically merges concurrent evidence links for one query", async () => {
+    const { root, queryId } = await approvedBrain("Concurrent links?");
+    let arrivals = 0;
+    let firstSessionRead!: () => void;
+    const firstRead = new Promise<void>((resolve) => {
+      firstSessionRead = resolve;
+    });
+    let releaseWrites!: () => void;
+    const writesReleased = new Promise<void>((resolve) => {
+      releaseWrites = resolve;
+    });
+    const options = {
+      afterSessionRead: async () => {
+        arrivals += 1;
+        if (arrivals === 1) {
+          firstSessionRead();
+          await writesReleased;
+        }
+      },
+    };
+
+    const first = captureWebEvidence(
+      root,
+      queryId,
+      {
+        representation: "artifact",
+        originalUrl: "https://example.test/link-a.txt",
+        title: "Link A",
+        fileName: "link-a.txt",
+        responseComplete: true,
+        content: encoder.encode("evidence a\n"),
+        retrievedAt: "2026-08-30T00:23:00.000Z",
+      },
+      options,
+    );
+    await firstRead;
+    const second = captureWebEvidence(
+      root,
+      queryId,
+      {
+        representation: "artifact",
+        originalUrl: "https://example.test/link-b.txt",
+        title: "Link B",
+        fileName: "link-b.txt",
+        responseComplete: true,
+        content: encoder.encode("evidence b\n"),
+        retrievedAt: "2026-08-30T00:24:00.000Z",
+      },
+      options,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(arrivals).toBe(1);
+    releaseWrites();
+    const captures = await Promise.all([first, second]);
+
+    const session = await readQuerySession(root, queryId);
+    expect(session.webEvidenceSourceIds).toEqual(
+      captures.map((capture) => capture.source.id).sort(),
+    );
+    expect(new Set(session.webEvidenceSourceIds).size).toBe(2);
+    expect(
+      (await readdir(path.join(root, ".brain", "runtime", "queries"))).filter(
+        (entry) => entry.endsWith(".tmp"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("does not link evidence from a rolled-back canonical mutation", async () => {
+    const { root, queryId } = await approvedBrain("Rolled back link?");
+    await expect(
+      captureWebEvidence(
+        root,
+        queryId,
+        {
+          representation: "artifact",
+          originalUrl: "https://example.test/rolled-back.txt",
+          title: "Rolled back",
+          fileName: "rolled-back.txt",
+          responseComplete: true,
+          content: encoder.encode("must not link\n"),
+          retrievedAt: "2026-08-30T00:25:00.000Z",
+        },
+        {
+          transactionTestOptions: {
+            simulateCrashAfter: "files-applied",
+          },
+        },
+      ),
+    ).rejects.toThrow(/simulated.*crash/i);
+    expect(
+      (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+    ).toEqual([]);
+  });
+
   test("rejects approval and lifecycle failures before preparing sources/web", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-web-gate-"));
     await initBrain(root, { name: "Gate", description: "Gate test" });
@@ -276,6 +506,48 @@ describe("durable web evidence capture", () => {
     ).rejects.toThrow(/snippet|partial/i);
   });
 
+  test.each([
+    ["csv", "tsv"],
+    ["tsv", "csv"],
+  ] as const)(
+    "rejects identical bytes registered as %s when requested as %s",
+    async (firstFormat, secondFormat) => {
+      const { root, queryId } = await approvedBrain(
+        `${firstFormat} versus ${secondFormat}?`,
+      );
+      const bytes = encoder.encode("name,value\nalpha,1\n");
+      await captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: `https://example.test/table.${firstFormat}`,
+        title: `Table ${firstFormat}`,
+        fileName: `table.${firstFormat}`,
+        responseComplete: true,
+        content: bytes,
+        retrievedAt: "2026-08-30T02:10:00.000Z",
+      });
+
+      await expect(
+        captureWebEvidence(root, queryId, {
+          representation: "artifact",
+          originalUrl: `https://example.test/table.${secondFormat}`,
+          title: `Table ${secondFormat}`,
+          fileName: `table.${secondFormat}`,
+          responseComplete: true,
+          content: bytes,
+          retrievedAt: "2026-08-30T02:11:00.000Z",
+        }),
+      ).rejects.toThrow(/compatible|format|csv|tsv/i);
+      expect(
+        JSON.parse(
+          await readFile(
+            path.join(root, ".brain", "source-manifest.json"),
+            "utf8",
+          ),
+        ).sources,
+      ).toHaveLength(1);
+    },
+  );
+
   test("validates the final Markdown wrapper against maxFileBytes", async () => {
     const { root, queryId } = await approvedBrain();
     const configPath = path.join(root, "brain.config.yaml");
@@ -293,6 +565,58 @@ describe("durable web evidence capture", () => {
         retrievedAt: "2026-08-30T03:00:00.000Z",
       }),
     ).rejects.toThrow(/maximum|bytes|size/i);
+    expect(await webFiles(root)).toEqual([]);
+  });
+
+  test("rejects an EPUB amplification before preparing canonical artifacts", async () => {
+    const { root, queryId } = await approvedBrain("EPUB amplification?");
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.epub = {
+      maxEntries: 100,
+      maxExpandedBytes: 4_096,
+      maxExtractedBytes: 4_096,
+    };
+    await writeFile(configPath, stringify(config));
+    const bytes = await epubBytes(`<p>${"A".repeat(50_000)}</p>`);
+    expect(bytes.byteLength).toBeLessThan(4_096);
+
+    await expect(
+      captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: "https://example.test/amplified.epub",
+        title: "Amplified EPUB",
+        fileName: "amplified.epub",
+        responseComplete: true,
+        content: bytes,
+        retrievedAt: "2026-08-30T03:01:00.000Z",
+      }),
+    ).rejects.toThrow(/expanded epub content exceeds.*4096 bytes/i);
+    expect(await webFiles(root)).toEqual([]);
+  });
+
+  test("rejects an over-page PDF before preparing canonical artifacts", async () => {
+    const { root, queryId } = await approvedBrain("PDF amplification?");
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.pdf = { maxPages: 2, maxExtractedBytes: 1_000_000 };
+    await writeFile(configPath, stringify(config));
+    const document = await PDFDocument.create();
+    document.addPage();
+    document.addPage();
+    document.addPage();
+
+    await expect(
+      captureWebEvidence(root, queryId, {
+        representation: "artifact",
+        originalUrl: "https://example.test/too-many-pages.pdf",
+        title: "Too many pages",
+        fileName: "too-many-pages.pdf",
+        responseComplete: true,
+        content: await document.save(),
+        retrievedAt: "2026-08-30T03:02:00.000Z",
+      }),
+    ).rejects.toThrow(/pdf contains 3 pages.*maximum of 2/i);
     expect(await webFiles(root)).toEqual([]);
   });
 
@@ -702,25 +1026,30 @@ describe("durable web evidence capture", () => {
     };
     await writeFile(
       path.join(root, ".brain", "runtime", "writer.lock"),
-      `${JSON.stringify({ pid: process.pid, operationId: "op_busy", recoverable: false })}\n`,
+      `${JSON.stringify({ pid: 2_147_483_647, operationId: "op_stale", recoverable: false })}\n`,
     );
     await expect(captureWebEvidence(root, queryId, input)).rejects.toThrow(
-      /lock|writer|exist/i,
+      /recover|stale|writer/i,
     );
-    const prepared = await webFiles(root);
-    expect(prepared).toHaveLength(2);
+    expect(await webFiles(root)).toEqual([]);
     await rm(path.join(root, ".brain", "runtime", "writer.lock"));
     await expect(
       captureWebEvidence(root, queryId, input, {
         transactionTestOptions: { simulateCrashAfter: "files-applied" },
       }),
     ).rejects.toThrow(/simulated.*crash/i);
+    const prepared = await webFiles(root);
+    expect(prepared).toHaveLength(2);
     await recoverBrain(root);
     await expect(
       captureWebEvidence(root, queryId, input, {
         simulateSessionWriteFailure: true,
       }),
     ).rejects.toThrow(/session write failure/i);
+    expect(
+      (await readQuerySession(root, queryId)).webEvidenceSourceIds,
+    ).toEqual([]);
+    await expect(recoverBrain(root)).resolves.toBe("committed");
     const recovered = await captureWebEvidence(root, queryId, input);
     expect(recovered.created).toBe(false);
     expect(recovered.session.webEvidenceSourceIds).toEqual([

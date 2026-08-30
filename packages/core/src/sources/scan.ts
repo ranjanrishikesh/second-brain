@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { constants, createReadStream, type BigIntStats } from "node:fs";
+import { type BigIntStats, constants, createReadStream } from "node:fs";
 import {
   lstat,
   mkdir,
   open,
-  readFile,
   readdir,
+  readFile,
   realpath,
   stat,
   writeFile,
@@ -24,20 +24,20 @@ import {
   extractPdf,
   extractText,
 } from "./extract.js";
+import { sourceFormatForPath } from "./format.js";
 import {
-  sourceRecordV1Schema,
   type DocxOutputPolicyV1,
   type ExtractedSourceV1,
   type SourceRecordV1,
   type SourceScanResult,
+  sourceRecordV1Schema,
 } from "./types.js";
-import { sourceFormatForPath } from "./format.js";
 import {
   parseWebArtifactSidecar,
   parseWebCaptureMetadata,
+  type ValidatedWebArtifactV1,
   validateWebArtifact,
   webArtifactSidecarPath,
-  type ValidatedWebArtifactV1,
 } from "./web-evidence.js";
 
 interface SourceManifestV1 {
@@ -105,13 +105,18 @@ async function readBoundedWebEvidenceFile(
   const absolutePath = path.resolve(root, relativePath);
   const lexicalSources = path.resolve(root, "sources");
   if (!absolutePath.startsWith(`${lexicalSources}${path.sep}`)) {
-    throw new Error(`${label} must stay inside the brain sources tree: ${relativePath}`);
+    throw new Error(
+      `${label} must stay inside the brain sources tree: ${relativePath}`,
+    );
   }
   let metadata: BigIntStats;
   try {
     metadata = await lstat(absolutePath, { bigint: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" && kind === "sidecar") {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" &&
+      kind === "sidecar"
+    ) {
       return undefined;
     }
     throw error;
@@ -139,10 +144,7 @@ async function readBoundedWebEvidenceFile(
       `${label} must stay inside the brain sources tree: ${relativePath}`,
     );
   }
-  await testOptions.afterInitialWebEvidencePathValidation?.(
-    kind,
-    relativePath,
-  );
+  await testOptions.afterInitialWebEvidencePathValidation?.(kind, relativePath);
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(
@@ -154,10 +156,11 @@ async function readBoundedWebEvidenceFile(
   }
   try {
     const openedMetadata = await handle.stat({ bigint: true });
-    if (!openedMetadata.isFile() || !sameFileIdentity(metadata, openedMetadata)) {
-      throw new Error(
-        `${label} path changed while scanning: ${relativePath}`,
-      );
+    if (
+      !openedMetadata.isFile() ||
+      !sameFileIdentity(metadata, openedMetadata)
+    ) {
+      throw new Error(`${label} path changed while scanning: ${relativePath}`);
     }
     if (openedMetadata.size > BigInt(maxFileBytes)) {
       throw new Error(
@@ -183,11 +186,11 @@ async function readBoundedWebEvidenceFile(
       !unchangedOpenFile(openedMetadata, finalMetadata) ||
       finalMetadata.size !== BigInt(bytes)
     ) {
-      throw new Error(
-        `${label} changed while scanning: ${relativePath}`,
-      );
+      throw new Error(`${label} changed while scanning: ${relativePath}`);
     }
-    const finalRealEvidence = await realpath(absolutePath).catch(() => undefined);
+    const finalRealEvidence = await realpath(absolutePath).catch(
+      () => undefined,
+    );
     if (!finalRealEvidence?.startsWith(`${realSources}${path.sep}`)) {
       throw new Error(
         `${label} must stay inside the brain sources tree: ${relativePath}`,
@@ -264,12 +267,14 @@ export async function scanSources(
             testOptions,
           )
         : undefined;
-      const fileStats = isManagedWebEvidence ? undefined : await stat(absolutePath);
+      const fileStats = isManagedWebEvidence
+        ? undefined
+        : await stat(absolutePath);
       const sourceBytes = managedContent?.byteLength ?? fileStats?.size ?? 0;
       const exceedsSizeLimit = sourceBytes > config.sources.maxFileBytes;
       const content = exceedsSizeLimit
         ? undefined
-        : managedContent ?? (await readFile(absolutePath));
+        : (managedContent ?? (await readFile(absolutePath)));
       const digest = content ? sha256(content) : await sha256File(absolutePath);
       let webArtifact: ValidatedWebArtifactV1 | undefined;
       let webCapture: ReturnType<typeof parseWebCaptureMetadata>;
@@ -392,12 +397,14 @@ export async function scanSources(
                                 id,
                                 relativePath,
                                 new Uint8Array(content ?? []),
+                                config.sources.pdf,
                               )
                             : epub
                               ? await extractEpub(
                                   id,
                                   relativePath,
                                   new Uint8Array(content ?? []),
+                                  config.sources.epub,
                                 )
                               : undefined;
           }

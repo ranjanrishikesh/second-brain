@@ -10,6 +10,7 @@ import {
   assertDocxSemanticOutputBudget,
 } from "./docx-output-budget.js";
 import type { DocxOutputPolicyV1, ExtractedSourceV1 } from "./types.js";
+import { validateZipArchiveBudget } from "./zip-archive-budget.js";
 
 function titleFromMarkdown(text: string, filePath: string): string {
   const heading = text.match(/^#\s+(.+)$/m)?.[1]?.trim();
@@ -245,39 +246,86 @@ export function extractJsonLines(
   };
 }
 
+export interface PdfExtractionPolicyV1 {
+  maxPages: number;
+  maxExtractedBytes: number;
+}
+
+export interface PdfExtractionTestOptions {
+  /** Deterministic seam proving the page-count guard precedes page requests. */
+  beforeGetPage?: (pageNumber: number) => Promise<void> | void;
+}
+
 export async function extractPdf(
   sourceId: string,
   filePath: string,
   bytes: Uint8Array,
+  policy: PdfExtractionPolicyV1,
+  testOptions: PdfExtractionTestOptions = {},
 ): Promise<ExtractedSourceV1> {
-  const document = await getDocument({ data: bytes, verbosity: 0 }).promise;
-  const chunks = [];
-  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-    const page = await document.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const text = content.items
-      .flatMap((item) =>
-        "str" in item && item.str.trim() ? [item.str.trim()] : [],
-      )
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!text) continue;
-    chunks.push({
-      id: `${sourceId}_${String(pageNumber - 1).padStart(4, "0")}`,
+  const loadingTask = getDocument({
+    data: bytes,
+    verbosity: 0,
+    disableFontFace: true,
+    useSystemFonts: false,
+    useWorkerFetch: false,
+    isOffscreenCanvasSupported: false,
+  });
+  let document: Awaited<typeof loadingTask.promise> | undefined;
+  try {
+    document = await loadingTask.promise;
+    if (document.numPages > policy.maxPages) {
+      throw new Error(
+        `PDF contains ${document.numPages} pages, exceeding configured maximum of ${policy.maxPages}`,
+      );
+    }
+    const chunks = [];
+    let extractedBytes = 0;
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      await testOptions.beforeGetPage?.(pageNumber);
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .flatMap((item) =>
+          "str" in item && item.str.trim() ? [item.str.trim()] : [],
+        )
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!text) continue;
+      const pageBytes = Buffer.byteLength(text, "utf8");
+      const separatorBytes = chunks.length > 0 ? 2 : 0;
+      if (
+        pageBytes + separatorBytes >
+        policy.maxExtractedBytes - extractedBytes
+      ) {
+        throw new Error(
+          `Extracted PDF content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+        );
+      }
+      extractedBytes += separatorBytes + pageBytes;
+      chunks.push({
+        id: `${sourceId}_${String(pageNumber - 1).padStart(4, "0")}`,
+        sourceId,
+        ordinal: pageNumber - 1,
+        locator: `page=${pageNumber}`,
+        text,
+      });
+    }
+    return {
+      version: 1,
       sourceId,
-      ordinal: pageNumber - 1,
-      locator: `page=${pageNumber}`,
-      text,
-    });
+      title: path.basename(filePath, path.extname(filePath)),
+      text: chunks.map((chunk) => chunk.text).join("\n\n"),
+      chunks,
+    };
+  } finally {
+    try {
+      if (document) await document.cleanup();
+    } finally {
+      await loadingTask.destroy();
+    }
   }
-  return {
-    version: 1,
-    sourceId,
-    title: path.basename(filePath, path.extname(filePath)),
-    text: chunks.map((chunk) => chunk.text).join("\n\n"),
-    chunks,
-  };
 }
 
 export async function extractDocx(
@@ -373,14 +421,26 @@ function safeZipPath(value: string): string {
   return normalized;
 }
 
+export interface EpubExtractionPolicyV1 {
+  maxEntries: number;
+  maxExpandedBytes: number;
+  maxExtractedBytes: number;
+}
+
 export async function extractEpub(
   sourceId: string,
   filePath: string,
   bytes: Uint8Array,
+  policy: EpubExtractionPolicyV1,
 ): Promise<ExtractedSourceV1> {
+  await validateZipArchiveBudget(bytes, {
+    label: "EPUB",
+    maxEntries: policy.maxEntries,
+    maxExpandedBytes: policy.maxExpandedBytes,
+  });
   const archive = await JSZip.loadAsync(bytes, { checkCRC32: true });
   const entries = Object.keys(archive.files);
-  if (entries.length > 10_000)
+  if (entries.length > policy.maxEntries)
     throw new Error("EPUB contains too many archive entries");
   entries.forEach(safeZipPath);
 
@@ -422,7 +482,7 @@ export async function extractEpub(
   >;
   const packageDirectory = path.posix.dirname(packagePath);
   const chunks = [];
-  let totalCharacters = 0;
+  let extractedBytes = 0;
   for (const [ordinal, itemRef] of itemRefs.entries()) {
     const href = hrefById.get(String(itemRef["@idref"]));
     if (!href) continue;
@@ -430,11 +490,19 @@ export async function extractEpub(
     const chapterHtml = await archive.file(chapterPath)?.async("string");
     if (!chapterHtml)
       throw new Error(`EPUB spine item is missing: ${chapterPath}`);
-    totalCharacters += chapterHtml.length;
-    if (totalCharacters > 100_000_000)
-      throw new Error("EPUB extracted content exceeds 100 MB");
     const chapter = extractHtml(sourceId, chapterPath, chapterHtml);
     if (!chapter.text) continue;
+    const chapterBytes = Buffer.byteLength(chapter.text, "utf8");
+    const separatorBytes = chunks.length > 0 ? 2 : 0;
+    if (
+      chapterBytes + separatorBytes >
+      policy.maxExtractedBytes - extractedBytes
+    ) {
+      throw new Error(
+        `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+      );
+    }
+    extractedBytes += separatorBytes + chapterBytes;
     chunks.push({
       id: `${sourceId}_${String(ordinal).padStart(4, "0")}`,
       sourceId,

@@ -23,6 +23,7 @@ import {
   scanSources,
   supersedeSource,
 } from "../src/index.js";
+import { extractPdf } from "../src/sources/extract.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,6 +91,33 @@ async function textPdf(text = "Orbital mechanics"): Promise<Uint8Array> {
   const font = await document.embedFont(StandardFonts.Helvetica);
   page.drawText(text, { x: 40, y: 700, size: 14, font });
   return await document.save();
+}
+
+async function createEpub(
+  chapterHtml: string,
+  extraEntries: Record<string, string> = {},
+): Promise<Uint8Array> {
+  const archive = new JSZip();
+  archive.file("mimetype", "application/epub+zip");
+  archive.file(
+    "META-INF/container.xml",
+    '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+  );
+  archive.file(
+    "OEBPS/content.opf",
+    '<?xml version="1.0"?><package><metadata><title>Budget Book</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>',
+  );
+  archive.file(
+    "OEBPS/chapter.xhtml",
+    `<html><body>${chapterHtml}</body></html>`,
+  );
+  for (const [entryPath, content] of Object.entries(extraEntries)) {
+    archive.file(entryPath, content);
+  }
+  return await archive.generateAsync({
+    type: "uint8array",
+    compression: "DEFLATE",
+  });
 }
 
 async function createDocx(
@@ -503,6 +531,167 @@ describe("scanSources", () => {
     expect(extracted.chunks[0].text).toContain("Orbital mechanics");
   });
 
+  test("fails PDF extraction when configured page or extracted-output budgets are exceeded", async () => {
+    const cases = [
+      {
+        name: "pages",
+        maxPages: 2,
+        maxExtractedBytes: 1_000_000,
+        build: async () => {
+          const document = await PDFDocument.create();
+          document.addPage();
+          document.addPage();
+          document.addPage();
+          return await document.save();
+        },
+        error: /pdf contains 3 pages.*maximum of 2/i,
+      },
+      {
+        name: "output",
+        maxPages: 10,
+        maxExtractedBytes: 64,
+        build: async () => await textPdf("Extracted PDF words ".repeat(20)),
+        error: /extracted pdf content exceeds.*64 bytes/i,
+      },
+    ];
+    for (const item of cases) {
+      const root = await mkdtemp(
+        path.join(tmpdir(), `brain-pdf-${item.name}-`),
+      );
+      await initBrain(root, { name: "Test", description: "PDF budget" });
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.pdf = {
+        maxPages: item.maxPages,
+        maxExtractedBytes: item.maxExtractedBytes,
+      };
+      await writeFile(configPath, stringify(config));
+      await writeFile(
+        path.join(root, "sources", "budget.pdf"),
+        await item.build(),
+      );
+
+      const result = await scanSources(root);
+
+      expect(result.added[0]).toMatchObject({
+        extractionStatus: "failed",
+        extractor: "pdf-v1",
+      });
+      expect(result.added[0]?.error).toMatch(item.error);
+    }
+  });
+
+  test("rejects PDF page count before requesting any page text", async () => {
+    const document = await PDFDocument.create();
+    document.addPage();
+    document.addPage();
+    let requestedPages = 0;
+    const extractWithSeam = extractPdf as unknown as (
+      sourceId: string,
+      filePath: string,
+      bytes: Uint8Array,
+      policy: { maxPages: number; maxExtractedBytes: number },
+      testOptions: { beforeGetPage: () => void },
+    ) => Promise<unknown>;
+
+    await expect(
+      extractWithSeam(
+        "src_0000000000000000",
+        "bounded.pdf",
+        await document.save(),
+        { maxPages: 1, maxExtractedBytes: 1_000_000 },
+        { beforeGetPage: () => (requestedPages += 1) },
+      ),
+    ).rejects.toThrow(/pdf contains 2 pages.*maximum of 1/i);
+    expect(requestedPages).toBe(0);
+  });
+
+  test.each([
+    [
+      "pages",
+      { maxPages: 1, maxExtractedBytes: 1_000_000 },
+      /pdf contains 2 pages.*maximum of 1/i,
+    ],
+    [
+      "output",
+      { maxPages: 10, maxExtractedBytes: 64 },
+      /extracted pdf content exceeds.*64 bytes/i,
+    ],
+  ] as const)(
+    "enforces a lowered PDF %s budget on cache hits and rebuilds",
+    async (label, policy, expectedError) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-pdf-cache-"));
+      await initBrain(root, { name: "Test", description: "PDF cache budget" });
+      const document = await PDFDocument.create();
+      const font = await document.embedFont(StandardFonts.Helvetica);
+      for (let index = 0; index < 2; index += 1) {
+        const page = document.addPage();
+        page.drawText("Cached PDF words ".repeat(20), {
+          x: 40,
+          y: 700,
+          size: 10,
+          font,
+        });
+      }
+      await writeFile(
+        path.join(root, "sources", "cached.pdf"),
+        await document.save(),
+      );
+      const source = (await scanSources(root)).added[0];
+      expect(source?.extractionStatus).toBe("ready");
+      if (!source) throw new Error("Expected PDF source");
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.pdf = policy;
+      await writeFile(configPath, stringify(config));
+
+      await expect(readBrainItem(root, source.id), label).rejects.toThrow(
+        expectedError,
+      );
+      await rm(
+        path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+      );
+      await expect(readBrainItem(root, source.id), label).rejects.toThrow(
+        expectedError,
+      );
+    },
+  );
+
+  test.each(["pdf", "epub"] as const)(
+    "enforces a lowered maxFileBytes before %s cache-hit validation and rebuild",
+    async (format) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), `brain-${format}-input-cache-`),
+      );
+      await initBrain(root, {
+        name: "Test",
+        description: `${format.toUpperCase()} input cache budget`,
+      });
+      const bytes =
+        format === "pdf"
+          ? await textPdf("Cached PDF input")
+          : await createEpub("<p>Cached EPUB input</p>");
+      await writeFile(path.join(root, "sources", `cached.${format}`), bytes);
+      const source = (await scanSources(root)).added[0];
+      expect(source?.extractionStatus).toBe("ready");
+      if (!source) throw new Error(`Expected ${format.toUpperCase()} source`);
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.maxFileBytes = bytes.byteLength - 1;
+      await writeFile(configPath, stringify(config));
+
+      await expect(readBrainItem(root, source.id)).rejects.toThrow(
+        new RegExp(`exceeds.*${bytes.byteLength - 1} bytes`, "i"),
+      );
+      await rm(
+        path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+      );
+      await expect(readBrainItem(root, source.id)).rejects.toThrow(
+        new RegExp(`exceeds.*${bytes.byteLength - 1} bytes`, "i"),
+      );
+    },
+  );
+
   test("registers a web artifact from its validated hidden sidecar", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-web-pdf-"));
     await initBrain(root, { name: "Test", description: "Web PDF test" });
@@ -611,10 +800,7 @@ describe("scanSources", () => {
 
       await expect(
         scanSources(root, undefined, {
-          afterInitialWebEvidencePathValidation: async (
-            kind,
-            relativePath,
-          ) => {
+          afterInitialWebEvidencePathValidation: async (kind, relativePath) => {
             if (swapped || kind !== replacedKind) return;
             swapped = true;
             if (kind === "artifact") {
@@ -1627,6 +1813,119 @@ describe("scanSources", () => {
     expect(extracted.chunks[0]).toMatchObject({ locator: "chapter=1" });
     expect(extracted.chunks[0].text).toContain("The crew reached Mars.");
   });
+
+  test("fails EPUB extraction before decompression when entry and expanded budgets are exceeded", async () => {
+    const cases = [
+      {
+        name: "entries",
+        epub: await createEpub("<p>Visible</p>", {
+          "extra/one.txt": "1",
+          "extra/two.txt": "2",
+        }),
+        policy: { maxEntries: 5, maxExpandedBytes: 1_000_000 },
+        error: /too many archive entries/i,
+      },
+      {
+        name: "expanded bytes",
+        epub: await createEpub(`<p>${"A".repeat(50_000)}</p>`),
+        policy: { maxEntries: 100, maxExpandedBytes: 4_096 },
+        error: /expanded epub content exceeds.*4096 bytes/i,
+      },
+    ];
+    for (const item of cases) {
+      const root = await mkdtemp(
+        path.join(tmpdir(), `brain-epub-${item.name}-`),
+      );
+      await initBrain(root, { name: "Test", description: "EPUB budget" });
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.epub = {
+        ...item.policy,
+        maxExtractedBytes: 1_000_000,
+      };
+      await writeFile(configPath, stringify(config));
+      await writeFile(path.join(root, "sources", "budget.epub"), item.epub);
+
+      const result = await scanSources(root);
+
+      expect(result.added[0]).toMatchObject({
+        extractionStatus: "failed",
+        extractor: "epub-v1",
+      });
+      expect(result.added[0]?.error).toMatch(item.error);
+    }
+  });
+
+  test("fails EPUB extraction when normalized extracted output exceeds its budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-epub-output-"));
+    await initBrain(root, { name: "Test", description: "EPUB output budget" });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.epub = {
+      maxEntries: 100,
+      maxExpandedBytes: 1_000_000,
+      maxExtractedBytes: 128,
+    };
+    await writeFile(configPath, stringify(config));
+    await writeFile(
+      path.join(root, "sources", "output.epub"),
+      await createEpub(`<p>${"Extracted words ".repeat(100)}</p>`),
+    );
+
+    const result = await scanSources(root);
+
+    expect(result.added[0]).toMatchObject({
+      extractionStatus: "failed",
+      extractor: "epub-v1",
+    });
+    expect(result.added[0]?.error).toMatch(
+      /extracted epub content exceeds.*128 bytes/i,
+    );
+  });
+
+  test.each([
+    [
+      "expanded",
+      { maxEntries: 100, maxExpandedBytes: 512, maxExtractedBytes: 1_000_000 },
+      /expanded epub content exceeds.*512 bytes/i,
+    ],
+    [
+      "extracted",
+      {
+        maxEntries: 100,
+        maxExpandedBytes: 1_000_000,
+        maxExtractedBytes: 128,
+      },
+      /extracted epub content exceeds.*128 bytes/i,
+    ],
+  ] as const)(
+    "enforces a lowered EPUB %s budget on cache hits and rebuilds",
+    async (_label, policy, expectedError) => {
+      const root = await mkdtemp(path.join(tmpdir(), "brain-epub-cache-"));
+      await initBrain(root, { name: "Test", description: "EPUB cache budget" });
+      await writeFile(
+        path.join(root, "sources", "cached.epub"),
+        await createEpub(`<p>${"Cached words ".repeat(100)}</p>`),
+      );
+      const source = (await scanSources(root)).added[0];
+      expect(source?.extractionStatus).toBe("ready");
+      if (!source) throw new Error("Expected EPUB source");
+      const configPath = path.join(root, "brain.config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.sources.epub = policy;
+      await writeFile(configPath, stringify(config));
+
+      await expect(readBrainItem(root, source.id)).rejects.toThrow(
+        expectedError,
+      );
+      await rm(
+        path.join(root, ".brain", "cache", "extracted", `${source.id}.json`),
+      );
+      await expect(readBrainItem(root, source.id)).rejects.toThrow(
+        expectedError,
+      );
+    },
+  );
 
   test("records extraction failures instead of silently omitting the source", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-failed-source-"));

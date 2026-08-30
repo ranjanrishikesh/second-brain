@@ -31,6 +31,17 @@ const semanticModelV1Schema = z.object({
     .default(defaultSemanticModelV1.artifactSha256),
 });
 
+const defaultPdfSourcePolicyV1 = {
+  maxPages: 2_000,
+  maxExtractedBytes: 104_857_600,
+} as const;
+
+const defaultEpubSourcePolicyV1 = {
+  maxEntries: 1_000,
+  maxExpandedBytes: 104_857_600,
+  maxExtractedBytes: 104_857_600,
+} as const;
+
 export const brainConfigV1Schema = z.object({
   version: z.literal(1),
   brain: z.object({
@@ -50,8 +61,26 @@ export const brainConfigV1Schema = z.object({
     .object({
       roots: z.array(z.string().trim().min(1)).min(1).default(["sources"]),
       maxFileBytes: z.number().int().positive().default(104_857_600),
+      pdf: z
+        .object({
+          maxPages: z.number().int().positive().default(2_000),
+          maxExtractedBytes: z.number().int().positive().default(104_857_600),
+        })
+        .default(defaultPdfSourcePolicyV1),
+      epub: z
+        .object({
+          maxEntries: z.number().int().positive().default(1_000),
+          maxExpandedBytes: z.number().int().positive().default(104_857_600),
+          maxExtractedBytes: z.number().int().positive().default(104_857_600),
+        })
+        .default(defaultEpubSourcePolicyV1),
     })
-    .default({ roots: ["sources"], maxFileBytes: 104_857_600 }),
+    .default({
+      roots: ["sources"],
+      maxFileBytes: 104_857_600,
+      pdf: defaultPdfSourcePolicyV1,
+      epub: defaultEpubSourcePolicyV1,
+    }),
   bootstrap: z
     .object({
       mode: z.literal("catalog-map").default("catalog-map"),

@@ -45,7 +45,16 @@
     "sources": {
       "default": {
         "roots": ["sources"],
-        "maxFileBytes": 104857600
+        "maxFileBytes": 104857600,
+        "pdf": {
+          "maxPages": 2000,
+          "maxExtractedBytes": 104857600
+        },
+        "epub": {
+          "maxEntries": 1000,
+          "maxExpandedBytes": 104857600,
+          "maxExtractedBytes": 104857600
+        }
       },
       "type": "object",
       "properties": {
@@ -63,9 +72,62 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
+        },
+        "pdf": {
+          "default": {
+            "maxPages": 2000,
+            "maxExtractedBytes": 104857600
+          },
+          "type": "object",
+          "properties": {
+            "maxPages": {
+              "default": 2000,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxExtractedBytes": {
+              "default": 104857600,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["maxPages", "maxExtractedBytes"],
+          "additionalProperties": false
+        },
+        "epub": {
+          "default": {
+            "maxEntries": 1000,
+            "maxExpandedBytes": 104857600,
+            "maxExtractedBytes": 104857600
+          },
+          "type": "object",
+          "properties": {
+            "maxEntries": {
+              "default": 1000,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxExpandedBytes": {
+              "default": 104857600,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "maxExtractedBytes": {
+              "default": 104857600,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["maxEntries", "maxExpandedBytes", "maxExtractedBytes"],
+          "additionalProperties": false
         }
       },
-      "required": ["roots", "maxFileBytes"],
+      "required": ["roots", "maxFileBytes", "pdf", "epub"],
       "additionalProperties": false
     },
     "bootstrap": {

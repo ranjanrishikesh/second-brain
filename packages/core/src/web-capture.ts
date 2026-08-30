@@ -1,20 +1,17 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { stringify } from "yaml";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
 import {
-  readQuerySession,
-  refreshQueryBootstrap,
-  writeQuerySession,
+  mergeCommittedWebEvidenceSource,
   type QuerySessionV1,
+  readQuerySession,
 } from "./query.js";
+import { registerWebSourceCapture } from "./source-transaction.js";
 import {
-  enrichSourceWebDiscovery,
-  scanAndRegisterSources,
-} from "./source-transaction.js";
-import {
+  type EpubExtractionPolicyV1,
   extractCsv,
   extractDocxWithPolicy,
   extractEpub,
@@ -23,18 +20,19 @@ import {
   extractMarkdown,
   extractPdf,
   extractText,
+  type PdfExtractionPolicyV1,
 } from "./sources/extract.js";
-import { sourceRecordV1Schema, type SourceRecordV1 } from "./sources/types.js";
+import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import {
+  type DetectedWebArtifactV1,
   detectWebArtifact,
   parseWebArtifactSidecar,
   parseWebCaptureMetadata,
   renderWebArtifactSidecar,
   validateWebUrlChain,
-  webArtifactSidecarPath,
-  type DetectedWebArtifactV1,
   type WebArtifactSidecarV1,
   type WebDiscoveryV1,
+  webArtifactSidecarPath,
 } from "./sources/web-evidence.js";
 import type { TransactionTestOptions } from "./transaction.js";
 import { assertWebApproval, calculateQuestionHash } from "./web-approval.js";
@@ -137,6 +135,8 @@ export interface WebCaptureTestOptions {
   simulateSessionWriteFailure?: boolean;
   /** Deterministic canonical transaction faults; never use outside tests. */
   transactionTestOptions?: TransactionTestOptions;
+  /** Pauses after reading a query session; used for deterministic merge races. */
+  afterSessionRead?: () => Promise<void> | void;
 }
 
 function sha256(value: Uint8Array | string): string {
@@ -330,6 +330,8 @@ async function assertArtifactStructure(
   fileName: string,
   content: Uint8Array,
   maxFileBytes: number,
+  pdfPolicy: PdfExtractionPolicyV1,
+  epubPolicy: EpubExtractionPolicyV1,
 ): Promise<void> {
   const id = "src_0000000000000000";
   const text =
@@ -356,10 +358,11 @@ async function assertArtifactStructure(
       text as string,
       detected.format === "tsv" ? "\t" : ",",
     );
-  else if (detected.format === "pdf") await extractPdf(id, fileName, content);
+  else if (detected.format === "pdf")
+    await extractPdf(id, fileName, content, pdfPolicy);
   else if (detected.format === "docx")
     await extractDocxWithPolicy(id, fileName, content, maxFileBytes);
-  else await extractEpub(id, fileName, content);
+  else await extractEpub(id, fileName, content, epubPolicy);
 }
 
 async function linkSource(
@@ -368,52 +371,14 @@ async function linkSource(
   source: SourceRecordV1,
   testOptions: WebCaptureTestOptions,
 ): Promise<QuerySessionV1> {
-  const session = await readQuerySession(root, queryId);
-  if (!session.webEvidenceSourceIds.includes(source.id)) {
-    session.webEvidenceSourceIds.push(source.id);
-  }
-  await refreshQueryBootstrap(root, session);
-  if (testOptions.simulateSessionWriteFailure) {
-    throw new Error("Simulated query session write failure");
-  }
-  await writeQuerySession(root, session);
-  return session;
-}
-
-async function enrichAndLink(
-  root: string,
-  queryId: string,
-  source: SourceRecordV1,
-  discovery: WebDiscoveryV1,
-  created: boolean,
-  testOptions: WebCaptureTestOptions,
-): Promise<WebCaptureResult> {
-  const enrichment = await enrichSourceWebDiscovery(
-    root,
-    source.id,
-    discovery,
-    testOptions.transactionTestOptions,
-  );
-  const session = await linkSource(
-    root,
-    queryId,
-    enrichment.source,
-    testOptions,
-  );
-  return { source: enrichment.source, session, created };
-}
-
-async function revalidateRegisteredSource(
-  root: string,
-  sourceId: string,
-  testOptions: WebCaptureTestOptions,
-): Promise<SourceRecordV1> {
-  await scanAndRegisterSources(root, testOptions.transactionTestOptions);
-  const source = (await readSources(root)).find(
-    (candidate) => candidate.id === sourceId,
-  );
-  if (!source) throw new Error(`Registered source disappeared: ${sourceId}`);
-  return source;
+  return await mergeCommittedWebEvidenceSource(root, queryId, source.id, {
+    ...(testOptions.simulateSessionWriteFailure
+      ? { simulateSessionWriteFailure: true }
+      : {}),
+    ...(testOptions.afterSessionRead
+      ? { afterSessionRead: testOptions.afterSessionRead }
+      : {}),
+  });
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -548,7 +513,6 @@ export async function captureWebEvidence(
   const input = normalizeInput(rawInput);
   const urls = validateWebUrlChain(input);
   const config = await loadBrainConfig(root);
-  const sources = await readSources(root);
 
   if (input.representation === "artifact") {
     const artifactContent = Uint8Array.from(input.content);
@@ -576,110 +540,120 @@ export async function captureWebEvidence(
       input.fileName,
       Uint8Array.from(artifactContent),
       config.sources.maxFileBytes,
+      config.sources.pdf,
+      config.sources.epub,
     );
     const digest = sha256(artifactContent);
-    const duplicate = sources.find((source) => source.sha256 === digest);
-    if (duplicate) {
-      if (duplicate.extractor !== extractorByFormat[detected.format]) {
-        throw new Error(
-          `Existing source extractor ${duplicate.extractor} is not compatible with ${detected.format} web evidence`,
-        );
-      }
-      const retryDiscovery = sourceDiscoveries(duplicate).find((candidate) =>
-        discoveryMatchesRetry(candidate, input, urls, initialSession),
-      );
-      const retrievedAt =
-        input.retrievedAt ??
-        retryDiscovery?.retrievedAt ??
-        new Date().toISOString();
-      const validatedDuplicate = await revalidateRegisteredSource(
-        root,
-        duplicate.id,
-        testOptions,
-      );
-      return await enrichAndLink(
-        root,
-        queryId,
-        validatedDuplicate,
-        discoveryFor(input, urls, initialSession, retrievedAt),
-        false,
-        testOptions,
-      );
-    }
+    let linkedSession: QuerySessionV1 | undefined;
+    const capture = await registerWebSourceCapture(
+      root,
+      async () => {
+        const sources = await readSources(root);
+        const duplicate = sources.find((source) => source.sha256 === digest);
+        if (duplicate) {
+          if (
+            duplicate.extractor !== extractorByFormat[detected.format] ||
+            duplicate.mediaType !== detected.mediaType
+          ) {
+            throw new Error(
+              `Existing source format ${duplicate.mediaType} (${duplicate.extractor}) is not compatible with ${detected.format} web evidence (${detected.mediaType})`,
+            );
+          }
+          const retryDiscovery = sourceDiscoveries(duplicate).find(
+            (candidate) =>
+              discoveryMatchesRetry(candidate, input, urls, initialSession),
+          );
+          const retrievedAt =
+            input.retrievedAt ??
+            retryDiscovery?.retrievedAt ??
+            new Date().toISOString();
+          return {
+            sourceId: duplicate.id,
+            discovery: discoveryFor(input, urls, initialSession, retrievedAt),
+          };
+        }
 
-    const fileName = `${slugify(input.title)}-${digest.slice(0, 12)}${detected.extension}`;
-    let retrievedAt = input.retrievedAt ?? new Date().toISOString();
-    let sourcePath = captureRelativePath(retrievedAt, fileName);
-    if (!input.retrievedAt) {
-      const preparedPaths = await filesNamed(
-        path.join(root, "sources", "web"),
-        fileName,
-      );
-      if (preparedPaths.length > 1)
-        throw new Error(`Multiple prepared web captures exist: ${fileName}`);
-      const preparedPath = preparedPaths[0];
-      if (preparedPath) {
-        sourcePath = path
-          .relative(root, preparedPath)
-          .split(path.sep)
-          .join("/");
-        const sidecar = parseWebArtifactSidecar(
-          await readFile(
-            path.join(root, webArtifactSidecarPath(sourcePath)),
-            "utf8",
-          ),
-          sourcePath,
+        const fileName = `${slugify(input.title)}-${digest.slice(0, 12)}${detected.extension}`;
+        let retrievedAt = input.retrievedAt ?? new Date().toISOString();
+        let sourcePath = captureRelativePath(retrievedAt, fileName);
+        if (!input.retrievedAt) {
+          const preparedPaths = await filesNamed(
+            path.join(root, "sources", "web"),
+            fileName,
+          );
+          if (preparedPaths.length > 1)
+            throw new Error(
+              `Multiple prepared web captures exist: ${fileName}`,
+            );
+          const preparedPath = preparedPaths[0];
+          if (preparedPath) {
+            sourcePath = path
+              .relative(root, preparedPath)
+              .split(path.sep)
+              .join("/");
+            const sidecar = parseWebArtifactSidecar(
+              await readFile(
+                path.join(root, webArtifactSidecarPath(sourcePath)),
+                "utf8",
+              ),
+              sourcePath,
+            );
+            retrievedAt = sidecar.discovery.retrievedAt;
+            if (captureRelativePath(retrievedAt, fileName) !== sourcePath) {
+              throw new Error(
+                `Prepared web evidence path does not match its retrieval time: ${sourcePath}`,
+              );
+            }
+          }
+        }
+        const discovery = discoveryFor(
+          input,
+          urls,
+          initialSession,
+          retrievedAt,
         );
-        retrievedAt = sidecar.discovery.retrievedAt;
-        if (captureRelativePath(retrievedAt, fileName) !== sourcePath) {
+        const previous = newestMatchingSource(sources, urls);
+        const sidecar: WebArtifactSidecarV1 = {
+          brainWebArtifact: 1,
+          sourcePath,
+          artifactSha256: digest,
+          artifactBytes: artifactContent.byteLength,
+          title: input.title,
+          format: detected.format,
+          mediaType: detected.mediaType,
+          discovery,
+          ...(previous ? { supersedes: previous.id } : {}),
+        };
+        const sidecarPath = webArtifactSidecarPath(sourcePath);
+        const sidecarBytes = Buffer.from(
+          renderWebArtifactSidecar(sidecar),
+          "utf8",
+        );
+        if (sidecarBytes.byteLength > config.sources.maxFileBytes) {
           throw new Error(
-            `Prepared web evidence path does not match its retrieval time: ${sourcePath}`,
+            `Web artifact sidecar exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
           );
         }
-      }
-    }
-    const discovery = discoveryFor(input, urls, initialSession, retrievedAt);
-    const previous = newestMatchingSource(sources, urls);
-    const sidecar: WebArtifactSidecarV1 = {
-      brainWebArtifact: 1,
-      sourcePath,
-      artifactSha256: digest,
-      artifactBytes: artifactContent.byteLength,
-      title: input.title,
-      format: detected.format,
-      mediaType: detected.mediaType,
-      discovery,
-      ...(previous ? { supersedes: previous.id } : {}),
-    };
-    const sidecarPath = webArtifactSidecarPath(sourcePath);
-    const sidecarBytes = Buffer.from(renderWebArtifactSidecar(sidecar), "utf8");
-    if (sidecarBytes.byteLength > config.sources.maxFileBytes) {
-      throw new Error(
-        `Web artifact sidecar exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
-      );
-    }
-    await prepareArtifactPair(
-      root,
-      sourcePath,
-      artifactContent,
-      sidecarPath,
-      sidecarBytes,
-    );
-    const scan = await scanAndRegisterSources(
-      root,
+        await prepareArtifactPair(
+          root,
+          sourcePath,
+          artifactContent,
+          sidecarPath,
+          sidecarBytes,
+        );
+        return { sourcePath, discovery };
+      },
       testOptions.transactionTestOptions,
+      async ({ source }) => {
+        linkedSession = await linkSource(root, queryId, source, testOptions);
+      },
     );
-    const registered =
-      scan.added.find((source) => source.path === sourcePath) ??
-      scan.unchanged.find((source) => source.path === sourcePath) ??
-      (await readSources(root)).find((source) => source.sha256 === digest);
-    if (!registered)
-      throw new Error(`Captured source was not registered: ${sourcePath}`);
-    const session = await linkSource(root, queryId, registered, testOptions);
+    if (!linkedSession)
+      throw new Error("Web evidence query linkage did not run");
     return {
-      source: registered,
-      session,
-      created: scan.added.some((item) => item.id === registered.id),
+      source: capture.source,
+      session: linkedSession,
+      created: capture.created,
     };
   }
 
@@ -695,107 +669,101 @@ export async function captureWebEvidence(
       normalizedBody,
     ]),
   );
-  const duplicate = await findLegacyTextDuplicate(
-    root,
-    sources,
-    input,
-    urls,
-    bodySha256,
-  );
-  if (duplicate) {
-    const retryDiscovery = sourceDiscoveries(duplicate).find((candidate) =>
-      discoveryMatchesRetry(candidate, input, urls, initialSession),
-    );
-    const retrievedAt =
-      input.retrievedAt ??
-      retryDiscovery?.retrievedAt ??
-      new Date().toISOString();
-    const validatedDuplicate = await revalidateRegisteredSource(
-      root,
-      duplicate.id,
-      testOptions,
-    );
-    return await enrichAndLink(
-      root,
-      queryId,
-      validatedDuplicate,
-      discoveryFor(input, urls, initialSession, retrievedAt),
-      false,
-      testOptions,
-    );
-  }
-
   const fileName = `${slugify(input.title)}-${logicalDigest.slice(0, 12)}.md`;
-  let retrievedAt = input.retrievedAt ?? new Date().toISOString();
-  let relativePath = captureRelativePath(retrievedAt, fileName);
-  if (!input.retrievedAt) {
-    const preparedPaths = await filesNamed(
-      path.join(root, "sources", "web"),
-      fileName,
-    );
-    if (preparedPaths.length > 1)
-      throw new Error(`Multiple prepared web captures exist: ${fileName}`);
-    const preparedPath = preparedPaths[0];
-    if (preparedPath) {
-      relativePath = path
-        .relative(root, preparedPath)
-        .split(path.sep)
-        .join("/");
-      const prepared = await readFile(preparedPath, "utf8");
-      const metadata = parseWebCaptureMetadata(prepared);
-      if (!metadata) {
-        throw new Error(
-          `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
-        );
-      }
-      retrievedAt = metadata.retrievedAt;
-      if (captureRelativePath(retrievedAt, fileName) !== relativePath) {
-        throw new Error(
-          `Prepared web evidence path does not match its retrieval time: ${relativePath}`,
-        );
-      }
-    }
-  }
-  const previous = newestMatchingSource(sources, urls);
-  const metadata = {
-    brainWebCapture: 1,
-    url: urls.originalUrl,
-    originalUrl: urls.originalUrl,
-    finalUrl: urls.finalUrl,
-    redirectChain: urls.redirectChain,
-    retrievedAt,
-    query: initialSession.question,
-    captureKind: input.captureKind,
-    completeness: input.completeness,
-    title: input.title,
-    contentSha256: bodySha256,
-    ...(previous ? { supersedes: previous.id } : {}),
-  };
-  const captureMarkdown = `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${normalizedBody}${normalizedBody.endsWith("\n") ? "" : "\n"}`;
-  if (
-    Buffer.byteLength(captureMarkdown, "utf8") > config.sources.maxFileBytes
-  ) {
-    throw new Error(
-      `Web capture exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
-    );
-  }
-  await prepareText(root, relativePath, captureMarkdown);
-  const scan = await scanAndRegisterSources(
+  let linkedSession: QuerySessionV1 | undefined;
+  const capture = await registerWebSourceCapture(
     root,
+    async () => {
+      const sources = await readSources(root);
+      const duplicate = await findLegacyTextDuplicate(
+        root,
+        sources,
+        input,
+        urls,
+        bodySha256,
+      );
+      if (duplicate) {
+        const retryDiscovery = sourceDiscoveries(duplicate).find((candidate) =>
+          discoveryMatchesRetry(candidate, input, urls, initialSession),
+        );
+        const retrievedAt =
+          input.retrievedAt ??
+          retryDiscovery?.retrievedAt ??
+          new Date().toISOString();
+        return {
+          sourceId: duplicate.id,
+          discovery: discoveryFor(input, urls, initialSession, retrievedAt),
+        };
+      }
+
+      let retrievedAt = input.retrievedAt ?? new Date().toISOString();
+      let relativePath = captureRelativePath(retrievedAt, fileName);
+      if (!input.retrievedAt) {
+        const preparedPaths = await filesNamed(
+          path.join(root, "sources", "web"),
+          fileName,
+        );
+        if (preparedPaths.length > 1)
+          throw new Error(`Multiple prepared web captures exist: ${fileName}`);
+        const preparedPath = preparedPaths[0];
+        if (preparedPath) {
+          relativePath = path
+            .relative(root, preparedPath)
+            .split(path.sep)
+            .join("/");
+          const prepared = await readFile(preparedPath, "utf8");
+          const metadata = parseWebCaptureMetadata(prepared);
+          if (!metadata) {
+            throw new Error(
+              `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
+            );
+          }
+          retrievedAt = metadata.retrievedAt;
+          if (captureRelativePath(retrievedAt, fileName) !== relativePath) {
+            throw new Error(
+              `Prepared web evidence path does not match its retrieval time: ${relativePath}`,
+            );
+          }
+        }
+      }
+      const previous = newestMatchingSource(sources, urls);
+      const metadata = {
+        brainWebCapture: 1,
+        url: urls.originalUrl,
+        originalUrl: urls.originalUrl,
+        finalUrl: urls.finalUrl,
+        redirectChain: urls.redirectChain,
+        retrievedAt,
+        query: initialSession.question,
+        captureKind: input.captureKind,
+        completeness: input.completeness,
+        title: input.title,
+        contentSha256: bodySha256,
+        ...(previous ? { supersedes: previous.id } : {}),
+      };
+      const captureMarkdown = `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${normalizedBody}${normalizedBody.endsWith("\n") ? "" : "\n"}`;
+      if (
+        Buffer.byteLength(captureMarkdown, "utf8") > config.sources.maxFileBytes
+      ) {
+        throw new Error(
+          `Web capture exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
+        );
+      }
+      await prepareText(root, relativePath, captureMarkdown);
+      return {
+        sourcePath: relativePath,
+        discovery: discoveryFor(input, urls, initialSession, retrievedAt),
+      };
+    },
     testOptions.transactionTestOptions,
+    async ({ source }) => {
+      linkedSession = await linkSource(root, queryId, source, testOptions);
+    },
   );
-  const registered =
-    scan.added.find((source) => source.path === relativePath) ??
-    scan.unchanged.find((source) => source.path === relativePath) ??
-    (await readSources(root)).find((source) => source.path === relativePath);
-  if (!registered)
-    throw new Error(`Captured source was not registered: ${relativePath}`);
-  return await enrichAndLink(
-    root,
-    queryId,
-    registered,
-    discoveryFor(input, urls, initialSession, retrievedAt),
-    scan.added.some((item) => item.id === registered.id),
-    testOptions,
-  );
+  if (!linkedSession) throw new Error("Web evidence query linkage did not run");
+  return {
+    source: capture.source,
+    session: linkedSession,
+    created: capture.created,
+  };
 }

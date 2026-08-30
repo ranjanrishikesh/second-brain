@@ -6,6 +6,7 @@ import {
   chmod,
   copyFile,
   cp,
+  link,
   lstat,
   mkdir,
   readFile,
@@ -19,25 +20,25 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { loadBrainConfig } from "./config.js";
-import { readBrainState, type SyncStatusV1 } from "./state.js";
-import type { BrainRuntimeServices } from "./semantic.js";
 import {
   assertReconciliationPlanMatches,
   assertReconciliationReceipt,
   planReconciliation,
 } from "./reconciliation.js";
+import type { BrainRuntimeServices } from "./semantic.js";
+import { readBrainState, type SyncStatusV1 } from "./state.js";
+import { writeGeneratedWikiFiles } from "./wiki/generated.js";
 import {
+  type AuditReportV1,
   loadWikiPages,
   validateWikiGraph,
-  type AuditReportV1,
 } from "./wiki/graph.js";
-import { writeGeneratedWikiFiles } from "./wiki/generated.js";
 import { applyWikiChangeSet } from "./wiki/mutate.js";
 import { renderWikiPage } from "./wiki/page.js";
 import { canonicalWikiPagePath } from "./wiki/path.js";
 import {
-  changeSetV1Schema,
   type ChangeSetV1,
+  changeSetV1Schema,
   type WikiPageV1,
 } from "./wiki/types.js";
 
@@ -637,6 +638,93 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
+export interface WriterWaitOptions {
+  timeoutMs: number;
+  pollIntervalMs?: number;
+}
+
+function recoveryRequiredForWriter(detail: string): Error {
+  return new Error(
+    `Brain recovery is required before another canonical write: ${detail}`,
+  );
+}
+
+function isLiveProcess(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function acquireWriterLock(
+  lockPath: string,
+  operationId: string,
+  waitForWriter?: WriterWaitOptions,
+): Promise<void> {
+  const marker = `${JSON.stringify({
+    pid: process.pid,
+    operationId,
+    recoverable: false,
+  })}\n`;
+  const timeoutMs = waitForWriter?.timeoutMs ?? 0;
+  const pollIntervalMs = waitForWriter?.pollIntervalMs ?? 25;
+  if (
+    waitForWriter &&
+    (!Number.isFinite(timeoutMs) ||
+      timeoutMs <= 0 ||
+      !Number.isFinite(pollIntervalMs) ||
+      pollIntervalMs <= 0)
+  ) {
+    throw new Error("Canonical writer wait durations must be positive");
+  }
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const candidatePath = `${lockPath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(candidatePath, marker, { flag: "wx" });
+      await link(candidatePath, lockPath);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!waitForWriter) throw error;
+    } finally {
+      await rm(candidatePath, { force: true });
+    }
+
+    let owner: z.infer<typeof writerLockSchema>;
+    try {
+      owner = writerLockSchema.parse(
+        JSON.parse(await readFile(lockPath, "utf8")),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw recoveryRequiredForWriter("the writer lock is malformed");
+    }
+    if (owner.recoverable) {
+      throw recoveryRequiredForWriter(
+        `the writer lock for ${owner.operationId} is recoverable`,
+      );
+    }
+    if (!isLiveProcess(owner.pid)) {
+      throw recoveryRequiredForWriter(
+        `the writer lock for ${owner.operationId} is stale`,
+      );
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for active canonical writer ${owner.operationId}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+}
+
 async function removeOwnedGitIndexLock(
   root: string,
   operationId: string,
@@ -1207,6 +1295,10 @@ export interface CanonicalWriteOptions<T> {
   allowUntrackedPaths?: string[];
   /** Extra exact canonical files this operation must snapshot and restore. */
   managedFilePaths?: string[];
+  /** Internal opt-in serialization for callers that can safely retry from fresh state. */
+  waitForWriter?: WriterWaitOptions;
+  /** Internal durable seam used while this canonical writer still owns its lock. */
+  afterCanonicalCommit?: (value: T) => Promise<void>;
 }
 
 export async function runCanonicalWrite<T>(
@@ -1234,38 +1326,6 @@ export async function runCanonicalWrite<T>(
   }
   const runtimePath = path.join(root, ".brain", "runtime");
   const journalPath = path.join(runtimePath, "transaction.json");
-  if (await pathExists(journalPath)) {
-    throw new Error(
-      "Brain recovery is required before another canonical write",
-    );
-  }
-  const gitRepository = await isGitRepository(root);
-  if (gitRepository) {
-    const repositoryRoot = await git(root, ["rev-parse", "--show-toplevel"]);
-    if ((await realpath(repositoryRoot)) !== (await realpath(root))) {
-      throw new Error("Brain root must be the Git repository root");
-    }
-    if (await hasStagedChanges(root)) {
-      throw new Error("Refusing canonical write while Git has staged changes");
-    }
-    const dirtyManaged = (
-      await changedCanonicalWorktreeEntries(
-        root,
-        managedRootPaths,
-        managedFilePaths,
-      )
-    ).filter(
-      (change) =>
-        change.status !== "??" || !allowUntrackedPaths.has(change.path),
-    );
-    if (dirtyManaged.length > 0) {
-      throw new Error(
-        `Refusing canonical write with dirty managed files:\n${dirtyManaged
-          .map((change) => `${change.status} ${change.path}`)
-          .join("\n")}`,
-      );
-    }
-  }
 
   const transactionRoot = path.resolve(runtimePath, "transactions");
   const transactionPath = path.resolve(transactionRoot, options.operationId);
@@ -1275,21 +1335,49 @@ export async function runCanonicalWrite<T>(
   const backupPath = path.join(transactionPath, "backup");
   const lockPath = path.join(runtimePath, "writer.lock");
   await mkdir(runtimePath, { recursive: true });
-  await writeFile(
-    lockPath,
-    `${JSON.stringify({
-      pid: process.pid,
-      operationId: options.operationId,
-      recoverable: false,
-    })}\n`,
-    { flag: "wx" },
-  );
+  await acquireWriterLock(lockPath, options.operationId, options.waitForWriter);
+  let gitRepository = false;
   let committed = false;
   let headUpdated = false;
   let stagePaths: string[] = [];
   let snapshotPrepared = false;
+  let journalOwned = false;
   let journal: TransactionJournal | undefined;
   try {
+    if (await pathExists(journalPath)) {
+      throw recoveryRequiredForWriter("a recovery journal is present");
+    }
+    // Every preflight is intentionally run only after ownership is available:
+    // a waiting caller must never act on Git or worktree state observed earlier.
+    gitRepository = await isGitRepository(root);
+    if (gitRepository) {
+      const repositoryRoot = await git(root, ["rev-parse", "--show-toplevel"]);
+      if ((await realpath(repositoryRoot)) !== (await realpath(root))) {
+        throw new Error("Brain root must be the Git repository root");
+      }
+      if (await hasStagedChanges(root)) {
+        throw new Error(
+          "Refusing canonical write while Git has staged changes",
+        );
+      }
+      const dirtyManaged = (
+        await changedCanonicalWorktreeEntries(
+          root,
+          managedRootPaths,
+          managedFilePaths,
+        )
+      ).filter(
+        (change) =>
+          change.status !== "??" || !allowUntrackedPaths.has(change.path),
+      );
+      if (dirtyManaged.length > 0) {
+        throw new Error(
+          `Refusing canonical write with dirty managed files:\n${dirtyManaged
+            .map((change) => `${change.status} ${change.path}`)
+            .join("\n")}`,
+        );
+      }
+    }
     const preHead = gitRepository ? await currentGitHead(root) : "";
     await mkdir(transactionRoot, { recursive: true });
     const realRuntime = await realpath(runtimePath);
@@ -1317,6 +1405,7 @@ export async function runCanonicalWrite<T>(
       managedFilePaths,
     };
     await writeJournal(journalPath, journal);
+    journalOwned = true;
     simulateCrash(options.testOptions ?? {}, "prepared");
 
     const writer = await TransactionCanonicalWriter.create(
@@ -1550,8 +1639,10 @@ export async function runCanonicalWrite<T>(
     journal.phase = "committed";
     await writeJournal(journalPath, journal);
     simulateCrash(options.testOptions ?? {}, "committed");
+    await options.afterCanonicalCommit?.(mutation.value);
 
     await rm(journalPath, { force: true });
+    journalOwned = false;
     simulateCrash(options.testOptions ?? {}, "journal-removed");
     await rm(lockPath, { force: true });
     await rm(transactionPath, { recursive: true, force: true });
@@ -1630,11 +1721,15 @@ export async function runCanonicalWrite<T>(
         throw rollbackRecoveryError(options.operationId, rollbackError);
       }
     }
-    await rm(journalPath, { force: true }).catch(() => undefined);
+    if (journalOwned) {
+      await rm(journalPath, { force: true }).catch(() => undefined);
+    }
     await rm(lockPath, { force: true }).catch(() => undefined);
-    await rm(transactionPath, { recursive: true, force: true }).catch(
-      () => undefined,
-    );
+    if (snapshotPrepared) {
+      await rm(transactionPath, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
     throw error;
   }
 }
