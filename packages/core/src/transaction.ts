@@ -107,6 +107,8 @@ export interface TransactionTestOptions {
   afterIndexLock?: () => Promise<void> | void;
   /** Runs after the private index replaces the owned lock but before rename. */
   afterIndexCopy?: () => Promise<void> | void;
+  /** Runs after a waiting writer reads the current owner marker. */
+  afterWriterOwnerRead?: () => Promise<void> | void;
 }
 
 export interface ApplyTransactionOptions extends TransactionTestOptions {
@@ -665,6 +667,7 @@ async function acquireWriterLock(
   lockPath: string,
   operationId: string,
   waitForWriter?: WriterWaitOptions,
+  afterOwnerRead?: () => Promise<void> | void,
 ): Promise<void> {
   const marker = `${JSON.stringify({
     pid: process.pid,
@@ -706,12 +709,29 @@ async function acquireWriterLock(
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw recoveryRequiredForWriter("the writer lock is malformed");
     }
+    await afterOwnerRead?.();
     if (owner.recoverable) {
       throw recoveryRequiredForWriter(
         `the writer lock for ${owner.operationId} is recoverable`,
       );
     }
     if (!isLiveProcess(owner.pid)) {
+      let currentOwner: z.infer<typeof writerLockSchema>;
+      try {
+        currentOwner = writerLockSchema.parse(
+          JSON.parse(await readFile(lockPath, "utf8")),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw recoveryRequiredForWriter("the writer lock is malformed");
+      }
+      if (
+        currentOwner.pid !== owner.pid ||
+        currentOwner.operationId !== owner.operationId ||
+        currentOwner.recoverable !== owner.recoverable
+      ) {
+        continue;
+      }
       throw recoveryRequiredForWriter(
         `the writer lock for ${owner.operationId} is stale`,
       );
@@ -1335,7 +1355,12 @@ export async function runCanonicalWrite<T>(
   const backupPath = path.join(transactionPath, "backup");
   const lockPath = path.join(runtimePath, "writer.lock");
   await mkdir(runtimePath, { recursive: true });
-  await acquireWriterLock(lockPath, options.operationId, options.waitForWriter);
+  await acquireWriterLock(
+    lockPath,
+    options.operationId,
+    options.waitForWriter,
+    options.testOptions?.afterWriterOwnerRead,
+  );
   let gitRepository = false;
   let committed = false;
   let headUpdated = false;

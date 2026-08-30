@@ -283,6 +283,33 @@ describe("applyChangeSetTransaction", () => {
     );
   });
 
+  test("an opted-in writer loops when an exited owner removes its lock after inspection", async () => {
+    const root = await initializedGitBrain();
+    const lockPath = path.join(root, ".brain", "runtime", "writer.lock");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ pid: 2_147_483_647, operationId: "op_owner_exited" })}\n`,
+    );
+    const options = {
+      operationId: "op_owner_exit_waiter",
+      commitMessage: "continue after owner cleanup",
+      waitForWriter: { timeoutMs: 100, pollIntervalMs: 5 },
+      testOptions: {
+        afterWriterOwnerRead: async () => {
+          await rm(lockPath);
+        },
+      },
+    } as unknown as Parameters<typeof runCanonicalWrite<string>>[1];
+
+    await expect(
+      runCanonicalWrite(root, options, async () => ({
+        value: "acquired",
+        stagePaths: [],
+      })),
+    ).resolves.toMatchObject({ value: "acquired" });
+    await expect(access(lockPath)).rejects.toThrow();
+  });
+
   test("preserves committed Git recovery state when a post-commit action fails", async () => {
     const root = await initializedGitBrain();
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);

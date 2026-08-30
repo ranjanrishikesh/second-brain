@@ -254,6 +254,10 @@ export interface PdfExtractionPolicyV1 {
 export interface PdfExtractionTestOptions {
   /** Deterministic seam proving the page-count guard precedes page requests. */
   beforeGetPage?: (pageNumber: number) => Promise<void> | void;
+  /** Allows focused tests to observe a real page before text extraction. */
+  afterGetPage?: (page: object) => Promise<void> | void;
+  /** Reports only the cumulative UTF-8 bytes retained by the extractor. */
+  afterRetainedBytes?: (retainedBytes: number) => Promise<void> | void;
 }
 
 export async function extractPdf(
@@ -284,33 +288,58 @@ export async function extractPdf(
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       await testOptions.beforeGetPage?.(pageNumber);
       const page = await document.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const text = content.items
-        .flatMap((item) =>
-          "str" in item && item.str.trim() ? [item.str.trim()] : [],
-        )
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!text) continue;
-      const pageBytes = Buffer.byteLength(text, "utf8");
-      const separatorBytes = chunks.length > 0 ? 2 : 0;
-      if (
-        pageBytes + separatorBytes >
-        policy.maxExtractedBytes - extractedBytes
-      ) {
-        throw new Error(
-          `Extracted PDF content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
-        );
+      try {
+        await testOptions.afterGetPage?.(page);
+        let pageText = "";
+        const reader = page.streamTextContent().getReader();
+        let streamComplete = false;
+        let streamCancelled = false;
+        try {
+          for (;;) {
+            const next = await reader.read();
+            if (next.done) {
+              streamComplete = true;
+              break;
+            }
+            for (const item of next.value.items) {
+              if (!("str" in item)) continue;
+              const normalizedItem = item.str.trim().replace(/\s+/g, " ");
+              if (!normalizedItem) continue;
+              const separatorBytes = pageText ? 1 : chunks.length > 0 ? 2 : 0;
+              const itemBytes = Buffer.byteLength(normalizedItem, "utf8");
+              if (
+                separatorBytes + itemBytes >
+                policy.maxExtractedBytes - extractedBytes
+              ) {
+                const budgetError = new Error(
+                  `Extracted PDF content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
+                );
+                streamCancelled = true;
+                await reader.cancel(budgetError).catch(() => undefined);
+                throw budgetError;
+              }
+              pageText += `${pageText ? " " : ""}${normalizedItem}`;
+              extractedBytes += separatorBytes + itemBytes;
+              await testOptions.afterRetainedBytes?.(extractedBytes);
+            }
+          }
+        } finally {
+          if (!streamComplete && !streamCancelled) {
+            await reader.cancel().catch(() => undefined);
+          }
+          reader.releaseLock();
+        }
+        if (!pageText) continue;
+        chunks.push({
+          id: `${sourceId}_${String(pageNumber - 1).padStart(4, "0")}`,
+          sourceId,
+          ordinal: pageNumber - 1,
+          locator: `page=${pageNumber}`,
+          text: pageText,
+        });
+      } finally {
+        page.cleanup();
       }
-      extractedBytes += separatorBytes + pageBytes;
-      chunks.push({
-        id: `${sourceId}_${String(pageNumber - 1).padStart(4, "0")}`,
-        sourceId,
-        ordinal: pageNumber - 1,
-        locator: `page=${pageNumber}`,
-        text,
-      });
     }
     return {
       version: 1,

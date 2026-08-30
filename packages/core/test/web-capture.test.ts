@@ -28,7 +28,9 @@ import {
   resolveWebApproval,
   scanAndRegisterSources,
   writeBrainState,
+  writeQuerySession,
 } from "../src/index.js";
+import { runCanonicalWrite } from "../src/transaction.js";
 
 const execFile = promisify(execFileCallback);
 const encoder = new TextEncoder();
@@ -294,6 +296,125 @@ describe("durable web evidence capture", () => {
       (await webFiles(root)).filter((item) => !item.endsWith(".web.json")),
     ).toHaveLength(3);
   });
+
+  test.each([
+    ["artifact", "finished"],
+    ["text", "approval-removed"],
+  ] as const)(
+    "revalidates %s capture lifecycle after waiting when the query is %s",
+    async (representation, lifecycleChange) => {
+      const { root, queryId } = await approvedBrain(
+        `Fresh ${representation} lifecycle?`,
+      );
+      let writerEntered!: () => void;
+      const writerHeld = new Promise<void>((resolve) => {
+        writerEntered = resolve;
+      });
+      let releaseWriter!: () => void;
+      const writerReleased = new Promise<void>((resolve) => {
+        releaseWriter = resolve;
+      });
+      const blocker = runCanonicalWrite(
+        root,
+        {
+          operationId: `op_test_${representation}_lifecycle_blocker`,
+          commitMessage: "test: hold canonical writer",
+          testOptions: {
+            afterMutationBeforeSeal: async () => {
+              writerEntered();
+              await writerReleased;
+            },
+          },
+        },
+        async () => ({ value: null, stagePaths: [] }),
+      );
+      await writerHeld;
+      const manifestBefore = await readFile(
+        path.join(root, ".brain", "source-manifest.json"),
+        "utf8",
+      );
+      const operationsBefore = await readFile(
+        path.join(root, ".brain", "operations.jsonl"),
+        "utf8",
+      );
+      const headBefore = await git(root, ["rev-parse", "HEAD"]);
+      let initialValidationReached!: () => void;
+      const initialValidation = new Promise<void>((resolve) => {
+        initialValidationReached = resolve;
+      });
+      const captureWithBarrier = captureWebEvidence as unknown as (
+        root: string,
+        queryId: string,
+        input: Parameters<typeof captureWebEvidence>[2],
+        options: {
+          beforeWriterWait: () => void;
+        },
+      ) => ReturnType<typeof captureWebEvidence>;
+      const input =
+        representation === "artifact"
+          ? {
+              representation: "artifact" as const,
+              originalUrl: "https://example.test/fresh-lifecycle.txt",
+              title: "Fresh artifact lifecycle",
+              fileName: "fresh.txt",
+              responseComplete: true as const,
+              content: encoder.encode("must not be captured\n"),
+              retrievedAt: "2026-08-30T11:00:00.000Z",
+            }
+          : {
+              representation: "text" as const,
+              originalUrl: "https://example.test/fresh-lifecycle",
+              title: "Fresh text lifecycle",
+              captureKind: "page" as const,
+              completeness: "complete" as const,
+              content: "must not be captured",
+              retrievedAt: "2026-08-30T11:00:00.000Z",
+            };
+      const pendingCapture = captureWithBarrier(root, queryId, input, {
+        beforeWriterWait: initialValidationReached,
+      }).then(
+        (value) => ({ value, error: undefined }),
+        (error: unknown) => ({ value: undefined, error }),
+      );
+      const barrierObserved = await Promise.race([
+        initialValidation.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+      const session = await readQuerySession(root, queryId);
+      if (lifecycleChange === "finished") {
+        await writeQuerySession(root, {
+          ...session,
+          status: "finished",
+          completedAt: "2026-08-30T11:00:01.000Z",
+          outcome: "unanswered",
+          answerSummary: "The query ended before capture.",
+        });
+      } else {
+        const { webApproval: _removedApproval, ...withoutApproval } = session;
+        await writeQuerySession(root, withoutApproval);
+      }
+      releaseWriter();
+      await blocker;
+      const outcome = await pendingCapture;
+
+      expect(outcome.value).toBeUndefined();
+      expect(outcome.error).toBeInstanceOf(Error);
+      expect((outcome.error as Error).message).toMatch(/open query|approval/i);
+      await expect(recoverBrain(root)).resolves.toBe("clean");
+      expect(await webFiles(root)).toEqual([]);
+      expect(
+        await readFile(
+          path.join(root, ".brain", "source-manifest.json"),
+          "utf8",
+        ),
+      ).toBe(manifestBefore);
+      expect(
+        await readFile(path.join(root, ".brain", "operations.jsonl"), "utf8"),
+      ).toBe(operationsBefore);
+      expect(await git(root, ["rev-parse", "HEAD"])).toBe(headBefore);
+      expect(barrierObserved).toBe(true);
+    },
+  );
 
   test("atomically merges concurrent evidence links for one query", async () => {
     const { root, queryId } = await approvedBrain("Concurrent links?");

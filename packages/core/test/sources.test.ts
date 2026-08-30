@@ -606,6 +606,117 @@ describe("scanSources", () => {
     expect(requestedPages).toBe(0);
   });
 
+  test("streams PDF text and cancels before retaining output beyond the byte budget", async () => {
+    const document = await PDFDocument.create();
+    const page = document.addPage();
+    const font = await document.embedFont(StandardFonts.Helvetica);
+    page.drawText("kept", { x: 40, y: 700, size: 10, font });
+    page.drawText("overflow ".repeat(200), {
+      x: 40,
+      y: 680,
+      size: 10,
+      font,
+    });
+    const bytes = await document.save({ useObjectStreams: true });
+    const maxExtractedBytes = 24;
+    let streamCalls = 0;
+    let getTextContentCalls = 0;
+    let cancelCalls = 0;
+    let pageCleanupCalls = 0;
+    const retainedByteObservations: number[] = [];
+    type ControlledPdfPage = {
+      getTextContent: () => Promise<unknown>;
+      streamTextContent: () => ReadableStream<unknown>;
+      cleanup: () => boolean;
+    };
+    const extractWithStreamSeam = extractPdf as unknown as (
+      sourceId: string,
+      filePath: string,
+      content: Uint8Array,
+      policy: { maxPages: number; maxExtractedBytes: number },
+      testOptions: {
+        afterGetPage: (page: object) => void;
+        afterRetainedBytes: (retainedBytes: number) => void;
+      },
+    ) => Promise<unknown>;
+
+    await expect(
+      extractWithStreamSeam(
+        "src_0000000000000000",
+        "streamed.pdf",
+        bytes,
+        { maxPages: 1, maxExtractedBytes },
+        {
+          afterGetPage(pageObject) {
+            const pdfPage = pageObject as ControlledPdfPage;
+            const originalCleanup = pdfPage.cleanup.bind(pdfPage);
+            pdfPage.getTextContent = async () => {
+              getTextContentCalls += 1;
+              throw new Error("getTextContent must not be used");
+            };
+            pdfPage.streamTextContent = () => {
+              streamCalls += 1;
+              return new ReadableStream({
+                start(controller) {
+                  controller.enqueue({
+                    items: [
+                      {
+                        str: "kept",
+                        dir: "ltr",
+                        transform: [1, 0, 0, 1, 40, 700],
+                        width: 20,
+                        height: 10,
+                        fontName: "Helvetica",
+                        hasEOL: false,
+                      },
+                      {
+                        str: "overflow ".repeat(200),
+                        dir: "ltr",
+                        transform: [1, 0, 0, 1, 40, 680],
+                        width: 2_000,
+                        height: 10,
+                        fontName: "Helvetica",
+                        hasEOL: false,
+                      },
+                    ],
+                    styles: {
+                      Helvetica: {
+                        fontFamily: "Helvetica",
+                        ascent: 0.9,
+                        descent: -0.2,
+                        vertical: false,
+                      },
+                    },
+                    lang: null,
+                  });
+                },
+                cancel() {
+                  cancelCalls += 1;
+                },
+              });
+            };
+            pdfPage.cleanup = () => {
+              pageCleanupCalls += 1;
+              return originalCleanup();
+            };
+          },
+          afterRetainedBytes(retainedBytes) {
+            retainedByteObservations.push(retainedBytes);
+          },
+        },
+      ),
+    ).rejects.toThrow(/extracted pdf content exceeds.*24 bytes/i);
+
+    expect(streamCalls).toBe(1);
+    expect(getTextContentCalls).toBe(0);
+    expect(cancelCalls).toBe(1);
+    expect(pageCleanupCalls).toBeGreaterThanOrEqual(1);
+    expect(retainedByteObservations.length).toBeGreaterThan(0);
+    expect(Math.max(...retainedByteObservations)).toBeLessThanOrEqual(
+      maxExtractedBytes,
+    );
+  });
+
   test.each([
     [
       "pages",

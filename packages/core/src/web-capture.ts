@@ -137,10 +137,26 @@ export interface WebCaptureTestOptions {
   transactionTestOptions?: TransactionTestOptions;
   /** Pauses after reading a query session; used for deterministic merge races. */
   afterSessionRead?: () => Promise<void> | void;
+  /** Signals that validation is complete immediately before writer waiting. */
+  beforeWriterWait?: () => Promise<void> | void;
 }
 
 function sha256(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function freshWebCaptureSession(
+  root: string,
+  queryId: string,
+): Promise<QuerySessionV1> {
+  const session = await readQuerySession(root, queryId);
+  if (session.status !== "open" || session.currentTier !== "web") {
+    throw new Error(
+      "Web evidence can only be captured for an open query at the web tier",
+    );
+  }
+  await assertWebApproval(root, queryId);
+  return session;
 }
 
 function slugify(value: string): string {
@@ -545,9 +561,11 @@ export async function captureWebEvidence(
     );
     const digest = sha256(artifactContent);
     let linkedSession: QuerySessionV1 | undefined;
+    await testOptions.beforeWriterWait?.();
     const capture = await registerWebSourceCapture(
       root,
       async () => {
+        const freshSession = await freshWebCaptureSession(root, queryId);
         const sources = await readSources(root);
         const duplicate = sources.find((source) => source.sha256 === digest);
         if (duplicate) {
@@ -561,7 +579,7 @@ export async function captureWebEvidence(
           }
           const retryDiscovery = sourceDiscoveries(duplicate).find(
             (candidate) =>
-              discoveryMatchesRetry(candidate, input, urls, initialSession),
+              discoveryMatchesRetry(candidate, input, urls, freshSession),
           );
           const retrievedAt =
             input.retrievedAt ??
@@ -569,7 +587,7 @@ export async function captureWebEvidence(
             new Date().toISOString();
           return {
             sourceId: duplicate.id,
-            discovery: discoveryFor(input, urls, initialSession, retrievedAt),
+            discovery: discoveryFor(input, urls, freshSession, retrievedAt),
           };
         }
 
@@ -606,12 +624,7 @@ export async function captureWebEvidence(
             }
           }
         }
-        const discovery = discoveryFor(
-          input,
-          urls,
-          initialSession,
-          retrievedAt,
-        );
+        const discovery = discoveryFor(input, urls, freshSession, retrievedAt);
         const previous = newestMatchingSource(sources, urls);
         const sidecar: WebArtifactSidecarV1 = {
           brainWebArtifact: 1,
@@ -671,9 +684,11 @@ export async function captureWebEvidence(
   );
   const fileName = `${slugify(input.title)}-${logicalDigest.slice(0, 12)}.md`;
   let linkedSession: QuerySessionV1 | undefined;
+  await testOptions.beforeWriterWait?.();
   const capture = await registerWebSourceCapture(
     root,
     async () => {
+      const freshSession = await freshWebCaptureSession(root, queryId);
       const sources = await readSources(root);
       const duplicate = await findLegacyTextDuplicate(
         root,
@@ -684,7 +699,7 @@ export async function captureWebEvidence(
       );
       if (duplicate) {
         const retryDiscovery = sourceDiscoveries(duplicate).find((candidate) =>
-          discoveryMatchesRetry(candidate, input, urls, initialSession),
+          discoveryMatchesRetry(candidate, input, urls, freshSession),
         );
         const retrievedAt =
           input.retrievedAt ??
@@ -692,7 +707,7 @@ export async function captureWebEvidence(
           new Date().toISOString();
         return {
           sourceId: duplicate.id,
-          discovery: discoveryFor(input, urls, initialSession, retrievedAt),
+          discovery: discoveryFor(input, urls, freshSession, retrievedAt),
         };
       }
 
@@ -734,7 +749,7 @@ export async function captureWebEvidence(
         finalUrl: urls.finalUrl,
         redirectChain: urls.redirectChain,
         retrievedAt,
-        query: initialSession.question,
+        query: freshSession.question,
         captureKind: input.captureKind,
         completeness: input.completeness,
         title: input.title,
@@ -752,7 +767,7 @@ export async function captureWebEvidence(
       await prepareText(root, relativePath, captureMarkdown);
       return {
         sourcePath: relativePath,
-        discovery: discoveryFor(input, urls, initialSession, retrievedAt),
+        discovery: discoveryFor(input, urls, freshSession, retrievedAt),
       };
     },
     testOptions.transactionTestOptions,
