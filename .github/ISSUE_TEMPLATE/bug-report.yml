@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem with the second-brain template
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Use only synthetic or public data. Report security vulnerabilities privately through the security policy instead.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Onboarding or setup
+        - Source registration or extraction
+        - Wiki, citations, or reconciliation
+        - Search or query workflow
+        - Web evidence capture
+        - Git, recovery, or synchronization
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: What happened?
+      description: Include a concise, sanitized error or diagnostic.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide minimal steps using synthetic or publicly redistributable fixtures.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: Commit SHA or release tag
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include sanitized Node.js, pnpm, operating-system, Codex, or Claude Code details that are relevant.
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed private sources, excerpts, credentials, secrets, personal filenames, and local paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
