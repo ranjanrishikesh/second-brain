@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const root = process.cwd();
 
@@ -72,6 +73,85 @@ describe("shared Codex and Claude onboarding contract", () => {
       }
     },
   );
+
+  it.each(["AGENTS.md", ".agents/skills/second-brain/SKILL.md"])(
+    "%s separates knowledge gaps, capability gaps, and unexpected failures",
+    async (path) => {
+      const contract = await readRepositoryFile(path);
+
+      for (const marker of [
+        "knowledge gap",
+        "unsupported capability",
+        "unexpected failure",
+        "support.issueTrackerUrl",
+        "privacy-safe",
+        "explicit approval",
+        "may be considered for a future release",
+      ]) {
+        expect(contract).toContain(marker);
+      }
+
+      expect(contract).toContain("Your second brain is ready.");
+      expect(contract).toContain("Never promise");
+      expect(contract).not.toMatch(/\bv2\b/iu);
+      expect(contract).not.toMatch(/shall we plan/iu);
+    },
+  );
+
+  it.each(["AGENTS.md", ".agents/skills/second-brain/SKILL.md"])(
+    "%s keeps external issue creation owner-approved and private",
+    async (path) => {
+      const contract = await readRepositoryFile(path);
+
+      for (const forbiddenDisclosure of [
+        "source bytes",
+        "source excerpts",
+        "personal filenames",
+        "absolute local paths",
+        "credentials",
+        "private brain content",
+      ]) {
+        expect(contract).toContain(forbiddenDisclosure);
+      }
+
+      expect(contract).toContain("exact destination and sanitized draft");
+      expect(contract).toContain("authenticated host tooling");
+      expect(contract).toContain("not the cloned repository's `origin`");
+    },
+  );
+
+  it("provides a privacy-safe capability request form", async () => {
+    const form = parse(
+      await readRepositoryFile(
+        ".github/ISSUE_TEMPLATE/capability-request.yml",
+      ),
+    ) as {
+      name: string;
+      description: string;
+      title: string;
+      labels: string[];
+      body: unknown[];
+    };
+
+    expect(form).toMatchObject({
+      name: "Capability request",
+      description:
+        "Suggest a missing capability for the second-brain template",
+      title: "[Capability]: ",
+      labels: ["enhancement"],
+    });
+
+    const formText = JSON.stringify(form);
+    expect(formText).toContain("What are you trying to accomplish?");
+    expect(formText).toContain("What happens with the template today?");
+    expect(formText).toContain("What behavior would help?");
+    expect(formText).toContain(
+      "I removed private source content, credentials, and personal paths",
+    );
+    expect(formText).toContain(
+      "Requests are considered; no release or delivery date is promised.",
+    );
+  });
 
   it("documents the zero-command path before manual CLI reference", async () => {
     const readme = (await readRepositoryFile("README.md")).toLowerCase();

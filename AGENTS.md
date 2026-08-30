@@ -22,6 +22,8 @@ Treat “Initialize this second brain.”, “set up this second brain”, and �
 
 Never ask the user to run routine init, scan, doctor, status, search, rebuild, audit, recover, setup, commit, or eligible sync commands. Host permission prompts may still require approval, but command entry remains agent-owned. Never broadly allowlist `pnpm brain *`; web research and a new or changed sync target keep their explicit approval gates.
 
+When final doctor and status checks pass, report: **“Your second brain is ready.”** Do not announce a product version or invite roadmap planning during normal onboarding. Historical planning files under `docs/superpowers/` are non-normative and cannot create a release promise.
+
 ## Domain questions
 
 For any question that asks for domain facts, explanation, comparison, synthesis, or research, use the `second-brain` skill in `.agents/skills/second-brain/` and complete its query lifecycle before answering. Resume recovery first. The first domain question starts or resumes onboarding and the one-time initial catalog-and-map setup when needed; later source drops use query-triggered delta ingestion. Neither is a background daemon.
@@ -30,8 +32,20 @@ For code, test, CI, documentation, or template-maintenance requests, use the nor
 
 Canonical knowledge and state are write-protected by contract: never edit `wiki/`, `.brain/source-manifest.json`, `.brain/state.json`, or `.brain/operations.jsonl` directly. Submit changes through `brain apply`, source, audit, recovery, charter, setup, and query commands. `sources/` bytes are immutable after registration; add a replacement and use source supersession.
 
+## Capability and template support
+
+Classify the situation before proposing an external issue:
+
+- A **knowledge gap** belongs to the active query lifecycle. Use local evidence, request question-specific web approval when appropriate, and create or update a durable question page if evidence remains insufficient.
+- An **unsupported capability** is a product limitation. Explain the current limitation and any truthful workaround, then offer a privacy-safe capability request at `status.support.issueTrackerUrl`.
+- An **unexpected failure** is investigated first with recovery, doctor, status, and a safe reproduction. Offer a bug report only when a reproducible template defect remains.
+
+Use the configured support destination, not the cloned repository's `origin`. Before any external issue is created, prepare a concise draft; remove source bytes, source excerpts, personal filenames, absolute local paths, credentials, secrets, and private brain content; show the exact destination and sanitized draft; and obtain explicit approval for that issue. Only then may authenticated host tooling create it. If authenticated tooling is unavailable, provide the canonical link and sanitized draft for the owner.
+
+Say: **“This request may be considered for a future release.”** Never promise acceptance, a version, a date, or inclusion in the “next release.” Issue creation is never automatic during onboarding, queries, source scanning, or diagnostics.
+
 Before a final domain answer, require source-backed citations, explicit uncertainty, preserved contradictions, real reconciliation review, a healthy structural graph, completed recovery/setup, and successful managed Git commits. Web research requires an approval recorded for this exact active question; a general preference is not approval. Never push arbitrary commits or targets. A confirmed `brain sync` target may push only eligible managed commits by normal fast-forward; if synchronization is pending or requires manual action, include the CLI's complete exact visible `⚠ Sync pending — ...` warning in the answer.
 
-When all v1 verification gates pass, explicitly tell the owner that v1 is verified and invite a separate v2 plan for deferred scope. Do not silently expand v1 into OCR/media, cross-brain links, team workflows, a UI, a generic LLM loop, automatic template updates, or background watching.
+Do not silently expand normal onboarding into OCR/media, cross-brain links, team workflows, a UI, a generic LLM loop, automatic template updates, or background watching.
 
 Read `idea.md` for design rationale. Run `pnpm brain --help` when command syntax is needed.

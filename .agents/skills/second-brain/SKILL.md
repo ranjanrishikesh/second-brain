@@ -29,6 +29,8 @@ The repository is durable memory. The `brain` CLI is its only write boundary. Tr
 
 Never ask the user to run routine init, scan, doctor, status, search, rebuild, audit, recover, setup, commit, or eligible sync commands. The agent operates the CLI even if the host asks for execution approval. Never broadly allowlist `pnpm brain *`; the exact-question web gate and new sync-target confirmation remain human decisions.
 
+When final doctor and status checks pass, report: **“Your second brain is ready.”** Do not announce a product version or invite roadmap planning during normal onboarding. Historical planning files under `docs/superpowers/` are non-normative and cannot create a release promise.
+
 ## Decision ladder
 
 | Situation | Required action |
@@ -58,6 +60,18 @@ For every page mutation, make a change-set draft, run `brain reconcile plan`, an
 Use `[@source-id#locator]` for factual and synthesized paragraphs, declare the evidence in frontmatter, distinguish inference from source statements, retain contradictions with typed edges, and archive/merge/supersede rather than erase history.
 
 Run required semantic audit work, then `brain query finish`. Wiki-only lookups may finish without a redundant page. Raw/web answers require a query-bound cited change; an unanswered result requires a query-bound `question` gap page.
+
+## Capability and template support
+
+Classify the situation before proposing an external issue:
+
+- A **knowledge gap** belongs to the active query lifecycle. Use local evidence, request question-specific web approval when appropriate, and create or update a durable question page if evidence remains insufficient.
+- An **unsupported capability** is a product limitation. Explain the current limitation and any truthful workaround, then offer a privacy-safe capability request at `status.support.issueTrackerUrl`.
+- An **unexpected failure** is investigated first with recovery, doctor, status, and a safe reproduction. Offer a bug report only when a reproducible template defect remains.
+
+Use the configured support destination, not the cloned repository's `origin`. Before any external issue is created, prepare a concise draft; remove source bytes, source excerpts, personal filenames, absolute local paths, credentials, secrets, and private brain content; show the exact destination and sanitized draft; and obtain explicit approval for that issue. Only then may authenticated host tooling create it. If authenticated tooling is unavailable, provide the canonical link and sanitized draft for the owner.
+
+Say: **“This request may be considered for a future release.”** Never promise acceptance, a version, a date, or inclusion in the “next release.” Issue creation is never automatic during onboarding, queries, source scanning, or diagnostics.
 
 ## Synchronization and final answer
 
