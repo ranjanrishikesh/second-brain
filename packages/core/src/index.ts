@@ -1,5 +1,8 @@
 export { brainConfigV1Schema, loadBrainConfig } from "./config.js";
-export { defaultSemanticModelV1 } from "./config.js";
+export {
+  defaultIssueTrackerUrl,
+  defaultSemanticModelV1,
+} from "./config.js";
 export type { BrainConfigV1 } from "./config.js";
 export {
   beginSetup,

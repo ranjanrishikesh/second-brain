@@ -26,6 +26,22 @@
       "required": ["name", "description", "language"],
       "additionalProperties": false
     },
+    "support": {
+      "default": {
+        "issueTrackerUrl": "https://github.com/ranjanrishikesh/second-brain/issues"
+      },
+      "type": "object",
+      "properties": {
+        "issueTrackerUrl": {
+          "default": "https://github.com/ranjanrishikesh/second-brain/issues",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https:\\/\\/.*"
+        }
+      },
+      "required": ["issueTrackerUrl"],
+      "additionalProperties": false
+    },
     "sources": {
       "default": {
         "roots": ["sources"],
@@ -249,6 +265,7 @@
   "required": [
     "version",
     "brain",
+    "support",
     "sources",
     "bootstrap",
     "learning",

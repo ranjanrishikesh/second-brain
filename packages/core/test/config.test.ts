@@ -58,6 +58,10 @@ describe("loadBrainConfig", () => {
 
     expect(config.version).toBe(1);
     expect(config.brain.name).toBe("Astronomy");
+    expect(config.support).toEqual({
+      issueTrackerUrl:
+        "https://github.com/ranjanrishikesh/second-brain/issues",
+    });
     expect(config.bootstrap.mode).toBe("catalog-map");
     expect(config).toMatchObject({
       web: { approvalTtlHours: 24 },
@@ -68,6 +72,41 @@ describe("loadBrainConfig", () => {
         },
       },
       git: { autoPush: false },
+    });
+  });
+
+  test("accepts only an absolute HTTPS issue tracker URL", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-support-config-"));
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Support test",
+        "support:",
+        "  issueTrackerUrl: http://example.test/issues",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).rejects.toThrow(
+      "support.issueTrackerUrl must be an absolute HTTPS URL",
+    );
+
+    await writeFile(
+      path.join(root, "brain.config.yaml"),
+      [
+        "version: 1",
+        "brain:",
+        "  name: Support test",
+        "support:",
+        "  issueTrackerUrl: https://example.test/brain/issues",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(loadBrainConfig(root)).resolves.toMatchObject({
+      support: { issueTrackerUrl: "https://example.test/brain/issues" },
     });
   });
 });

@@ -7,6 +7,17 @@
 - `version`: must be `1`; future versions are rejected.
 - `brain.name`, `brain.description`, `brain.language`: identity shown by status and hosts.
 
+## Template support
+
+- `support.issueTrackerUrl`: the canonical HTTPS issue tracker for the
+  software template. The default points to the original second-brain template,
+  not the cloned brain's `origin` remote.
+
+The host may use this destination only after it has classified a product
+capability gap or reproducible template defect, removed private brain data from
+the draft, and received approval for the exact external issue. The core and CLI
+never contact GitHub.
+
 ## Sources and bootstrap
 
 - `sources.roots`: repository-relative immutable source roots. The default is `sources`.

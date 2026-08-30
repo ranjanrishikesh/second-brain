@@ -10,6 +10,17 @@ export const defaultSemanticModelV1 = {
     "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
 } as const;
 
+export const defaultIssueTrackerUrl =
+  "https://github.com/ranjanrishikesh/second-brain/issues";
+
+const absoluteHttpsUrlV1Schema = z
+  .string()
+  .url()
+  .startsWith(
+    "https://",
+    "support.issueTrackerUrl must be an absolute HTTPS URL",
+  );
+
 const semanticModelV1Schema = z.object({
   id: z.literal(defaultSemanticModelV1.id).default(defaultSemanticModelV1.id),
   revision: z
@@ -30,6 +41,11 @@ export const brainConfigV1Schema = z.object({
       .default("A self-maintaining personal knowledge base."),
     language: z.string().trim().min(2).default("en"),
   }),
+  support: z
+    .object({
+      issueTrackerUrl: absoluteHttpsUrlV1Schema.default(defaultIssueTrackerUrl),
+    })
+    .default({ issueTrackerUrl: defaultIssueTrackerUrl }),
   sources: z
     .object({
       roots: z.array(z.string().trim().min(1)).min(1).default(["sources"]),

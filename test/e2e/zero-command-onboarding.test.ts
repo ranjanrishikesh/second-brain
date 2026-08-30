@@ -430,14 +430,18 @@ describe("zero-command onboarding fake host", () => {
     const initialized = await runInstalledBrainJson<InitCliResult>(root, [
       "init",
     ]);
-    expect(initialized).toMatchObject({
-      initialization: { name: "Second Brain Process Resume" },
-      status: {
-        onboarding: {
-          phase: "awaiting-sources",
-          nextAction: "add-sources",
-        },
+    expect(initialized.status).toMatchObject({
+      support: {
+        issueTrackerUrl:
+          "https://github.com/ranjanrishikesh/second-brain/issues",
       },
+      onboarding: {
+        phase: "awaiting-sources",
+        nextAction: "add-sources",
+      },
+    });
+    expect(initialized.initialization).toMatchObject({
+      name: "Second Brain Process Resume",
     });
 
     await addPdfAndDocxCorpus(root);
