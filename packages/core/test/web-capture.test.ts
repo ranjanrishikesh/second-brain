@@ -747,7 +747,54 @@ describe("durable web evidence capture", () => {
     expect(readProgress).toEqual([{ path: sourcePath, bytes: 0 }]);
   });
 
-  test("rejects oversized prepared text before reading its bytes", async () => {
+  test("bounds registered text retry before reading oversized replacement bytes", async () => {
+    const { root, queryId } = await approvedBrain("Bound registered text?");
+    const input = {
+      representation: "text" as const,
+      originalUrl: "https://example.test/bound-registered-text",
+      title: "Bound registered text",
+      captureKind: "page" as const,
+      completeness: "complete" as const,
+      content: "registered body",
+      retrievedAt: "2026-08-30T00:42:30.000Z",
+    };
+    const first = await captureWebEvidence(root, queryId, input);
+    const sourcePath = first.source.path;
+    const original = await readFile(path.join(root, sourcePath));
+    const replacement = Buffer.concat([
+      original,
+      Buffer.alloc(128 * 1024, 0x63),
+    ]);
+    await writeFile(path.join(root, sourcePath), replacement);
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4096;
+    await writeFile(configPath, stringify(config));
+    expect(first.source.bytes).toBeLessThan(4096);
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const operationsPath = path.join(root, ".brain", "operations.jsonl");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    const beforeOperations = await readFile(operationsPath, "utf8");
+    const beforeSession = await readQuerySession(root, queryId);
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
+    const readProgress: Array<{ path: string; bytes: number }> = [];
+
+    await expect(
+      captureWebEvidence(root, queryId, input, {
+        afterPreparedReadProgress(relativePath, bytesRead) {
+          readProgress.push({ path: relativePath, bytes: bytesRead });
+        },
+      }),
+    ).rejects.toThrow(/configured maximum|requested byte length/i);
+    expect(readProgress).toEqual([{ path: sourcePath, bytes: 0 }]);
+    expect(await readFile(path.join(root, sourcePath))).toEqual(replacement);
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(await readFile(operationsPath, "utf8")).toBe(beforeOperations);
+    expect(await readQuerySession(root, queryId)).toEqual(beforeSession);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
+  });
+
+  test("bounds omitted prepared-name text retry before reading oversized bytes", async () => {
     const { root, queryId } = await approvedBrain("Bound text retry?");
     const originalUrl = "https://example.test/bound-text";
     const body = "expected text";
@@ -756,10 +803,18 @@ describe("durable web evidence capture", () => {
     );
     const sourcePath = `sources/web/2026/08/bound-text-${logicalDigest.slice(0, 12)}.md`;
     await mkdir(path.dirname(path.join(root, sourcePath)), { recursive: true });
-    await writeFile(
-      path.join(root, sourcePath),
-      Buffer.alloc(128 * 1024, 0x62),
-    );
+    const prepared = Buffer.alloc(128 * 1024, 0x62);
+    await writeFile(path.join(root, sourcePath), prepared);
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.maxFileBytes = 4096;
+    await writeFile(configPath, stringify(config));
+    const manifestPath = path.join(root, ".brain", "source-manifest.json");
+    const operationsPath = path.join(root, ".brain", "operations.jsonl");
+    const beforeManifest = await readFile(manifestPath, "utf8");
+    const beforeOperations = await readFile(operationsPath, "utf8");
+    const beforeSession = await readQuerySession(root, queryId);
+    const beforeHead = await git(root, ["rev-parse", "HEAD"]);
     const readProgress: Array<{ path: string; bytes: number }> = [];
 
     await expect(
@@ -773,7 +828,6 @@ describe("durable web evidence capture", () => {
           captureKind: "page",
           completeness: "complete",
           content: body,
-          retrievedAt: "2026-08-30T00:42:00.000Z",
         },
         {
           afterPreparedReadProgress(relativePath, bytesRead) {
@@ -781,8 +835,13 @@ describe("durable web evidence capture", () => {
           },
         },
       ),
-    ).rejects.toThrow(/prepared web capture exceeds requested byte length/i);
+    ).rejects.toThrow(/bytes do not match|requested byte length/i);
     expect(readProgress).toEqual([{ path: sourcePath, bytes: 0 }]);
+    expect(await readFile(path.join(root, sourcePath))).toEqual(prepared);
+    expect(await readFile(manifestPath, "utf8")).toBe(beforeManifest);
+    expect(await readFile(operationsPath, "utf8")).toBe(beforeOperations);
+    expect(await readQuerySession(root, queryId)).toEqual(beforeSession);
+    expect(await git(root, ["rev-parse", "HEAD"])).toBe(beforeHead);
   });
 
   test("keeps legacy text calls and preserves body bytes except line endings", async () => {

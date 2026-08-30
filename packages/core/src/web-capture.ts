@@ -941,6 +941,8 @@ async function findLegacyTextDuplicate(
   input: WebTextCaptureInputV1,
   urls: ReturnType<typeof validateWebUrlChain>,
   bodySha256: string,
+  maxFileBytes: number,
+  afterReadProgress?: WebCaptureTestOptions["afterPreparedReadProgress"],
 ): Promise<SourceRecordV1 | undefined> {
   for (const source of sources) {
     if (
@@ -949,10 +951,21 @@ async function findLegacyTextDuplicate(
     )
       continue;
     if (source.provenance.url !== urls.originalUrl) continue;
-    const markdown = await readFile(path.join(root, source.path), "utf8").catch(
-      () => undefined,
+    const paths = await webPreparationPaths(root);
+    const registered = await readContainedOptional(
+      paths,
+      source.path,
+      Math.min(source.bytes, maxFileBytes),
+      afterReadProgress,
     );
-    if (!markdown) continue;
+    if (
+      !registered ||
+      registered.content.byteLength !== source.bytes ||
+      sha256(registered.content) !== source.sha256
+    ) {
+      throw new Error(`Registered web source changed: ${source.path}`);
+    }
+    const markdown = registered.content.toString("utf8");
     const metadata = parseWebCaptureMetadata(markdown);
     if (!metadata) continue;
     if (
@@ -1182,6 +1195,7 @@ export async function captureWebEvidence(
     root,
     async () => {
       const freshSession = await freshWebCaptureSession(root, queryId);
+      const currentConfig = await loadBrainConfig(root);
       const sources = await readSources(root);
       const duplicate = await findLegacyTextDuplicate(
         root,
@@ -1189,6 +1203,8 @@ export async function captureWebEvidence(
         input,
         urls,
         bodySha256,
+        currentConfig.sources.maxFileBytes,
+        testOptions.afterPreparedReadProgress,
       );
       if (duplicate) {
         const retryDiscovery = sourceDiscoveries(duplicate).find((candidate) =>
@@ -1219,8 +1235,21 @@ export async function captureWebEvidence(
             .relative(root, preparedPath)
             .split(path.sep)
             .join("/");
-          const prepared = await readFile(preparedPath, "utf8");
-          const metadata = parseWebCaptureMetadata(prepared);
+          const paths = await webPreparationPaths(root);
+          const prepared = await readContainedOptional(
+            paths,
+            relativePath,
+            currentConfig.sources.maxFileBytes,
+            testOptions.afterPreparedReadProgress,
+          );
+          if (!prepared) {
+            throw new Error(
+              `Prepared web evidence path changed: ${relativePath}`,
+            );
+          }
+          const metadata = parseWebCaptureMetadata(
+            prepared.content.toString("utf8"),
+          );
           if (!metadata) {
             throw new Error(
               `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
@@ -1250,7 +1279,6 @@ export async function captureWebEvidence(
         ...(previous ? { supersedes: previous.id } : {}),
       };
       const captureMarkdown = `---\n${stringify(metadata).trimEnd()}\n---\n\n# ${input.title}\n\n${normalizedBody}${normalizedBody.endsWith("\n") ? "" : "\n"}`;
-      const currentConfig = await loadBrainConfig(root);
       if (
         Buffer.byteLength(captureMarkdown, "utf8") >
         currentConfig.sources.maxFileBytes
