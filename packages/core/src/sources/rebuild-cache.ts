@@ -22,7 +22,6 @@ import {
 } from "./extract.js";
 import type { ExtractedSourceV1, SourceRecordV1 } from "./types.js";
 import { assertWebEvidenceIntegrity } from "./web-evidence.js";
-import { validateZipArchiveBudget } from "./zip-archive-budget.js";
 
 async function readCanonicalSourceContent(
   root: string,
@@ -421,19 +420,13 @@ export async function loadExtractedSourceCache(
     assertDocxOutputSize(cached.text, config.sources.maxFileBytes);
   }
   if (source.extractor === "epub-v1") {
-    await validateZipArchiveBudget(new Uint8Array(content), {
-      label: "EPUB",
-      maxEntries: config.sources.epub.maxEntries,
-      maxExpandedBytes: config.sources.epub.maxExpandedBytes,
-    });
-    if (
-      Buffer.byteLength(cached.text, "utf8") >
-      config.sources.epub.maxExtractedBytes
-    ) {
-      throw new Error(
-        `Extracted EPUB content exceeds configured maximum of ${config.sources.epub.maxExtractedBytes} bytes`,
-      );
-    }
+    const revalidated = await extractEpub(
+      source.id,
+      source.path,
+      new Uint8Array(content),
+      config.sources.epub,
+    );
+    assertCanonicalExtractedSource(revalidated, source);
   }
   if (source.extractor === "pdf-v1") {
     const revalidated = await extractPdf(

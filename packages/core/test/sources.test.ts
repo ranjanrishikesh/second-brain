@@ -132,6 +132,62 @@ async function createEpub(
   });
 }
 
+async function createMultiChapterEpub(
+  chapterHtml: readonly string[],
+  title: string,
+): Promise<Uint8Array> {
+  const archive = new JSZip();
+  archive.file("mimetype", "application/epub+zip");
+  archive.file(
+    "META-INF/container.xml",
+    '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+  );
+  const manifest = chapterHtml
+    .map(
+      (_, index) =>
+        `<item id="c${index + 1}" href="chapter-${index + 1}.xhtml" media-type="application/xhtml+xml"/>`,
+    )
+    .join("");
+  const spine = chapterHtml
+    .map((_, index) => `<itemref idref="c${index + 1}"/>`)
+    .join("");
+  archive.file(
+    "OEBPS/content.opf",
+    `<?xml version="1.0"?><package><metadata><title>${title}</title></metadata><manifest>${manifest}</manifest><spine>${spine}</spine></package>`,
+  );
+  chapterHtml.forEach((chapter, index) => {
+    archive.file(
+      `OEBPS/chapter-${index + 1}.xhtml`,
+      `<html><body>${chapter}</body></html>`,
+    );
+  });
+  return await archive.generateAsync({
+    type: "uint8array",
+    compression: "DEFLATE",
+  });
+}
+
+async function createRepeatedSpineEpub(
+  repetitions: number,
+  title = "Repeated spine",
+): Promise<Uint8Array> {
+  const archive = new JSZip();
+  archive.file("mimetype", "application/epub+zip");
+  archive.file(
+    "META-INF/container.xml",
+    '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+  );
+  archive.file(
+    "OEBPS/content.opf",
+    `<?xml version="1.0"?><package><metadata><title>${title}</title></metadata><manifest><item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine>${'<itemref idref="c1"/>'.repeat(repetitions)}</spine></package>`,
+  );
+  archive.file("OEBPS/chapter.xhtml", "<html><body>A</body></html>");
+  return await archive.generateAsync({
+    type: "uint8array",
+    compression: "DEFLATE",
+  });
+}
+
 async function createDocx(
   body: string,
   extraEntries: Record<string, string> = {},
@@ -498,6 +554,67 @@ describe("bounded text extraction", () => {
     ).rejects.toThrow(/extracted EPUB content exceeds.*64 bytes/i);
   });
 
+  test("counts every retained EPUB field at the exact byte boundary", async () => {
+    const epub = await createEpub("A".repeat(30), {}, "T".repeat(10));
+    const policy = {
+      maxEntries: 100,
+      maxExpandedBytes: 1_000_000,
+      maxExtractedBytes: 79,
+    };
+
+    await expect(
+      extractEpub("src_0000000000000000", "boundary.epub", epub, policy),
+    ).resolves.toMatchObject({
+      title: "T".repeat(10),
+      text: "A".repeat(30),
+      chunks: [
+        expect.objectContaining({
+          locator: "chapter=1",
+          text: "A".repeat(30),
+        }),
+      ],
+    });
+    await expect(
+      extractEpub("src_0000000000000000", "boundary.epub", epub, {
+        ...policy,
+        maxExtractedBytes: 78,
+      }),
+    ).rejects.toThrow(/extracted EPUB content exceeds.*78 bytes/i);
+  });
+
+  test("counts multiple EPUB chapters using UTF-8 retained-field bytes", async () => {
+    const unicode = "é".repeat(5);
+    const epub = await createMultiChapterEpub(
+      [unicode, "B".repeat(10)],
+      unicode,
+    );
+    const policy = {
+      maxEntries: 100,
+      maxExpandedBytes: 1_000_000,
+      maxExtractedBytes: 70,
+    };
+
+    await expect(
+      extractEpub("src_0000000000000000", "unicode.epub", epub, policy),
+    ).resolves.toMatchObject({
+      title: unicode,
+      text: `${unicode}\n\n${"B".repeat(10)}`,
+      chunks: [
+        expect.objectContaining({ locator: "chapter=1", text: unicode }),
+        expect.objectContaining({
+          locator: "chapter=2",
+          text: "B".repeat(10),
+        }),
+      ],
+    });
+    await expect(
+      extractEpub("src_0000000000000000", "unicode.epub", epub, {
+        ...policy,
+        maxExtractedBytes: 69,
+      }),
+    ).rejects.toThrow(/extracted EPUB content exceeds.*69 bytes/i);
+  });
+
   test("does not charge discarded chapter titles to the EPUB output budget", async () => {
     const epub = await createEpub("A".repeat(20), {}, "T".repeat(40));
 
@@ -505,7 +622,7 @@ describe("bounded text extraction", () => {
       extractEpub("src_0000000000000000", "combined.epub", epub, {
         maxEntries: 100,
         maxExpandedBytes: 1_000_000,
-        maxExtractedBytes: 64,
+        maxExtractedBytes: 89,
       }),
     ).resolves.toMatchObject({
       title: "T".repeat(40),
@@ -2512,6 +2629,103 @@ describe("scanSources", () => {
       );
     },
   );
+
+  test("rejects cached EPUB spine amplification despite a copied current policy stamp", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-epub-spine-cache-"));
+    await initBrain(root, { name: "Test", description: "EPUB spine cache" });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.epub = {
+      maxEntries: 12,
+      maxExpandedBytes: 1_000_000,
+      maxExtractedBytes: 1_000_000,
+    };
+    await writeFile(configPath, stringify(config));
+    await writeFile(
+      path.join(root, "sources", "amplified.epub"),
+      await createRepeatedSpineEpub(11),
+    );
+    await writeFile(
+      path.join(root, "sources", "safe.epub"),
+      await createRepeatedSpineEpub(1, "Safe"),
+    );
+    const scan = await scanSources(root);
+    const amplified = scan.added.find((source) =>
+      source.path.endsWith("amplified.epub"),
+    );
+    const safe = scan.added.find((source) => source.path.endsWith("safe.epub"));
+    if (!amplified || !safe) throw new Error("Expected both EPUB sources");
+    await readBrainItem(root, amplified.id);
+    await readBrainItem(root, safe.id);
+
+    config.sources.epub.maxEntries = 10;
+    await writeFile(configPath, stringify(config));
+    await readBrainItem(root, safe.id);
+    const cacheDirectory = path.join(root, ".brain", "cache", "extracted");
+    const currentPolicyStamp = await readFile(
+      path.join(cacheDirectory, `${safe.id}.policy`),
+      "utf8",
+    );
+    await writeFile(
+      path.join(cacheDirectory, `${amplified.id}.policy`),
+      currentPolicyStamp,
+    );
+
+    await expect(readBrainItem(root, amplified.id)).rejects.toThrow(
+      /EPUB spine contains 11 items.*maximum of 10/i,
+    );
+  });
+
+  test("enforces retained-field EPUB budgets on a current-stamped cache hit", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "brain-epub-retained-cache-"),
+    );
+    await initBrain(root, {
+      name: "Test",
+      description: "EPUB retained cache",
+    });
+    const configPath = path.join(root, "brain.config.yaml");
+    const config = parse(await readFile(configPath, "utf8"));
+    config.sources.epub = {
+      maxEntries: 100,
+      maxExpandedBytes: 1_000_000,
+      maxExtractedBytes: 79,
+    };
+    await writeFile(configPath, stringify(config));
+    await writeFile(
+      path.join(root, "sources", "boundary.epub"),
+      await createEpub("A".repeat(30), {}, "T".repeat(10)),
+    );
+    await writeFile(
+      path.join(root, "sources", "safe.epub"),
+      await createEpub("ok", {}, "Safe"),
+    );
+    const scan = await scanSources(root);
+    const boundary = scan.added.find((source) =>
+      source.path.endsWith("boundary.epub"),
+    );
+    const safe = scan.added.find((source) => source.path.endsWith("safe.epub"));
+    if (!boundary || !safe) throw new Error("Expected both EPUB sources");
+    await readBrainItem(root, boundary.id);
+    await readBrainItem(root, safe.id);
+
+    config.sources.epub.maxExtractedBytes = 78;
+    await writeFile(configPath, stringify(config));
+    await readBrainItem(root, safe.id);
+    const cacheDirectory = path.join(root, ".brain", "cache", "extracted");
+    const currentPolicyStamp = await readFile(
+      path.join(cacheDirectory, `${safe.id}.policy`),
+      "utf8",
+    );
+    await writeFile(
+      path.join(cacheDirectory, `${boundary.id}.policy`),
+      currentPolicyStamp,
+    );
+
+    await expect(readBrainItem(root, boundary.id)).rejects.toThrow(
+      /extracted EPUB content exceeds.*78 bytes/i,
+    );
+  });
 
   test("records extraction failures instead of silently omitting the source", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-failed-source-"));

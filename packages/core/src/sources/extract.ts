@@ -68,6 +68,10 @@ class RetainedTextBudget {
     );
   }
 
+  get remainingBytes(): number {
+    return this.#policy.maxExtractedBytes - this.#bytes;
+  }
+
   #retainEntry(): void {
     if (this.#entries >= this.#policy.maxChunks) {
       throw new Error(
@@ -823,11 +827,14 @@ export async function extractEpub(
       : String((rawTitle as Record<string, unknown>)?.["#text"] ?? "")) ||
     path.basename(filePath, path.extname(filePath));
   const normalizedTitle = title.trim();
-  if (Buffer.byteLength(normalizedTitle, "utf8") > policy.maxExtractedBytes) {
-    throw new Error(
-      `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
-    );
-  }
+  const budget = new RetainedTextBudget(
+    {
+      maxExtractedBytes: policy.maxExtractedBytes,
+      maxChunks: policy.maxEntries,
+    },
+    "EPUB",
+    [normalizedTitle],
+  );
   const manifest = xmlChild(packageDocument, "manifest");
   const items = asArray(xmlChild(manifest, "item")) as Array<
     Record<string, unknown>
@@ -846,7 +853,6 @@ export async function extractEpub(
   }
   const packageDirectory = path.posix.dirname(packagePath);
   const chunks = [];
-  let extractedBytes = Buffer.byteLength(normalizedTitle, "utf8");
   for (const [ordinal, itemRef] of itemRefs.entries()) {
     const href = hrefById.get(String(itemRef["@idref"]));
     if (!href) continue;
@@ -854,7 +860,6 @@ export async function extractEpub(
     const chapterHtml = await archive.file(chapterPath)?.async("string");
     if (!chapterHtml)
       throw new Error(`EPUB spine item is missing: ${chapterPath}`);
-    const remainingExtractedBytes = policy.maxExtractedBytes - extractedBytes;
     let chapter: ExtractedSourceV1;
     try {
       chapter = extractHtml(
@@ -862,7 +867,7 @@ export async function extractEpub(
         chapterPath,
         chapterHtml,
         {
-          maxExtractedBytes: Math.max(1, remainingExtractedBytes),
+          maxExtractedBytes: Math.max(1, budget.remainingBytes),
           maxChunks: defaultTextExtractionPolicyV1.maxChunks,
         },
         "EPUB",
@@ -881,22 +886,13 @@ export async function extractEpub(
       throw error;
     }
     if (!chapter.text) continue;
-    const separatorBytes = chunks.length > 0 ? 2 : 0;
-    const chapterBytes = Buffer.byteLength(chapter.text, "utf8");
-    if (
-      chapterBytes + separatorBytes >
-      policy.maxExtractedBytes - extractedBytes
-    ) {
-      throw new Error(
-        `Extracted EPUB content exceeds configured maximum of ${policy.maxExtractedBytes} bytes`,
-      );
-    }
-    extractedBytes += separatorBytes + chapterBytes;
+    const locator = `chapter=${ordinal + 1}`;
+    budget.retainPrimaryEntry(chapter.text, "\n\n", [locator, chapter.text]);
     chunks.push({
       id: `${sourceId}_${String(ordinal).padStart(4, "0")}`,
       sourceId,
       ordinal,
-      locator: `chapter=${ordinal + 1}`,
+      locator,
       text: chapter.text,
     });
   }
