@@ -61,6 +61,27 @@ export {
   docxOutputPolicyV1Schema,
   sourceRecordV1Schema,
 } from "./sources/types.js";
+export {
+  detectWebArtifact,
+  parseWebArtifactSidecar,
+  parseWebCaptureMetadata,
+  renderWebArtifactSidecar,
+  validateWebUrlChain,
+  webArtifactSidecarPath,
+  webArtifactSidecarV1Schema,
+  webCaptureCompletenessV1Schema,
+  webCaptureMetadataV1Schema,
+  webCaptureRepresentationV1Schema,
+  webDiscoveryV1Schema,
+} from "./sources/web-evidence.js";
+export type {
+  DetectedWebArtifactV1,
+  WebArtifactSidecarV1,
+  WebCaptureCompletenessV1,
+  WebCaptureMetadataV1,
+  WebCaptureRepresentationV1,
+  WebDiscoveryV1,
+} from "./sources/web-evidence.js";
 export type {
   DocxOutputPolicyV1,
   ExtractedSourceV1,

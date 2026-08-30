@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  webCaptureCompletenessV1Schema,
+  webCaptureRepresentationV1Schema,
+  webDiscoveryV1Schema,
+} from "./web-evidence.js";
 
 const extractedSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -23,14 +28,25 @@ const sourceRecordBaseV1Schema = z.object({
   extractor: z.string().min(1),
   error: z.string().optional(),
   docxOutputPolicy: docxOutputPolicyV1Schema.optional(),
-  supersedes: z.string().optional(),
+  supersedes: z
+    .string()
+    .regex(/^src_[a-f0-9]{16}$/)
+    .optional(),
   provenance: z
     .object({
       kind: z.enum(["file", "web"]),
       url: z.string().url().optional(),
+      finalUrl: z.string().url().optional(),
+      redirectChain: z.array(z.string().url()).max(5).optional(),
       retrievedAt: z.string().datetime().optional(),
       query: z.string().optional(),
       captureKind: z.enum(["page", "snippet"]).optional(),
+      completeness: webCaptureCompletenessV1Schema.optional(),
+      representation: webCaptureRepresentationV1Schema.optional(),
+      sidecarPath: z.string().min(1).optional(),
+      sidecarSha256: extractedSha256Schema.optional(),
+      sidecarBytes: z.number().int().nonnegative().optional(),
+      webDiscoveries: z.array(webDiscoveryV1Schema).optional(),
     })
     .default({ kind: "file" }),
 });

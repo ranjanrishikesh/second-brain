@@ -25,6 +25,7 @@ const expectedSchemas = [
   "SyncTargetV1",
   "WebApprovalRequestV1",
   "WebApprovalV1",
+  "WebArtifactSidecarV1",
   "WikiPageV1",
 ] as const;
 
