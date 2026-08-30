@@ -75,3 +75,56 @@
 ## Remaining concerns
 
 None known.
+
+## Fix Round 1 — stripped provenance and metadata-only finish bypasses
+
+### Verified findings
+
+- Removing `representation`, all companion fields, and all structured
+  discoveries from a registered artifact removed every prior artifact signal,
+  so doctor, graph validation, cached extraction, and cache rebuild treated it
+  as ordinary evidence. The bypass also applied to original-download Markdown
+  artifacts.
+- Finish-time evidence IDs came from page `sources` frontmatter. A ready web
+  source listed with no locator and no inline citation therefore satisfied both
+  answered and partial web outcomes even though it was only gap metadata.
+
+### RED/GREEN evidence
+
+1. Full artifact-signal stripping RED: the doctor/graph/TXT-cache/Markdown-
+   cache matrix produced 4 expected failures / 65 passes. Compatibility probes
+   then exposed two required distinctions: historical marked web text and
+   non-canonical `kind: file` sources enriched with artifact discoveries must
+   remain cache-readable. The focused GREEN passed config/wiki/search, 3 files
+   / 71 tests.
+2. Locator-free finish RED: query tests produced 2 expected failures / 21
+   passes because answered and partial outcomes both completed from metadata-
+   only references. GREEN passed the query file, 23/23 tests.
+3. Combined Task 3 focused matrix passed 4 files / 94 tests in 46.75 seconds.
+
+### Boundary decisions and self-review
+
+- Canonical `sources/web/` records and `kind: web` provenance now fail closed
+  when artifact fields disappear. The only no-companion web exception is a
+  positively verified `brainWebCapture: 1` Markdown snapshot: safe bounded
+  source bytes, manifest byte/hash identity, strict metadata, historical or
+  current canonical body shape and body hash, and matching primary provenance.
+- An original-download Markdown artifact with stripped sidecar provenance is
+  not mistaken for text merely because its extractor is Markdown; unmarked
+  Markdown is rejected. A downloaded document that exactly impersonates the
+  complete canonical marked-capture format is indistinguishable by bytes after
+  all provenance is maliciously removed, which is the intentional positive
+  legacy recognition boundary requested by review.
+- Non-canonical local sources remain unaffected when `kind: file`, including
+  after structured web-discovery enrichment. Canonical web paths cannot be
+  downgraded by changing only the provenance kind.
+- Answered and partial evidence IDs now come from the canonical inline citation
+  parser applied to the evidence-tier mutation pages. Locator-free question/gap
+  metadata cannot satisfy an answer; unanswered durable gaps remain allowed.
+
+### Final verification
+
+The single post-fix `pnpm verify:fast` exited 0: Biome checked 103 files with
+no diagnostics, the TypeScript project build passed, and Vitest passed 27 files
+/ 393 tests in 244.96 seconds. `git diff --check` also passed on the final
+scoped diff.

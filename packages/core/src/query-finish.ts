@@ -21,6 +21,7 @@ import {
 } from "./transaction.js";
 import { assertWebApproval } from "./web-approval.js";
 import { loadWikiPages } from "./wiki/graph.js";
+import { extractCitations } from "./wiki/page.js";
 
 const finishQueryOptionsSchema = z.object({
   outcome: z.enum(["answered", "partial", "unanswered"]),
@@ -255,7 +256,9 @@ export async function finishQuery(
     const citedSourceIds = new Set(
       pages
         .filter((page) => evidencePageIds.has(page.id))
-        .flatMap((page) => page.sources.map((source) => source.id)),
+        .flatMap((page) =>
+          extractCitations(page.body).map((citation) => citation.sourceId),
+        ),
     );
     const manifest = z
       .object({

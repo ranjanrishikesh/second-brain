@@ -149,6 +149,18 @@ describe("wiki page format", () => {
         });
       },
     ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          delete source.provenance.representation;
+          delete source.provenance.sidecarPath;
+          delete source.provenance.sidecarSha256;
+          delete source.provenance.sidecarBytes;
+          delete source.provenance.webDiscoveries;
+        });
+      },
+    ],
   ])("reports structural issue %s", async (code, corrupt) => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-graph-web-"));
     await initBrain(root, { name: "Graph", description: "Web integrity" });

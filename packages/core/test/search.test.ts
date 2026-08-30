@@ -17,10 +17,14 @@ function sha256(content: Uint8Array | string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-async function registeredWebTextArtifact(root: string) {
+async function registeredWebTextArtifact(
+  root: string,
+  fileName = "cache-parity.txt",
+) {
   const directory = "sources/web/2026/08";
-  const sourcePath = `${directory}/cache-parity.txt`;
-  const sidecarPath = `${directory}/.cache-parity.txt.web.json`;
+  const sourcePath = `${directory}/${fileName}`;
+  const sidecarPath = `${directory}/.${fileName}.web.json`;
+  const markdown = fileName.endsWith(".md");
   const artifact = new TextEncoder().encode("Cache parity evidence.\n");
   const sidecar = {
     brainWebArtifact: 1,
@@ -28,8 +32,8 @@ async function registeredWebTextArtifact(root: string) {
     artifactSha256: sha256(artifact),
     artifactBytes: artifact.byteLength,
     title: "Cache parity evidence",
-    format: "text",
-    mediaType: "text/plain",
+    format: markdown ? "markdown" : "text",
+    mediaType: markdown ? "text/markdown" : "text/plain",
     discovery: {
       originalUrl: "https://example.com/cache-parity.txt",
       finalUrl: "https://example.com/cache-parity.txt",
@@ -93,6 +97,80 @@ describe("brain search", () => {
       loadExtractedSourceCache(root, tamperedSource),
     ).rejects.toThrow(/web artifact|artifact provenance/i);
     expect(source.provenance.sidecarPath).toBe(sidecarPath);
+  });
+
+  test.each(["cache-parity.txt", "original-download.md"])(
+    "cannot bypass %s artifact integrity by stripping every optional signal",
+    async (fileName) => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "brain-search-web-stripped-"),
+      );
+      await initBrain(root, {
+        name: "Search",
+        description: "Stripped artifact classification",
+      });
+      await registeredWebTextArtifact(root, fileName);
+      const manifestPath = path.join(root, ".brain", "source-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const provenance = manifest.sources[0].provenance;
+      delete provenance.representation;
+      delete provenance.sidecarPath;
+      delete provenance.sidecarSha256;
+      delete provenance.sidecarBytes;
+      delete provenance.webDiscoveries;
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      await expect(
+        loadExtractedSourceCache(root, manifest.sources[0]),
+      ).rejects.toThrow(/web artifact|artifact provenance|source mismatch/i);
+    },
+  );
+
+  test("keeps a marked legacy web text capture cache-readable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-web-legacy-"));
+    await initBrain(root, { name: "Search", description: "Legacy web text" });
+    const directory = "sources/web/2026/08";
+    const sourcePath = `${directory}/legacy.md`;
+    const body = "# Legacy evidence\n\nA legacy captured fact.\n";
+    await mkdir(path.join(root, directory), { recursive: true });
+    await writeFile(
+      path.join(root, sourcePath),
+      `---\nbrainWebCapture: 1\nurl: https://example.com/legacy\nretrievedAt: 2026-08-30T00:00:00.000Z\nquery: What is the legacy fact?\ncaptureKind: page\ntitle: Legacy evidence\ncontentSha256: ${sha256(body)}\n---\n${body}`,
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected legacy web capture");
+
+    await expect(loadExtractedSourceCache(root, source)).resolves.toMatchObject(
+      { sourceId: source.id },
+    );
+  });
+
+  test("keeps a reused local source cache-readable after web discovery enrichment", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-search-local-web-"));
+    await initBrain(root, { name: "Search", description: "Local web reuse" });
+    await writeFile(
+      path.join(root, "sources", "local.md"),
+      "# Local\n\nLocally supplied evidence.\n",
+    );
+    const source = (await scanSources(root)).added[0];
+    if (!source) throw new Error("Expected local source");
+    source.provenance.webDiscoveries = [
+      {
+        originalUrl: "https://example.com/local-copy.md",
+        finalUrl: "https://example.com/local-copy.md",
+        redirectChain: [],
+        retrievedAt: "2026-08-30T00:00:00.000Z",
+        queryId: "qry_0123456789abcdef0123456789abcdef",
+        questionHash: "c".repeat(64),
+        query: "What does the local source say?",
+        representation: "artifact",
+        completeness: "complete",
+      },
+    ];
+
+    await expect(loadExtractedSourceCache(root, source)).resolves.toMatchObject(
+      { sourceId: source.id },
+    );
   });
 
   test("finds extracted source chunks with stable locators", async () => {

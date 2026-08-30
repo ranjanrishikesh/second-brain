@@ -215,6 +215,18 @@ describe("doctorBrain", () => {
         });
       },
     ],
+    [
+      "WEB_ARTIFACT_SOURCE_MISMATCH",
+      async (root: string) => {
+        await updateRegisteredSource(root, (source) => {
+          delete source.provenance.representation;
+          delete source.provenance.sidecarPath;
+          delete source.provenance.sidecarSha256;
+          delete source.provenance.sidecarBytes;
+          delete source.provenance.webDiscoveries;
+        });
+      },
+    ],
   ])("reports %s for registered artifact corruption", async (code, corrupt) => {
     const root = await mkdtemp(path.join(tmpdir(), "brain-doctor-web-"));
     await initBrain(root, { name: "Doctor", description: "Web integrity" });

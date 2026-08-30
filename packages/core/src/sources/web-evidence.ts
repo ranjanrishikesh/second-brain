@@ -726,6 +726,86 @@ function primaryDiscoveryMatches(
   );
 }
 
+function capturedBodyFromLegacyMarkdown(
+  content: string,
+  metadata: WebCaptureMetadataV1,
+): string | undefined {
+  const closingMarker = content.indexOf("\n---\n", 4);
+  if (closingMarker < 0) return undefined;
+  const authoredPrefix = `\n# ${metadata.title}\n\n`;
+  const authoredAndCaptured = content.slice(closingMarker + 5);
+  if (
+    !authoredAndCaptured.startsWith(authoredPrefix) ||
+    !authoredAndCaptured.endsWith("\n")
+  ) {
+    return undefined;
+  }
+  return authoredAndCaptured.slice(authoredPrefix.length, -1);
+}
+
+async function isCanonicalLegacyWebTextCapture(
+  root: string,
+  source: SourceRecordV1,
+  maxFileBytes: number,
+): Promise<boolean> {
+  if (
+    source.provenance.kind !== "web" ||
+    source.extractor !== "markdown-v1" ||
+    !source.path.startsWith("sources/web/")
+  ) {
+    return false;
+  }
+  try {
+    const content = await readIntegrityFile(
+      root,
+      source.path,
+      maxFileBytes,
+      "Legacy web text capture",
+    );
+    if (
+      content.byteLength !== source.bytes ||
+      createHash("sha256").update(content).digest("hex") !== source.sha256
+    ) {
+      return false;
+    }
+    const markdown = content.toString("utf8");
+    const metadata = parseWebCaptureMetadata(markdown);
+    if (!metadata) return false;
+    const capturedBody = capturedBodyFromLegacyMarkdown(markdown, metadata);
+    const closingMarker = markdown.indexOf("\n---\n", 4);
+    const legacyBody = markdown.slice(closingMarker + 5);
+    const capturedBodyMatches =
+      capturedBody !== undefined &&
+      createHash("sha256").update(capturedBody).digest("hex") ===
+        metadata.contentSha256;
+    const legacyBodyMatches =
+      legacyBody.startsWith(`# ${metadata.title}\n`) &&
+      createHash("sha256").update(legacyBody).digest("hex") ===
+        metadata.contentSha256;
+    if (!capturedBodyMatches && !legacyBodyMatches) {
+      return false;
+    }
+    const provenance = source.provenance;
+    return (
+      provenance.url === (metadata.originalUrl ?? metadata.url) &&
+      provenance.finalUrl === metadata.finalUrl &&
+      JSON.stringify(provenance.redirectChain) ===
+        JSON.stringify(metadata.redirectChain) &&
+      provenance.retrievedAt === metadata.retrievedAt &&
+      provenance.query === metadata.query &&
+      provenance.captureKind === metadata.captureKind &&
+      (provenance.representation === undefined ||
+        provenance.representation === "text") &&
+      provenance.completeness ===
+        (metadata.completeness ??
+          (metadata.captureKind === "snippet" ? "partial" : "complete")) &&
+      source.supersedes === metadata.supersedes
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function inspectWebEvidenceIntegrity(
   root: string,
   source: SourceRecordV1,
@@ -743,12 +823,31 @@ export async function inspectWebEvidenceIntegrity(
   const hasArtifactDiscovery = provenance.webDiscoveries?.some(
     (discovery) => discovery.representation === "artifact",
   );
-  if (
-    provenance.representation !== "artifact" &&
-    !hasCompanionSignal &&
-    !hasArtifactDiscovery
-  ) {
-    return [];
+  const hasArtifactSignal =
+    provenance.representation === "artifact" ||
+    hasCompanionSignal ||
+    hasArtifactDiscovery;
+  const canonicalWebPath = source.path.startsWith("sources/web/");
+  if (provenance.kind === "file" && !canonicalWebPath) return [];
+  if (!hasArtifactSignal) {
+    const config = await loadBrainConfig(root);
+    if (
+      await isCanonicalLegacyWebTextCapture(
+        root,
+        source,
+        config.sources.maxFileBytes,
+      )
+    ) {
+      return [];
+    }
+    return [
+      {
+        code: "WEB_ARTIFACT_SOURCE_MISMATCH",
+        message:
+          "Canonical web evidence is not a valid marked text capture and has no complete artifact provenance",
+        path: source.path,
+      },
+    ];
   }
   const hasCompleteCompanion = companionFields.every(
     (value) => value !== undefined,

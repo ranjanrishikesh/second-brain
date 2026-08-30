@@ -138,6 +138,7 @@ async function attachWebGap(
     imageOnly: boolean;
     discoveryQueryId?: string;
     operationId: string;
+    sourceInlineCitation?: boolean;
   },
 ) {
   const session = await beginQuery(root, "What did the web report conclude?");
@@ -225,9 +226,18 @@ async function attachWebGap(
         createdAt: "2026-08-30T00:00:00.000Z",
         updatedAt: "2026-08-30T00:00:00.000Z",
         revision: "pending",
-        sources: [{ id: source.id, locators: ["lines=1-1"] }],
+        sources: [
+          {
+            id: source.id,
+            locators:
+              options.sourceInlineCitation === false ? [] : ["lines=1-1"],
+          },
+        ],
         relations: [],
-        body: `# Web report source\n\nThe report found evidence. [@${source.id}#lines=1-1]`,
+        body:
+          options.sourceInlineCitation === false
+            ? "# Web report source\n\nThe evidence is listed for follow-up."
+            : `# Web report source\n\nThe report found evidence. [@${source.id}#lines=1-1]`,
       };
   const changeSet: ChangeSetV1 = {
     version: 1,
@@ -703,6 +713,25 @@ describe("query lifecycle", () => {
       }),
     ).rejects.toThrow(/web artifact sidecar|integrity/i);
   });
+
+  test.each(["answered", "partial"] as const)(
+    "does not let a locator-free metadata reference satisfy a %s web query",
+    async (outcome) => {
+      const root = await queryBrain();
+      const { session } = await attachWebGap(root, {
+        imageOnly: false,
+        operationId: `op_web_${outcome}_metadata_only`,
+        sourceInlineCitation: false,
+      });
+
+      await expect(
+        finishQuery(root, session.id, {
+          outcome,
+          answerSummary: "The metadata-only reference answered the question.",
+        }),
+      ).rejects.toThrow(/inline citation|cite.*web evidence/i);
+    },
+  );
 
   test("allows an unanswered web query with a durable evidence gap", async () => {
     const root = await queryBrain();
