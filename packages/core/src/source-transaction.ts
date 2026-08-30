@@ -2,11 +2,15 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { loadBrainConfig } from "./config.js";
 import {
   type SupportedSourceFormatV1,
   sourceFormatForPath,
 } from "./sources/format.js";
-import { digestStableRepositoryFile } from "./sources/path-safety.js";
+import {
+  digestStableRepositoryFile,
+  effectiveSourceRoots,
+} from "./sources/path-safety.js";
 import { scanSources } from "./sources/scan.js";
 import { supersedeSource } from "./sources/supersede.js";
 import type { SourceScanResult } from "./sources/types.js";
@@ -440,6 +444,7 @@ export async function scanAndRegisterSources(
   testOptions: TransactionTestOptions = {},
 ): Promise<SourceScanResult> {
   const operationId = `op_source_${randomUUID().replaceAll("-", "")}`;
+  const config = await loadBrainConfig(root);
   const transaction = await runCanonicalWrite<SourceScanResult>(
     root,
     {
@@ -449,6 +454,7 @@ export async function scanAndRegisterSources(
           ? `brain(source): register ${result.added.length} source${result.added.length === 1 ? "" : "s"} [op:${operationId}]`
           : `brain(source): acknowledge duplicate paths [op:${operationId}]`,
       testOptions,
+      immutableInputRootPaths: effectiveSourceRoots(config.sources.roots),
     },
     (writer) => sourceRegistrationMutation(root, operationId, writer),
   );
@@ -628,6 +634,7 @@ export async function registerWebSourceCapture(
   const operationId = `op_web_capture_${randomUUID().replaceAll("-", "")}`;
   const scanOperationId = `op_source_${randomUUID().replaceAll("-", "")}`;
   const discoveryOperationId = `op_web_capture_${randomUUID().replaceAll("-", "")}`;
+  const config = await loadBrainConfig(root);
   const transaction = await runCanonicalWrite<{
     source: SourceRecordV1;
     created: boolean;
@@ -641,6 +648,7 @@ export async function registerWebSourceCapture(
           : `brain(web): record discovery for ${result.source.id} [op:${operationId}]`,
       testOptions,
       waitForWriter: { timeoutMs: 30_000 },
+      immutableInputRootPaths: effectiveSourceRoots(config.sources.roots),
       ...(afterCanonicalCommit ? { afterCanonicalCommit } : {}),
     },
     async (writer) => {

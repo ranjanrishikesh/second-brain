@@ -18,7 +18,7 @@ import {
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { loadBrainConfig } from "./config.js";
+import { loadBrainConfig, sourceRootV1Schema } from "./config.js";
 import {
   assertReconciliationPlanMatches,
   assertReconciliationReceipt,
@@ -938,6 +938,36 @@ function canonicalManagedPath(
   return path.join(root, safePath);
 }
 
+function safeImmutableInputRootPaths(
+  relativePaths: readonly string[] = [],
+): string[] {
+  return [...new Set(relativePaths)].map((relativePath) =>
+    sourceRootV1Schema.parse(relativePath),
+  );
+}
+
+function canonicalImmutableInputPath(
+  root: string,
+  relativePath: string,
+  immutableInputRootPaths: ReadonlySet<string>,
+): string {
+  const [stagePath] = safeStagePaths(root, [relativePath]);
+  const safePath = stagePath
+    ? sourceRootV1Schema.safeParse(stagePath)
+    : undefined;
+  if (
+    !safePath?.success ||
+    ![...immutableInputRootPaths].some(
+      (inputRoot) =>
+        safePath.data === inputRoot ||
+        safePath.data.startsWith(`${inputRoot}/`),
+    )
+  ) {
+    throw new Error(`Unsafe immutable input path: ${relativePath}`);
+  }
+  return path.join(root, safePath.data);
+}
+
 export interface CanonicalMutationWriter {
   writeText(relativePath: string, content: string): Promise<void>;
   writeBytes(relativePath: string, content: Uint8Array): Promise<void>;
@@ -956,16 +986,19 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
     private readonly root: string,
     private readonly realRoot: string,
     private readonly managedRootPaths: ReadonlySet<string>,
+    private readonly immutableInputRootPaths: ReadonlySet<string>,
   ) {}
 
   static async create(
     root: string,
     managedRootPaths: readonly string[],
+    immutableInputRootPaths: readonly string[],
   ): Promise<TransactionCanonicalWriter> {
     return new TransactionCanonicalWriter(
       root,
       await realpath(root),
       new Set(managedRootPaths),
+      new Set(immutableInputRootPaths),
     );
   }
 
@@ -985,8 +1018,17 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
   private async fingerprintExisting(
     relativePath: string,
     expected: { bytes: number; sha256: string },
+    kind: "managed" | "immutable-input" = "managed",
   ): Promise<ManagedFileFingerprint> {
-    canonicalManagedPath(this.root, relativePath, this.managedRootPaths);
+    if (kind === "immutable-input") {
+      canonicalImmutableInputPath(
+        this.root,
+        relativePath,
+        this.immutableInputRootPaths,
+      );
+    } else {
+      canonicalManagedPath(this.root, relativePath, this.managedRootPaths);
+    }
     const digest = await digestStableRepositoryFile(
       this.root,
       relativePath,
@@ -1062,7 +1104,7 @@ class TransactionCanonicalWriter implements CanonicalMutationWriter {
   ): Promise<void> {
     this.expected.set(
       relativePath,
-      await this.fingerprintExisting(relativePath, expected),
+      await this.fingerprintExisting(relativePath, expected, "immutable-input"),
     );
   }
 
@@ -1347,6 +1389,8 @@ export interface CanonicalWriteOptions<T> {
   allowUntrackedPaths?: string[];
   /** Extra exact canonical files this operation must snapshot and restore. */
   managedFilePaths?: string[];
+  /** Validated roots containing immutable inputs that may be sealed and staged exactly. */
+  immutableInputRootPaths?: string[];
   /** Internal opt-in serialization for callers that can safely retry from fresh state. */
   waitForWriter?: WriterWaitOptions;
   /** Internal durable seam used while this canonical writer still owns its lock. */
@@ -1369,6 +1413,9 @@ export async function runCanonicalWrite<T>(
     root,
     options.managedFilePaths,
     managedRootPaths,
+  );
+  const immutableInputRootPaths = safeImmutableInputRootPaths(
+    options.immutableInputRootPaths,
   );
   const allowUntrackedPaths = new Set(
     safeStagePaths(root, options.allowUntrackedPaths ?? []),
@@ -1468,6 +1515,7 @@ export async function runCanonicalWrite<T>(
     const writer = await TransactionCanonicalWriter.create(
       root,
       managedRootPaths,
+      immutableInputRootPaths,
     );
     const mutation = await mutate(writer);
     stagePaths = safeStagePaths(root, mutation.stagePaths);

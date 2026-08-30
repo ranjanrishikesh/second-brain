@@ -485,14 +485,14 @@ describe("registered source transactions", () => {
     await initGitBrain(root, "Custom source roots test");
     const configPath = path.join(root, "brain.config.yaml");
     const config = parse(await readFile(configPath, "utf8"));
-    config.sources.roots = ["sources/local"];
+    config.sources.roots = ["knowledge/local"];
     await writeFile(configPath, stringify(config));
-    await mkdir(path.join(root, "sources", "local"));
+    await mkdir(path.join(root, "knowledge", "local"), { recursive: true });
     await git(root, ["add", "brain.config.yaml"]);
     await git(root, ["commit", "-m", "test: use custom source root"]);
     const { artifactBytes } = await createArtifactFiles(root);
     await writeFile(
-      path.join(root, "sources", "local", "z-local.pdf"),
+      path.join(root, "knowledge", "local", "z-local.pdf"),
       artifactBytes,
     );
 
@@ -500,7 +500,7 @@ describe("registered source transactions", () => {
 
     expect(result.added).toEqual([
       expect.objectContaining({
-        path: "sources/local/z-local.pdf",
+        path: "knowledge/local/z-local.pdf",
         provenance: { kind: "file" },
       }),
     ]);
