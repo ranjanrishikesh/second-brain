@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { type BigIntStats, constants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  realpath,
+} from "node:fs/promises";
 import path from "node:path";
 import { stringify } from "yaml";
 import { z } from "zod";
@@ -139,6 +147,13 @@ export interface WebCaptureTestOptions {
   afterSessionRead?: () => Promise<void> | void;
   /** Signals that validation is complete immediately before writer waiting. */
   beforeWriterWait?: () => Promise<void> | void;
+  /** Pauses after parent validation and immediately before final create validation. */
+  beforePreparationCreate?: () => Promise<void> | void;
+  /** Reports bounded prepared-file read progress, including the stat-only zero. */
+  afterPreparedReadProgress?: (
+    relativePath: string,
+    bytesRead: number,
+  ) => Promise<void> | void;
 }
 
 function sha256(value: Uint8Array | string): string {
@@ -404,11 +419,288 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   );
 }
 
-async function readOptional(filePath: string): Promise<Buffer | undefined> {
-  return await readFile(filePath).catch((error: unknown) => {
+interface WebPreparationPaths {
+  root: string;
+  sources: string;
+  web: string;
+  realRoot: string;
+  realSources: string;
+}
+
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function unchangedFile(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function isContained(parent: string, candidate: string): boolean {
+  return candidate.startsWith(`${parent}${path.sep}`);
+}
+
+async function webPreparationPaths(root: string): Promise<WebPreparationPaths> {
+  const lexicalRoot = path.resolve(root);
+  const sources = path.join(lexicalRoot, "sources");
+  const metadata = await lstat(sources, { bigint: true });
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(
+      "Web capture sources parent must be a non-symlink directory",
+    );
+  }
+  const [realRoot, realSources] = await Promise.all([
+    realpath(lexicalRoot),
+    realpath(sources),
+  ]);
+  if (!isContained(realRoot, realSources)) {
+    throw new Error("Web capture sources parent must stay inside the brain");
+  }
+  return {
+    root: lexicalRoot,
+    sources,
+    web: path.join(sources, "web"),
+    realRoot,
+    realSources,
+  };
+}
+
+function webPreparationAbsolutePath(
+  paths: WebPreparationPaths,
+  relativePath: string,
+): string {
+  const absolutePath = path.resolve(paths.root, relativePath);
+  if (!isContained(paths.web, absolutePath)) {
+    throw new Error(
+      `Web capture path must stay below sources/web: ${relativePath}`,
+    );
+  }
+  return absolutePath;
+}
+
+async function assertSourcesAnchor(paths: WebPreparationPaths): Promise<void> {
+  const metadata = await lstat(paths.sources, { bigint: true });
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error("Web capture sources parent changed during preparation");
+  }
+  if ((await realpath(paths.sources)) !== paths.realSources) {
+    throw new Error("Web capture sources parent changed during preparation");
+  }
+}
+
+async function assertWebDirectoryChain(
+  paths: WebPreparationPaths,
+  directory: string,
+): Promise<void> {
+  await assertSourcesAnchor(paths);
+  const relative = path.relative(paths.sources, directory);
+  const components = relative.split(path.sep).filter(Boolean);
+  if (components[0] !== "web" || path.isAbsolute(relative)) {
+    throw new Error("Web capture parent must stay below sources/web");
+  }
+  let current = paths.sources;
+  for (const component of components) {
+    if (component === "." || component === "..") {
+      throw new Error("Web capture parent must stay below sources/web");
+    }
+    current = path.join(current, component);
+    const metadata = await lstat(current, { bigint: true });
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(
+        `Web capture parent must be a non-symlink directory: ${current}`,
+      );
+    }
+    const realDirectory = await realpath(current);
+    if (!isContained(paths.realSources, realDirectory)) {
+      throw new Error(
+        "Web capture parent must stay inside the brain sources tree",
+      );
+    }
+  }
+}
+
+async function ensureWebPreparationParent(
+  root: string,
+  relativePath: string,
+): Promise<{ paths: WebPreparationPaths; absolutePath: string }> {
+  const paths = await webPreparationPaths(root);
+  const absolutePath = webPreparationAbsolutePath(paths, relativePath);
+  const directory = path.dirname(absolutePath);
+  const relativeDirectory = path.relative(paths.sources, directory);
+  const components = relativeDirectory.split(path.sep).filter(Boolean);
+  if (components[0] !== "web" || path.isAbsolute(relativeDirectory)) {
+    throw new Error("Web capture parent must stay below sources/web");
+  }
+  let current = paths.sources;
+  for (const component of components) {
+    if (component === "." || component === "..") {
+      throw new Error("Web capture parent must stay below sources/web");
+    }
+    if (current === paths.sources) await assertSourcesAnchor(paths);
+    else await assertWebDirectoryChain(paths, current);
+    current = path.join(current, component);
+    try {
+      await mkdir(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    await assertWebDirectoryChain(paths, current);
+  }
+  await assertWebDirectoryChain(paths, directory);
+  return { paths, absolutePath };
+}
+
+async function readContainedOptional(
+  paths: WebPreparationPaths,
+  relativePath: string,
+  expectedBytes: number,
+  afterReadProgress?: (
+    relativePath: string,
+    bytesRead: number,
+  ) => Promise<void> | void,
+): Promise<Buffer | undefined> {
+  const absolutePath = webPreparationAbsolutePath(paths, relativePath);
+  await assertWebDirectoryChain(paths, path.dirname(absolutePath));
+  let metadata: BigIntStats;
+  try {
+    metadata = await lstat(absolutePath, { bigint: true });
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
-  });
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(
+      `Prepared web capture must be a non-symlink file: ${relativePath}`,
+    );
+  }
+  const realFile = await realpath(absolutePath);
+  if (!isContained(paths.realSources, realFile)) {
+    throw new Error(
+      `Prepared web capture must stay inside sources: ${relativePath}`,
+    );
+  }
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(
+      absolutePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+  } catch {
+    throw new Error(`Prepared web capture path changed: ${relativePath}`);
+  }
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || !sameFileIdentity(metadata, opened)) {
+      throw new Error(`Prepared web capture path changed: ${relativePath}`);
+    }
+    await afterReadProgress?.(relativePath, 0);
+    if (opened.size > BigInt(expectedBytes)) {
+      throw new Error(
+        `Prepared web capture exceeds requested byte length: ${relativePath}`,
+      );
+    }
+    const chunks: Buffer[] = [];
+    let bytesRead = 0;
+    while (bytesRead <= expectedBytes) {
+      const chunk = Buffer.alloc(
+        Math.min(64 * 1024, expectedBytes + 1 - bytesRead),
+      );
+      const result = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (result.bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, result.bytesRead));
+      bytesRead += result.bytesRead;
+      await afterReadProgress?.(relativePath, bytesRead);
+      if (bytesRead > expectedBytes) {
+        throw new Error(
+          `Prepared web capture exceeds requested byte length: ${relativePath}`,
+        );
+      }
+    }
+    const content = Buffer.concat(chunks, bytesRead);
+    const finalOpened = await handle.stat({ bigint: true });
+    const [finalPath, finalRealFile] = await Promise.all([
+      lstat(absolutePath, { bigint: true }).catch(() => undefined),
+      realpath(absolutePath).catch(() => undefined),
+    ]);
+    await assertWebDirectoryChain(paths, path.dirname(absolutePath));
+    if (
+      !unchangedFile(opened, finalOpened) ||
+      finalOpened.size !== BigInt(content.byteLength) ||
+      !finalPath?.isFile() ||
+      finalPath.isSymbolicLink() ||
+      !sameFileIdentity(opened, finalPath) ||
+      !finalRealFile ||
+      !isContained(paths.realSources, finalRealFile)
+    ) {
+      throw new Error(`Prepared web capture path changed: ${relativePath}`);
+    }
+    return content;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function createContainedFile(
+  paths: WebPreparationPaths,
+  relativePath: string,
+  content: Uint8Array,
+): Promise<void> {
+  const absolutePath = webPreparationAbsolutePath(paths, relativePath);
+  const directory = path.dirname(absolutePath);
+  await assertWebDirectoryChain(paths, directory);
+  const handle = await open(
+    absolutePath,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o644,
+  );
+  try {
+    const opened = await handle.stat({ bigint: true });
+    const [createdPath, realFile] = await Promise.all([
+      lstat(absolutePath, { bigint: true }),
+      realpath(absolutePath),
+    ]);
+    await assertWebDirectoryChain(paths, directory);
+    if (
+      !opened.isFile() ||
+      !createdPath.isFile() ||
+      createdPath.isSymbolicLink() ||
+      !sameFileIdentity(opened, createdPath) ||
+      !isContained(paths.realSources, realFile)
+    ) {
+      throw new Error(
+        `Web capture path changed before writing: ${relativePath}`,
+      );
+    }
+    await handle.writeFile(content);
+    const finalOpened = await handle.stat({ bigint: true });
+    const [finalPath, finalRealFile] = await Promise.all([
+      lstat(absolutePath, { bigint: true }).catch(() => undefined),
+      realpath(absolutePath).catch(() => undefined),
+    ]);
+    await assertWebDirectoryChain(paths, directory);
+    if (
+      finalOpened.size !== BigInt(content.byteLength) ||
+      !finalPath?.isFile() ||
+      finalPath.isSymbolicLink() ||
+      !sameFileIdentity(opened, finalOpened) ||
+      !sameFileIdentity(opened, finalPath) ||
+      !finalRealFile ||
+      !isContained(paths.realSources, finalRealFile)
+    ) {
+      throw new Error(
+        `Web capture path changed while writing: ${relativePath}`,
+      );
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 async function prepareArtifactPair(
@@ -417,14 +709,31 @@ async function prepareArtifactPair(
   artifact: Uint8Array,
   sidecarPath: string,
   sidecar: Uint8Array,
+  beforeCreate?: () => Promise<void> | void,
+  afterReadProgress?: (
+    relativePath: string,
+    bytesRead: number,
+  ) => Promise<void> | void,
 ): Promise<void> {
-  const artifactPath = path.join(root, sourcePath);
-  const companionPath = path.join(root, sidecarPath);
-  await mkdir(path.dirname(artifactPath), { recursive: true });
+  const { paths } = await ensureWebPreparationParent(root, sourcePath);
+  const companion = await ensureWebPreparationParent(root, sidecarPath);
+  if (companion.paths.realSources !== paths.realSources) {
+    throw new Error("Web artifact pair parents changed during preparation");
+  }
   const assertExistingPair = async () => {
     const [existingArtifact, existingSidecar] = await Promise.all([
-      readOptional(artifactPath),
-      readOptional(companionPath),
+      readContainedOptional(
+        paths,
+        sourcePath,
+        artifact.byteLength,
+        afterReadProgress,
+      ),
+      readContainedOptional(
+        paths,
+        sidecarPath,
+        sidecar.byteLength,
+        afterReadProgress,
+      ),
     ]);
     if (
       !existingArtifact ||
@@ -438,16 +747,35 @@ async function prepareArtifactPair(
     }
   };
   const [existingArtifact, existingSidecar] = await Promise.all([
-    readOptional(artifactPath),
-    readOptional(companionPath),
+    readContainedOptional(
+      paths,
+      sourcePath,
+      artifact.byteLength,
+      afterReadProgress,
+    ),
+    readContainedOptional(
+      paths,
+      sidecarPath,
+      sidecar.byteLength,
+      afterReadProgress,
+    ),
   ]);
   if (existingArtifact || existingSidecar) {
     await assertExistingPair();
     return;
   }
+  await beforeCreate?.();
+  await assertWebDirectoryChain(
+    paths,
+    path.dirname(webPreparationAbsolutePath(paths, sourcePath)),
+  );
   try {
-    await writeFile(artifactPath, artifact, { flag: "wx" });
-    await writeFile(companionPath, sidecar, { flag: "wx" });
+    await createContainedFile(paths, sourcePath, artifact);
+    await assertWebDirectoryChain(
+      paths,
+      path.dirname(webPreparationAbsolutePath(paths, sidecarPath)),
+    );
+    await createContainedFile(paths, sidecarPath, sidecar);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     await assertExistingPair();
@@ -458,14 +786,47 @@ async function prepareText(
   root: string,
   relativePath: string,
   content: string,
+  beforeCreate?: () => Promise<void> | void,
+  afterReadProgress?: (
+    relativePath: string,
+    bytesRead: number,
+  ) => Promise<void> | void,
 ): Promise<void> {
-  const absolutePath = path.join(root, relativePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
+  const { paths } = await ensureWebPreparationParent(root, relativePath);
+  const contentBytes = Buffer.from(content, "utf8");
+  const existing = await readContainedOptional(
+    paths,
+    relativePath,
+    contentBytes.byteLength,
+    afterReadProgress,
+  );
+  if (existing) {
+    if (existing.toString("utf8") !== content) {
+      throw new Error(
+        `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
+      );
+    }
+    return;
+  }
+  await beforeCreate?.();
+  await assertWebDirectoryChain(
+    paths,
+    path.dirname(webPreparationAbsolutePath(paths, relativePath)),
+  );
   try {
-    await writeFile(absolutePath, content, { encoding: "utf8", flag: "wx" });
+    await createContainedFile(paths, relativePath, contentBytes);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if ((await readFile(absolutePath, "utf8")) !== content) {
+    if (
+      (
+        await readContainedOptional(
+          paths,
+          relativePath,
+          contentBytes.byteLength,
+          afterReadProgress,
+        )
+      )?.toString("utf8") !== content
+    ) {
       throw new Error(
         `Prepared web evidence bytes do not match the requested capture: ${relativePath}`,
       );
@@ -653,6 +1014,8 @@ export async function captureWebEvidence(
           artifactContent,
           sidecarPath,
           sidecarBytes,
+          testOptions.beforePreparationCreate,
+          testOptions.afterPreparedReadProgress,
         );
         return { sourcePath, discovery };
       },
@@ -764,7 +1127,13 @@ export async function captureWebEvidence(
           `Web capture exceeds configured maximum of ${config.sources.maxFileBytes} bytes`,
         );
       }
-      await prepareText(root, relativePath, captureMarkdown);
+      await prepareText(
+        root,
+        relativePath,
+        captureMarkdown,
+        testOptions.beforePreparationCreate,
+        testOptions.afterPreparedReadProgress,
+      );
       return {
         sourcePath: relativePath,
         discovery: discoveryFor(input, urls, freshSession, retrievedAt),

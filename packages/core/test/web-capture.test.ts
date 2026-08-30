@@ -5,8 +5,10 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -548,6 +550,138 @@ describe("durable web evidence capture", () => {
       }),
     ).rejects.toThrow(/approval/i);
     expect(await webFiles(root)).toEqual([]);
+  });
+
+  test("rejects artifact preparation through a sources/web symlink without writing outside the brain", async () => {
+    const { root, queryId } = await approvedBrain("Contained artifact?");
+    const outside = await mkdtemp(path.join(tmpdir(), "brain-web-outside-"));
+    await symlink(outside, path.join(root, "sources", "web"), "dir");
+
+    try {
+      await expect(
+        captureWebEvidence(root, queryId, {
+          representation: "artifact",
+          originalUrl: "https://example.test/contained-artifact.txt",
+          title: "Contained artifact",
+          fileName: "contained-artifact.txt",
+          responseComplete: true,
+          content: encoder.encode("must stay inside the brain\n"),
+          retrievedAt: "2026-08-30T00:40:00.000Z",
+        }),
+      ).rejects.toThrow(/path|source|symlink|contain|safe/i);
+      expect(await readdir(outside)).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("revalidates text preparation after sources/web is swapped to an outside symlink", async () => {
+    const { root, queryId } = await approvedBrain("Contained text?");
+    const outside = await mkdtemp(path.join(tmpdir(), "brain-web-outside-"));
+    const webPath = path.join(root, "sources", "web");
+    await mkdir(webPath);
+
+    try {
+      await expect(
+        captureWebEvidence(
+          root,
+          queryId,
+          {
+            representation: "text",
+            originalUrl: "https://example.test/contained-text",
+            title: "Contained text",
+            captureKind: "page",
+            completeness: "complete",
+            content: "must stay inside the brain",
+            retrievedAt: "2026-08-30T00:41:00.000Z",
+          },
+          {
+            beforePreparationCreate: async () => {
+              await rename(
+                webPath,
+                path.join(root, "sources", "web-before-swap"),
+              );
+              await symlink(outside, webPath, "dir");
+            },
+          },
+        ),
+      ).rejects.toThrow(/path|source|symlink|contain|safe/i);
+      expect(await readdir(outside)).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an oversized prepared artifact before reading its bytes", async () => {
+    const { root, queryId } = await approvedBrain("Bound artifact retry?");
+    const content = encoder.encode("expected artifact\n");
+    const sourcePath = `sources/web/2026/08/bound-artifact-${sha256(content).slice(0, 12)}.txt`;
+    await mkdir(path.dirname(path.join(root, sourcePath)), { recursive: true });
+    await writeFile(
+      path.join(root, sourcePath),
+      Buffer.alloc(128 * 1024, 0x61),
+    );
+    const readProgress: Array<{ path: string; bytes: number }> = [];
+
+    await expect(
+      captureWebEvidence(
+        root,
+        queryId,
+        {
+          representation: "artifact",
+          originalUrl: "https://example.test/bound-artifact.txt",
+          title: "Bound artifact",
+          fileName: "bound-artifact.txt",
+          responseComplete: true,
+          content,
+          retrievedAt: "2026-08-30T00:42:00.000Z",
+        },
+        {
+          afterPreparedReadProgress(relativePath, bytesRead) {
+            readProgress.push({ path: relativePath, bytes: bytesRead });
+          },
+        },
+      ),
+    ).rejects.toThrow(/prepared web capture exceeds requested byte length/i);
+    expect(readProgress).toEqual([{ path: sourcePath, bytes: 0 }]);
+  });
+
+  test("rejects oversized prepared text before reading its bytes", async () => {
+    const { root, queryId } = await approvedBrain("Bound text retry?");
+    const originalUrl = "https://example.test/bound-text";
+    const body = "expected text";
+    const logicalDigest = sha256(
+      JSON.stringify([originalUrl, originalUrl, [], "page", "complete", body]),
+    );
+    const sourcePath = `sources/web/2026/08/bound-text-${logicalDigest.slice(0, 12)}.md`;
+    await mkdir(path.dirname(path.join(root, sourcePath)), { recursive: true });
+    await writeFile(
+      path.join(root, sourcePath),
+      Buffer.alloc(128 * 1024, 0x62),
+    );
+    const readProgress: Array<{ path: string; bytes: number }> = [];
+
+    await expect(
+      captureWebEvidence(
+        root,
+        queryId,
+        {
+          representation: "text",
+          originalUrl,
+          title: "Bound text",
+          captureKind: "page",
+          completeness: "complete",
+          content: body,
+          retrievedAt: "2026-08-30T00:42:00.000Z",
+        },
+        {
+          afterPreparedReadProgress(relativePath, bytesRead) {
+            readProgress.push({ path: relativePath, bytes: bytesRead });
+          },
+        },
+      ),
+    ).rejects.toThrow(/prepared web capture exceeds requested byte length/i);
+    expect(readProgress).toEqual([{ path: sourcePath, bytes: 0 }]);
   });
 
   test("keeps legacy text calls and preserves body bytes except line endings", async () => {
