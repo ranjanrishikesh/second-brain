@@ -52,9 +52,7 @@ describe("public JSON schemas", () => {
 
   it("emits complete duplicate companion fingerprints as an all-or-none shape", () => {
     const emittedBrainState = z.fromJSONSchema(
-      brainJsonSchemasV1.BrainStateV1 as Parameters<
-        typeof z.fromJSONSchema
-      >[0],
+      brainJsonSchemasV1.BrainStateV1 as Parameters<typeof z.fromJSONSchema>[0],
     );
     const state = {
       version: 1,
