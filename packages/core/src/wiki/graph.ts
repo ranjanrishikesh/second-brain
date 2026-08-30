@@ -37,6 +37,11 @@ export const auditReportV1Schema = z.object({
 
 export type AuditReportV1 = z.infer<typeof auditReportV1Schema>;
 
+interface WikiGraphTestOptions {
+  /** Deterministic test seam for observing integrity-inspection scheduling. */
+  inspectWebEvidenceIntegrity?: typeof inspectWebEvidenceIntegrity;
+}
+
 async function pageFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const files: string[] = [];
@@ -83,7 +88,10 @@ export function calculateCatalogRevision(pages: WikiPageV1[]): string {
   return createHash("sha256").update(JSON.stringify(catalog)).digest("hex");
 }
 
-export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
+export async function validateWikiGraph(
+  root: string,
+  testOptions: WikiGraphTestOptions = {},
+): Promise<AuditReportV1> {
   const config = await loadBrainConfig(root);
   const pages = await loadWikiPages(root);
   const manifest = z
@@ -100,13 +108,14 @@ export async function validateWikiGraph(root: string): Promise<AuditReportV1> {
   const sourcesById = new Map(
     manifest.sources.map((source) => [source.id, source]),
   );
-  const integrityIssues = (
-    await Promise.all(
-      manifest.sources.map((source) =>
-        inspectWebEvidenceIntegrity(root, source),
-      ),
-    )
-  ).flat();
+  const integrityIssues: Awaited<
+    ReturnType<typeof inspectWebEvidenceIntegrity>
+  > = [];
+  const integrityInspector =
+    testOptions.inspectWebEvidenceIntegrity ?? inspectWebEvidenceIntegrity;
+  for (const source of manifest.sources) {
+    integrityIssues.push(...(await integrityInspector(root, source)));
+  }
   const validLocators = new Map<string, Set<string>>();
   for (const source of manifest.sources) {
     if (source.extractionStatus !== "ready") continue;

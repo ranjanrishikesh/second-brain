@@ -231,6 +231,48 @@ describe("wiki page format", () => {
     );
   });
 
+  test("bounds web evidence integrity inspection concurrency", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-graph-bounded-web-"));
+    await initBrain(root, {
+      name: "Graph",
+      description: "Bounded web integrity inspection",
+    });
+    await registerWebArtifact(
+      root,
+      new TextEncoder().encode("First integrity artifact.\n"),
+      "first.txt",
+    );
+    await registerWebArtifact(
+      root,
+      new TextEncoder().encode("Second integrity artifact.\n"),
+      "second.txt",
+    );
+    let active = 0;
+    let maxActive = 0;
+
+    const report = await validateWikiGraph(root, {
+      inspectWebEvidenceIntegrity: async (_root, source) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await Promise.resolve();
+        active -= 1;
+        return [
+          {
+            code: "WEB_ARTIFACT_SOURCE_MISMATCH",
+            message: `Inspected ${source.path}`,
+            path: source.path,
+          },
+        ];
+      },
+    });
+
+    expect(maxActive).toBe(1);
+    expect(report.issues.map((issue) => issue.path)).toEqual([
+      `${webArtifactDirectory}/first.txt`,
+      `${webArtifactDirectory}/second.txt`,
+    ]);
+  });
+
   test("round-trips canonical frontmatter and cited Markdown", () => {
     const markdown = renderWikiPage(conceptPage());
 
