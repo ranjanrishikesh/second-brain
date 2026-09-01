@@ -128,7 +128,7 @@ export async function nextSetupBatch(
   setupId: string,
 ): Promise<SetupBatchV1> {
   setupIdV1Schema.parse(setupId);
-  await scanAndRegisterSources(root);
+  await scanAndRegisterSources(root, { requireReview: true });
   const state = await readBrainState(root);
   if (state.setup.status !== "in-progress" || state.setup.id !== setupId) {
     throw new Error(`Setup is not in progress: ${setupId}`);
@@ -278,7 +278,10 @@ export async function beginSetup(
   const input = beginSetupInputSchema.parse(rawInput);
   await recoverBrain(root);
   await assertUsableBrainCharter(root);
-  await scanAndRegisterSources(root, testOptions);
+  await scanAndRegisterSources(root, {
+    ...testOptions,
+    requireReview: true,
+  });
   const [existing, registeredSources] = await Promise.all([
     readBrainState(root),
     sourceRecords(root),
@@ -378,7 +381,7 @@ export async function finishSetup(
   const input = finishSetupInputSchema.parse(rawInput);
   setupIdV1Schema.parse(setupId);
   await recoverBrain(root);
-  await scanAndRegisterSources(root);
+  await scanAndRegisterSources(root, { requireReview: true });
   const operationId = `op_setup_${randomUUID().replaceAll("-", "")}`;
   const transaction = await runCanonicalWrite(
     root,

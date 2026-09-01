@@ -214,7 +214,7 @@ export async function beginQuery(
   const normalizedQuestion = question.trim();
   if (!normalizedQuestion) throw new Error("Question cannot be empty");
   await recoverBrain(root);
-  await scanAndRegisterSources(root);
+  await scanAndRegisterSources(root, { requireReview: true });
   const sync = await attemptManagedSync(root);
   const wikiResults = await searchBrain(root, {
     query: normalizedQuestion,

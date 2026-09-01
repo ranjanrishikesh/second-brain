@@ -560,11 +560,24 @@ export async function doctorBrain(
         path: "brain.config.yaml",
       });
     }
-    if (onboarding.sourceFiles.discovered === 0) {
+    if (
+      onboarding.sourceFiles.discovered === 0 ||
+      (onboarding.sourceFiles.registered === 0 &&
+        onboarding.sourceFiles.excluded === onboarding.sourceFiles.discovered)
+    ) {
       issues.push({
         code: "SOURCES_EMPTY",
         severity: "warning",
         message: "No source files have been added yet.",
+        path: "sources",
+      });
+    }
+    if (onboarding.phase === "sources-review-required") {
+      issues.push({
+        code: "SOURCES_REVIEW_REQUIRED",
+        severity: "warning",
+        message:
+          "Source files are waiting for agent-owned relevance review before registration.",
         path: "sources",
       });
     }

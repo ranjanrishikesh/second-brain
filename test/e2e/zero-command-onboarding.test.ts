@@ -41,6 +41,7 @@ import {
   type ReadReceiptV1,
   type SetupSourceContextV1,
   type SourceScanResult,
+  type SourceReviewV1,
   type WebCaptureResult,
   type WikiPageV1,
 } from "@second-brain/core";
@@ -180,6 +181,67 @@ async function runInstalledBrainJson<T>(
   );
   expect(command.stderr).toBe("");
   return JSON.parse(command.stdout) as T;
+}
+
+async function writeInScopeSourceDecisions(
+  root: string,
+  review: SourceReviewV1,
+): Promise<string> {
+  const decisionFile = path.join(
+    root,
+    ".brain",
+    "runtime",
+    "source-review-decisions.json",
+  );
+  await mkdir(path.dirname(decisionFile), { recursive: true });
+  await writeFile(
+    decisionFile,
+    `${JSON.stringify(
+      {
+        version: 1,
+        decisions: review.candidates.map((candidate) => ({
+          path: candidate.path,
+          sha256: candidate.sha256,
+          decision: "include",
+          basis: "agent-in-scope",
+          reason: "The candidate belongs to the fixture's astronomy scope.",
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return decisionFile;
+}
+
+async function admitInstalledSources(root: string): Promise<SourceReviewV1> {
+  const review = await runInstalledBrainJson<SourceReviewV1>(root, [
+    "source",
+    "review",
+  ]);
+  const decisionFile = await writeInScopeSourceDecisions(root, review);
+  await runInstalledBrainJson(root, ["source", "decide", decisionFile]);
+  return review;
+}
+
+async function admitCliSources(root: string): Promise<SourceReviewV1> {
+  const review = await runCliJson<SourceReviewV1>([
+    "source",
+    "review",
+    "--root",
+    root,
+    "--json",
+  ]);
+  const decisionFile = await writeInScopeSourceDecisions(root, review);
+  await runCliJson([
+    "source",
+    "decide",
+    decisionFile,
+    "--root",
+    root,
+    "--json",
+  ]);
+  return review;
 }
 
 async function addPdfAndDocxCorpus(root: string): Promise<void> {
@@ -449,9 +511,12 @@ describe("zero-command onboarding fake host", () => {
     expect(
       (await runInstalledBrainJson<BrainStatusV1>(root, ["status"])).onboarding,
     ).toMatchObject({
-      phase: "sources-unregistered",
-      nextAction: "scan-sources",
+      phase: "sources-review-required",
+      nextAction: "review-sources",
     });
+
+    const review = await admitInstalledSources(root);
+    expect(review.candidates).toHaveLength(4);
 
     const scan = await runInstalledBrainJson<SourceScanResult>(root, [
       "source",
@@ -670,14 +735,17 @@ describe("zero-command onboarding fake host", () => {
       "--json",
     ]);
     expect(resumedWithFiles.onboarding).toMatchObject({
-      phase: "sources-unregistered",
-      nextAction: "scan-sources",
+      phase: "sources-review-required",
+      nextAction: "review-sources",
       sourceFiles: {
         discovered: 4,
         supportedCandidates: 3,
         unsupportedCandidates: 1,
       },
     });
+
+    const review = await admitCliSources(root);
+    expect(review.candidates).toHaveLength(4);
 
     const scan = await runCliJson<SourceScanResult>([
       "source",
@@ -892,8 +960,8 @@ describe("zero-command onboarding fake host", () => {
 
     expect(initialized.initialization.name).toBe("Second Brain Preloaded");
     expect(initialized.status.onboarding).toMatchObject({
-      phase: "sources-unregistered",
-      nextAction: "scan-sources",
+      phase: "sources-review-required",
+      nextAction: "review-sources",
       sourceFiles: { discovered: 1, supportedCandidates: 1 },
     });
   });

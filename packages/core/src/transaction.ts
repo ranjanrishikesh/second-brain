@@ -53,6 +53,7 @@ export const operationRecordV1Schema = z.object({
   kind: z.enum([
     "apply",
     "query",
+    "source-review",
     "source-scan",
     "source-supersede",
     "bootstrap",

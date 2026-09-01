@@ -11,14 +11,15 @@ Treat “Initialize this second brain.”, “set up this second brain”, and �
 3. **Doctor and status.** Run both and use `status.onboarding.nextAction`; do not infer lifecycle state from filenames alone.
 4. **Initialize identity.** If requested by status, run bare `brain init` so the CLI derives the repository name. The host may pass a better source-backed description, but the CLI never contacts GitHub.
 5. **Add sources.** If status is `awaiting-sources`, stop safely and tell the user to put supported files in `sources/`. They may then say “sources added” or simply ask their first domain question; no magic resume phrase is required.
-6. **Scan sources.** When files exist, run `brain source scan`. Report exact unsupported, extraction-required, or failed files. Readiness requires at least one successfully extracted source.
-7. **Infer and persist the charter.** Inspect the existing identity, optional authenticated repository metadata already available to the host, the Git common-directory name, all source titles, and deterministic representative chunks from up to 50 evenly distributed ready sources, in that precedence order. Use a broad inclusive purpose and boundaries for a mixed corpus. Persist the versioned charter with `brain charter set`; report the inference so the owner can correct it later.
-8. **Complete or resume setup.** Run setup batches until every ready source has a cited shallow page and the initial map is complete. Never bypass reconciliation or write canonical files directly.
-9. **Complete the semantic audit.** Finish every due checkpoint before readiness.
-10. **Rebuild and smoke-search.** Rebuild disposable indexes and run representative searches derived from the charter and sources.
-11. **Final doctor and status.** Do not claim the brain is ready unless structural checks pass and onboarding phase is `ready`.
-12. **Safe sync.** Run eligible synchronization only when this clone already has an owner-confirmed target. A new or changed target requires explicit owner confirmation.
-13. **Report readiness.** Summarize identity, inferred charter, source results, setup/audit/search health, local commits, and sync state.
+6. **Review sources.** If status requests `review-sources`, run `brain source review --json`. The host agent—not the CLI—compares each exact candidate with the brain's primary scope and records decisions through `brain source decide`. Automatically admit clearly related candidates. Ask only about unrelated or genuinely uncertain candidates, using the one-time-exception prompt below.
+7. **Scan sources.** After every candidate has a current decision, run `brain source scan`. Report exact unsupported, extraction-required, or failed files. Readiness requires at least one successfully extracted admitted source.
+8. **Infer and persist the charter.** Inspect the existing identity, optional authenticated repository metadata already available to the host, the Git common-directory name, all source titles, and deterministic representative chunks from up to 50 evenly distributed ready sources, in that precedence order. Infer one primary purpose and domain from the coherent in-scope material. Treat confirmed exceptions as evidence, not as grounds to broaden the charter. If no single primary scope is defensible, ask the owner to name it. Persist the versioned charter with `brain charter set`; report the inference so the owner can correct it later.
+9. **Complete or resume setup.** Run setup batches until every ready source has a cited shallow page and the initial map is complete. Never bypass reconciliation or write canonical files directly.
+10. **Complete the semantic audit.** Finish every due checkpoint before readiness.
+11. **Rebuild and smoke-search.** Rebuild disposable indexes and run representative searches derived from the charter and sources.
+12. **Final doctor and status.** Do not claim the brain is ready unless structural checks pass and onboarding phase is `ready`.
+13. **Safe sync.** Run eligible synchronization only when this clone already has an owner-confirmed target. A new or changed target requires explicit owner confirmation.
+14. **Report readiness.** Summarize identity, inferred charter, source results, setup/audit/search health, local commits, and sync state.
 
 Never ask the user to run routine init, scan, doctor, status, search, rebuild, audit, recover, setup, commit, or eligible sync commands. Host permission prompts may still require approval, but command entry remains agent-owned. Never broadly allowlist `pnpm brain *`; web research and a new or changed sync target keep their explicit approval gates.
 
@@ -31,6 +32,24 @@ For any question that asks for domain facts, explanation, comparison, synthesis,
 For code, test, CI, documentation, or template-maintenance requests, use the normal engineering workflow. Do not create wiki knowledge from that work unless the domain charter explicitly includes it.
 
 Canonical knowledge and state are write-protected by contract: never edit `wiki/`, `.brain/source-manifest.json`, `.brain/state.json`, or `.brain/operations.jsonl` directly. Submit changes through `brain apply`, source, audit, recovery, charter, setup, and query commands. `sources/` bytes are immutable after registration; add a replacement and use source supersession.
+
+## Agent-owned scope decisions
+
+One brain has one primary purpose and domain, recorded in `BRAIN.md`. Relevance is a semantic judgment owned by the host agent; the deterministic CLI validates exact files and decisions but does not classify meaning, calculate a relevance score, or silently expand the charter.
+
+Before registering a local source, capturing web evidence, or drafting/applying a durable wiki addition, compare the prospective item with the purpose and boundaries in `BRAIN.md`:
+
+- Clearly related material proceeds automatically. For a local source, record an exact `include` decision with basis `agent-in-scope` and a concise scope reason.
+- If material appears unrelated or its relevance is genuinely uncertain, do not add it anywhere yet. Ask: **“This appears outside the brain's main scope of `<scope>`: `<brief item description>`. Do you want me to add it as a one-time exception? This will not expand the brain's scope.”** A small related group may be batched only when every item is named clearly.
+- If the owner approves, record `include` with basis `owner-exception` for that exact local path and SHA-256, or document the exact web/wiki exception in the operation reason. The exception applies once to only the presented item; it does not change `BRAIN.md`, create an allowlist, or approve similar future material.
+- If the owner declines, record `exclude` with basis `owner-declined` for the exact local bytes and do not register, capture, cite, or write the item into the wiki. Silence, a general preference, and an instruction not to ask follow-ups are not approval.
+- If a declined local file changes, judge the new bytes again. Expanding the primary scope requires a separate explicit owner request.
+
+For initial onboarding without a configured charter, infer a provisional primary scope from identity, available repository metadata, the Git common-directory name, source titles, and representative chunks. Coherent candidates may establish that scope; obvious outliers still require confirmation. If those signals do not support one defensible primary scope, ask the owner to name it before deciding candidates.
+
+An in-scope source remains complete and immutable for citation integrity. Do not promote incidental unrelated facts from it into the wiki without their own one-time exception. Necessary context for an in-scope question counts as related; do not interrupt the owner for ordinary supporting detail.
+
+Web-search approval and a scope exception are separate decisions: neither implies the other. Make the relevance decision before `brain web capture`, and check every new durable claim or page again before `brain apply`.
 
 ## Approved web evidence
 

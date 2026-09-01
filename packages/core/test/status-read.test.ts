@@ -172,13 +172,14 @@ describe("brain status and reading", () => {
     const onboarding = await inspectOnboarding(root);
 
     expect(onboarding).toMatchObject({
-      phase: "sources-unregistered",
-      nextAction: "scan-sources",
+      phase: "sources-review-required",
+      nextAction: "review-sources",
       sourceFiles: {
         discovered: 3,
         supportedCandidates: 2,
         unsupportedCandidates: 1,
         registered: 0,
+        pendingReview: 3,
         samplePaths: [
           "sources/diagram.png",
           "sources/notes.docx",
@@ -372,8 +373,8 @@ describe("brain status and reading", () => {
     await writeFile(path.join(root, "sources", "copy.md"), sourceBytes);
 
     expect(await inspectOnboarding(root)).toMatchObject({
-      phase: "sources-unregistered",
-      nextAction: "scan-sources",
+      phase: "sources-review-required",
+      nextAction: "review-sources",
     });
 
     const scan = await scanAndRegisterSources(root);
@@ -440,8 +441,8 @@ describe("brain status and reading", () => {
       "# Independent evidence\n\nThis is no longer a duplicate.\n",
     );
     expect(await inspectOnboarding(root)).toMatchObject({
-      phase: "sources-unregistered",
-      nextAction: "scan-sources",
+      phase: "sources-review-required",
+      nextAction: "review-sources",
     });
     expect(await doctorBrain(root)).toMatchObject({
       ok: false,
@@ -966,6 +967,7 @@ describe("brain status and reading", () => {
       setup: { status: "not-started", required: true },
       sync: { status: "unconfigured" },
     });
+    expect((await readBrainState(root)).sourceReviews).toEqual([]);
   });
 
   test("reports canonical counts and reads page or source records by stable ID", async () => {

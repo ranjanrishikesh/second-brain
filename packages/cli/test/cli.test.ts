@@ -26,6 +26,7 @@ import {
   writeBrainState,
   type WebCaptureResult,
   type ChangeSetV1,
+  type SourceReviewV1,
   type WikiPageV1,
 } from "@second-brain/core";
 import { runCli, type CliRuntimeOptions } from "../src/program.js";
@@ -116,6 +117,47 @@ async function setMaxFileBytes(
   );
 }
 
+async function admitPendingCliSources(root: string): Promise<SourceReviewV1> {
+  const reviewOutput: string[] = [];
+  const reviewExitCode = await runCli(
+    ["source", "review", "--root", root, "--json"],
+    { write: (value) => reviewOutput.push(value) },
+  );
+  if (reviewExitCode !== 0) throw new Error(reviewOutput.join(""));
+  const review = JSON.parse(reviewOutput.join("")) as SourceReviewV1;
+  const candidates = review.candidates.filter(
+    (candidate) => !candidate.existingDecision,
+  );
+  if (candidates.length === 0) return review;
+  const decisionPath = path.join(
+    root,
+    ".brain",
+    "runtime",
+    "cli-source-review.json",
+  );
+  await mkdir(path.dirname(decisionPath), { recursive: true });
+  await writeFile(
+    decisionPath,
+    `${JSON.stringify({
+      version: 1,
+      decisions: candidates.map((candidate) => ({
+        path: candidate.path,
+        sha256: candidate.sha256,
+        decision: "include",
+        basis: "agent-in-scope",
+        reason: "The CLI test fixture is explicitly in scope.",
+      })),
+    })}\n`,
+  );
+  const decisionOutput: string[] = [];
+  const decisionExitCode = await runCli(
+    ["source", "decide", decisionPath, "--root", root, "--json"],
+    { write: (value) => decisionOutput.push(value) },
+  );
+  if (decisionExitCode !== 0) throw new Error(decisionOutput.join(""));
+  return review;
+}
+
 describe("brain CLI", () => {
   test("initializes from repository-derived defaults and returns onboarding JSON", async () => {
     const parent = await mkdtemp(path.join(tmpdir(), "brain-cli-bare-"));
@@ -185,6 +227,7 @@ describe("brain CLI", () => {
       path.join(root, "sources", "foundation.md"),
       "# Foundation\n\nInitial setup evidence.\n",
     );
+    await admitPendingCliSources(root);
     const output: string[] = [];
 
     const exitCode = await runCli(
@@ -234,6 +277,7 @@ describe("brain CLI", () => {
       path.join(root, "sources", "foundation.md"),
       "# Foundation\n\nInitial setup evidence.\n",
     );
+    await admitPendingCliSources(root);
     const beginOutput: string[] = [];
     await runCli(
       [
@@ -329,6 +373,7 @@ describe("brain CLI", () => {
       path.join(root, "sources", "foundation.md"),
       "# Foundation\n\nA source page must be checkpointed.\n",
     );
+    await admitPendingCliSources(root);
     const beginOutput: string[] = [];
     await runCli(
       [
@@ -1727,6 +1772,7 @@ describe("brain CLI", () => {
       path.join(root, "sources", "orbits.md"),
       "# Orbits\n\nBodies follow orbital paths.\n",
     );
+    await admitPendingCliSources(root);
     await runCli(["source", "scan", "--root", root, "--json"], {
       write: () => undefined,
     });
@@ -1797,6 +1843,13 @@ describe("brain CLI", () => {
       path.join(root, "sources", "note.md"),
       "# Note\n\nCLI source scan.\n",
     );
+    const review = await admitPendingCliSources(root);
+    expect(review.candidates).toEqual([
+      expect.objectContaining({
+        path: "sources/note.md",
+        extractionStatus: "ready",
+      }),
+    ]);
     const output: string[] = [];
 
     const exitCode = await runCli(
@@ -1828,6 +1881,7 @@ describe("brain CLI", () => {
       path.join(root, "sources", "note.md"),
       "# Note\n\nQuasars are luminous.\n",
     );
+    await admitPendingCliSources(root);
     await runCli(["source", "scan", "--root", root], {
       write: () => undefined,
     });
@@ -1869,6 +1923,7 @@ describe("brain CLI", () => {
       path.join(root, "sources", "stars.md"),
       "# Stars\n\nStars emit light.\n",
     );
+    await admitPendingCliSources(root);
     const scanOutput: string[] = [];
     await runCli(["source", "scan", "--root", root, "--json"], {
       write: (value) => scanOutput.push(value),

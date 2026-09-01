@@ -23,9 +23,11 @@ import {
   readQueryItem,
   readQuerySession,
   recordSemanticAuditBatch,
+  recordSourceReviewDecisions,
   rebuildSearchIndex,
   recoverBrain,
   requestWebApproval,
+  reviewSourceCandidates,
   scanAndRegisterSources,
   resolveWebApproval,
   searchBrain,
@@ -36,6 +38,7 @@ import {
   type BrainRuntimeServices,
   type BrainCharterV1,
   type SearchScope,
+  type SourceReviewDecisionBatchV1,
   type WebCaptureResult,
 } from "@second-brain/core";
 import { Command, CommanderError, Option } from "commander";
@@ -267,15 +270,57 @@ export async function runCli(
     .command("source")
     .description("Manage immutable raw sources");
   source
+    .command("review")
+    .description(
+      "Preview unregistered sources for agent-owned relevance review",
+    )
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(async (options: { root: string; json?: boolean }) => {
+      const result = await reviewSourceCandidates(options.root);
+      if (options.json) json(result);
+      else {
+        output.write(
+          `Source review: ${result.candidates.length} unregistered candidate${result.candidates.length === 1 ? "" : "s"}.\n`,
+        );
+      }
+    });
+  source
+    .command("decide <decision-json-file>")
+    .description("Record exact-byte source relevance decisions")
+    .option("--root <path>", "brain repository root", process.cwd())
+    .option("--json", "emit machine-readable JSON")
+    .action(
+      async (
+        decisionFile: string,
+        options: { root: string; json?: boolean },
+      ) => {
+        const result = await recordSourceReviewDecisions(
+          options.root,
+          JSON.parse(
+            await readFile(decisionFile, "utf8"),
+          ) as SourceReviewDecisionBatchV1,
+        );
+        if (options.json) json(result);
+        else {
+          output.write(
+            `${result.changed ? "Recorded" : "Kept"} ${result.receipts.length} source relevance decision${result.receipts.length === 1 ? "" : "s"}.\n`,
+          );
+        }
+      },
+    );
+  source
     .command("scan")
     .option("--root <path>", "brain repository root", process.cwd())
     .option("--json", "emit machine-readable JSON")
     .action(async (options: { root: string; json?: boolean }) => {
-      const result = await scanAndRegisterSources(options.root);
+      const result = await scanAndRegisterSources(options.root, {
+        requireReview: true,
+      });
       if (options.json) json(result);
       else {
         output.write(
-          `Sources: ${result.added.length} added, ${result.unchanged.length} unchanged, ${result.modified.length} modified, ${result.deleted.length} deleted.\n`,
+          `Sources: ${result.added.length} added, ${result.excluded?.length ?? 0} excluded, ${result.unchanged.length} unchanged, ${result.modified.length} modified, ${result.deleted.length} deleted.\n`,
         );
       }
     });

@@ -19,6 +19,9 @@ maintained by Codex or Claude Code.
 
 Initialization registers your source files as immutable evidence and builds a
 shallow, cited page for every usable source plus an initial relationship map.
+Each brain has one primary domain. Related material is added automatically;
+unrelated or uncertain material requires approval. Approval applies once to
+that item and never broadens scope.
 Each question then follows:
 
 `wiki → raw sources → approved web research → cited wiki update`

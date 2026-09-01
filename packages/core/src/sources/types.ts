@@ -6,6 +6,7 @@ import {
   webHttpUrlV1Schema,
   validateWebUrlChain,
 } from "./web-evidence.js";
+import type { SourceReviewIdentityV1 } from "./review-types.js";
 
 const extractedSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -132,4 +133,8 @@ export interface SourceScanResult {
     sidecarSha256?: string;
     sidecarBytes?: number;
   }>;
+  /** Exact local candidates deliberately left outside the registered brain. */
+  excluded?: SourceReviewIdentityV1[];
+  /** Exact local candidates that require an agent/owner relevance decision. */
+  pendingReview?: SourceReviewIdentityV1[];
 }

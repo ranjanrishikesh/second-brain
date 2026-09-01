@@ -4,11 +4,11 @@ A self-maintaining personal knowledge base.
 
 ## Purpose
 
-Replace this section after cloning with the domain, questions, and outcomes this brain should support.
+Replace this section after cloning with the one primary domain, questions, and outcomes this brain should support.
 
 ## Boundaries
 
-Document what belongs in this brain and what should remain outside it.
+Document what belongs in this primary scope and what should remain outside it unless the owner approves an exact one-time exception.
 
 ## Domain conventions
 

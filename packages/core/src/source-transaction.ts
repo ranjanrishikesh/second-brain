@@ -226,6 +226,7 @@ async function sourceRegistrationMutation(
   root: string,
   operationId: string,
   writer: CanonicalMutationWriter,
+  requireReview = false,
 ): Promise<CanonicalMutationResult<SourceScanResult>> {
   const canonicalPaths = [
     ".brain/source-manifest.json",
@@ -243,10 +244,35 @@ async function sourceRegistrationMutation(
   let manifestChanged = false;
   let result: SourceScanResult;
   try {
-    result = await scanSources(root, async (content) => {
-      manifestChanged = true;
-      await writer.writeText(".brain/source-manifest.json", content);
-    });
+    result = await scanSources(
+      root,
+      async (content) => {
+        manifestChanged = true;
+        await writer.writeText(".brain/source-manifest.json", content);
+      },
+      {},
+      requireReview
+        ? {
+            requireOrdinaryReview: true,
+            receipts: state.sourceReviews,
+            acknowledgedDuplicates: new Map<
+              string,
+              { sourceId: string; sha256?: string; bytes?: number }
+            >(
+              state.sourceDuplicates.map((duplicate) => [
+                duplicate.path,
+                {
+                  sourceId: duplicate.sourceId,
+                  ...(duplicate.sha256 ? { sha256: duplicate.sha256 } : {}),
+                  ...(duplicate.bytes !== undefined
+                    ? { bytes: duplicate.bytes }
+                    : {}),
+                },
+              ]),
+            ),
+          }
+        : undefined,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const affected = protectedWebDuplicates.find(
@@ -264,6 +290,13 @@ async function sourceRegistrationMutation(
       );
     }
     throw error;
+  }
+  if ((result.pendingReview?.length ?? 0) > 0) {
+    throw new Error(
+      `Source review is required for: ${result.pendingReview
+        ?.map((candidate) => candidate.path)
+        .join(", ")}`,
+    );
   }
   const currentDuplicatesByPath = new Map(
     result.duplicates.map((duplicate) => [duplicate.path, duplicate]),
@@ -439,10 +472,15 @@ async function sourceRegistrationMutation(
   };
 }
 
+export interface ScanAndRegisterSourcesOptions extends TransactionTestOptions {
+  requireReview?: boolean;
+}
+
 export async function scanAndRegisterSources(
   root: string,
-  testOptions: TransactionTestOptions = {},
+  options: ScanAndRegisterSourcesOptions = {},
 ): Promise<SourceScanResult> {
+  const { requireReview = false, ...testOptions } = options;
   const operationId = `op_source_${randomUUID().replaceAll("-", "")}`;
   const config = await loadBrainConfig(root);
   const transaction = await runCanonicalWrite<SourceScanResult>(
@@ -456,7 +494,8 @@ export async function scanAndRegisterSources(
       testOptions,
       immutableInputRootPaths: effectiveSourceRoots(config.sources.roots),
     },
-    (writer) => sourceRegistrationMutation(root, operationId, writer),
+    (writer) =>
+      sourceRegistrationMutation(root, operationId, writer, requireReview),
   );
   return transaction.value;
 }
@@ -666,6 +705,7 @@ export async function registerWebSourceCapture(
         root,
         scanOperationId,
         writer,
+        true,
       );
       const manifest = JSON.parse(
         await readFile(
@@ -772,7 +812,7 @@ export async function supersedeRegisteredSource(
   replacementSourceId: string,
   testOptions: TransactionTestOptions = {},
 ): Promise<SourceSupersessionResult> {
-  await scanAndRegisterSources(root);
+  await scanAndRegisterSources(root, { requireReview: true });
   const operationsPath = path.join(root, ".brain", "operations.jsonl");
   const logPath = path.join(root, "wiki", "log.md");
   const operationId = `op_supersede_${randomUUID().replaceAll("-", "")}`;

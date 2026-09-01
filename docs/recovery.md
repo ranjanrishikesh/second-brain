@@ -33,14 +33,16 @@ If status, scan, or query begin reports changed/deleted registered bytes, the ho
 
 1. Restore the original file at its registered path.
 2. Add the revised bytes at a new path.
-3. Have the host scan the sources and inspect the result.
+3. Have the host review the replacement against the brain's primary scope, record the exact decision, then scan the sources and inspect the result.
 4. After the source IDs are known, have the host supersede the old ID with the new ID.
 
 Both versions remain available for historical citations.
 
-Manual troubleshooting/reference equivalents for steps 3 and 4 are:
+Manual troubleshooting/reference equivalents for steps 3 and 4 are (the decision file uses `SourceReviewDecisionBatchV1` with the reviewed path and SHA-256):
 
 ```bash
+pnpm brain source review --json
+pnpm brain source decide .brain/runtime/source-review-decisions.json
 pnpm brain source scan --json
 pnpm brain source supersede <old-id> <new-id>
 ```
