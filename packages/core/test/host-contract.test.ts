@@ -26,6 +26,7 @@ describe("shared Codex and Claude onboarding contract", () => {
         "doctor and status",
         "initialize identity",
         "add sources",
+        "review sources",
         "scan sources",
         "infer and persist the charter",
         "complete or resume setup",
@@ -45,6 +46,33 @@ describe("shared Codex and Claude onboarding contract", () => {
         ).toBeGreaterThan(previousIndex);
         previousIndex = index;
       }
+    },
+  );
+
+  it.each(["AGENTS.md", ".agents/skills/second-brain/SKILL.md"])(
+    "%s keeps relevance agent-owned and exceptions exact-item-only",
+    async (path) => {
+      const contract = (await readRepositoryFile(path)).toLowerCase();
+
+      for (const requiredBoundary of [
+        "one primary purpose and domain",
+        "host agent",
+        "clearly related",
+        "unrelated or genuinely uncertain",
+        "one-time exception",
+        "will not expand the brain's scope",
+        "owner-exception",
+        "owner-declined",
+        "silence",
+        "does not change `brain.md`",
+        "web-search approval",
+      ]) {
+        expect(contract).toContain(requiredBoundary);
+      }
+
+      expect(contract).toContain("does not classify meaning");
+      expect(contract).not.toContain("semantic scope gate");
+      expect(contract).not.toContain("relevance threshold");
     },
   );
 

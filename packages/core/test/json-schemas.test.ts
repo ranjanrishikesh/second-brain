@@ -22,6 +22,8 @@ const expectedSchemas = [
   "SetupSessionV1",
   "SetupStateV1",
   "SourceRecordV1",
+  "SourceReviewDecisionBatchV1",
+  "SourceReviewV1",
   "SyncStatusV1",
   "SyncTargetV1",
   "WebApprovalRequestV1",
@@ -95,5 +97,38 @@ describe("public JSON schemas", () => {
         ],
       }).success,
     ).toBe(true);
+  });
+
+  it("emits exact source-review decision combinations", () => {
+    const emittedDecisionBatch = z.fromJSONSchema(
+      brainJsonSchemasV1.SourceReviewDecisionBatchV1 as Parameters<
+        typeof z.fromJSONSchema
+      >[0],
+    );
+    const decision = {
+      version: 1,
+      decisions: [
+        {
+          path: "sources/astronomy.md",
+          sha256: "a".repeat(64),
+          decision: "include",
+          basis: "agent-in-scope",
+          reason: "Directly supports the astronomy scope.",
+        },
+      ],
+    };
+
+    expect(emittedDecisionBatch.safeParse(decision).success).toBe(true);
+    expect(
+      emittedDecisionBatch.safeParse({
+        ...decision,
+        decisions: [
+          {
+            ...decision.decisions[0],
+            decision: "exclude",
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 });

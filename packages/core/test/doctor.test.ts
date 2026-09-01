@@ -360,7 +360,7 @@ describe("doctor source-root safety", () => {
     });
     expect(report.issues).not.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "SOURCES_UNREGISTERED" }),
+        expect.objectContaining({ code: "SOURCES_REVIEW_REQUIRED" }),
       ]),
     );
     expect(await treeSnapshot(outside)).toEqual(outsideBefore);
@@ -397,7 +397,7 @@ describe("doctor source-root safety", () => {
     });
     expect(report.issues).not.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "SOURCES_UNREGISTERED" }),
+        expect.objectContaining({ code: "SOURCES_REVIEW_REQUIRED" }),
       ]),
     );
     expect(await treeSnapshot(outside)).toEqual(outsideBefore);

@@ -39,6 +39,7 @@ import {
   type SetupSourceContextV1,
   type WikiPageV1,
 } from "@second-brain/core";
+import { admitPendingFixtureSources } from "./source-review.js";
 
 const execFile = promisify(execFileCallback);
 const fixedTime = "2026-08-23T12:00:00.000Z";
@@ -153,6 +154,7 @@ async function completeInitialSetup(
   root: string,
   purpose: string,
 ): Promise<Array<BootstrapSourceContextV1 | SetupSourceContextV1>> {
+  await admitPendingFixtureSources(root);
   const setup = await beginSetup(root, { purpose }, runtimeServices);
   const sources: Array<BootstrapSourceContextV1 | SetupSourceContextV1> = [];
   let batchNumber = 0;
@@ -518,6 +520,8 @@ describe("portable second-brain fake host", () => {
     const marketingBytes = "# Facts\n\nRetention compounds growth.\n";
     await writeFile(path.join(astronomy, sourceRelativePath), astronomyBytes);
     await writeFile(path.join(marketing, sourceRelativePath), marketingBytes);
+    await admitPendingFixtureSources(astronomy);
+    await admitPendingFixtureSources(marketing);
 
     const astronomyQuery = await beginQuery(astronomy, "What has rings?");
     const marketingQuery = await beginQuery(
@@ -559,7 +563,10 @@ describe("portable second-brain fake host", () => {
       path.join(astronomy, "sources", "facts-v2.md"),
       "# Facts v2\n\nSaturn and other giant planets have rings.\n",
     );
-    const registered = await scanAndRegisterSources(astronomy);
+    await admitPendingFixtureSources(astronomy);
+    const registered = await scanAndRegisterSources(astronomy, {
+      requireReview: true,
+    });
     const replacement = registered.added[0];
     if (!replacement) throw new Error("Expected replacement source");
     const superseded = await supersedeRegisteredSource(

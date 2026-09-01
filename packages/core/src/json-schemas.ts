@@ -8,6 +8,10 @@ import { brainConfigV1Schema } from "./config.js";
 import { querySessionV1Schema } from "./query.js";
 import { setupSessionV1Schema } from "./setup.js";
 import { sourceRecordV1Schema } from "./sources/types.js";
+import {
+  sourceReviewDecisionBatchV1Schema,
+  sourceReviewV1Schema,
+} from "./sources/review-types.js";
 import { webArtifactSidecarV1Schema } from "./sources/web-evidence.js";
 import {
   webApprovalRequestV1Schema,
@@ -44,6 +48,8 @@ export type PublicSchemaNameV1 =
   | "ReconciliationReceiptV1"
   | "RelationV1"
   | "SourceRecordV1"
+  | "SourceReviewDecisionBatchV1"
+  | "SourceReviewV1"
   | "SemanticIndexMetadataV1"
   | "SetupSessionV1"
   | "SetupStateV1"
@@ -91,6 +97,11 @@ export const brainJsonSchemasV1: Record<
   ),
   RelationV1: jsonSchema("RelationV1", relationV1Schema),
   SourceRecordV1: jsonSchema("SourceRecordV1", sourceRecordV1Schema),
+  SourceReviewDecisionBatchV1: jsonSchema(
+    "SourceReviewDecisionBatchV1",
+    sourceReviewDecisionBatchV1Schema,
+  ),
+  SourceReviewV1: jsonSchema("SourceReviewV1", sourceReviewV1Schema),
   SemanticIndexMetadataV1: jsonSchema(
     "SemanticIndexMetadataV1",
     semanticIndexMetadataV1Schema,

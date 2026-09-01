@@ -10,7 +10,8 @@ The host checks Node.js and installs locked dependencies when needed, recovers a
 | --- | --- |
 | `needs-initialization` | Initialize identity from the Git repository name. |
 | `awaiting-sources` | Pause and ask the owner to add supported source files. |
-| `sources-unregistered` | Scan and immutably register source bytes. |
+| `sources-review-required` | Preview exact candidates, automatically admit clearly in-scope material, and ask only about unrelated or uncertain items. |
+| `sources-unregistered` | Scan and immutably register previously admitted source bytes. |
 | `sources-blocked` | Report exact unsupported, extraction-required, and failed files. |
 | `awaiting-charter` | Infer and persist a source-informed charter. |
 | `ready-for-setup` | Start the cited shallow catalog and map. |
@@ -23,7 +24,13 @@ At least one source must extract successfully before setup can complete. Ready f
 
 Bare initialization derives the display name from the Git common-directory repository name; a non-Git copy falls back to the root folder name. This avoids mistaking a Conductor worktree codename for the brain name and requires no GitHub account.
 
-The host—not the CLI—infers semantic charter fields. It considers existing identity, optional authenticated repository metadata already available to the host, the Git repository name, every source title, and deterministic representative chunks from up to 50 evenly distributed ready sources. A mixed collection receives broad, inclusive purpose and boundaries. The inferred description, purpose, boundaries, domain conventions, and evidence preferences are shown to the owner after they are safely persisted and committed, so they can request a correction later.
+The host—not the CLI—infers semantic charter fields. It considers existing identity, optional authenticated repository metadata already available to the host, the Git repository name, every source title, and deterministic representative chunks from up to 50 evenly distributed ready sources. It identifies one primary purpose and domain from the coherent material. Obvious outliers do not silently turn the brain into a mixed-domain collection; if the available signals do not support one defensible primary scope, the host asks the owner to name it. The inferred description, purpose, boundaries, domain conventions, and evidence preferences are shown to the owner after they are safely persisted and committed, so they can request a correction later.
+
+## Relevance decisions
+
+Before registration, the host previews each exact candidate and compares it with the brain's primary scope. Clearly related material is admitted automatically. If an item appears unrelated or is genuinely uncertain, the host identifies it and asks whether to add it as a one-time exception. Approval applies only to that exact item and does not broaden `BRAIN.md` or approve similar future material. A decline leaves the file untouched on disk but keeps it out of the source manifest, setup, search, citations, and wiki. Changed bytes require a new decision.
+
+The same agent-owned decision happens before capturing web evidence and before adding a durable wiki claim or page. Web-search approval is separate from scope approval. The deterministic CLI records and enforces exact local-source decisions, but it does not contain a semantic classifier, threshold, or keyword gate.
 
 ## Interruption and resumption
 

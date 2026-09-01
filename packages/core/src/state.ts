@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { sourceReviewReceiptV1Schema } from "./sources/review-types.js";
 
 const sourceIdV1Schema = z.string().regex(/^src_[a-f0-9]{16}$/);
 
@@ -134,6 +135,7 @@ export const brainStateV1Schema = z
     sourceDuplicates: z
       .array(sourceDuplicateAcknowledgementV1Schema)
       .default([]),
+    sourceReviews: z.array(sourceReviewReceiptV1Schema).default([]),
     setup: setupStateV1Schema.default(() => ({
       status: "not-started" as const,
       initialSourceIds: [],

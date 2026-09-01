@@ -32,6 +32,7 @@ import {
 } from "@second-brain/core";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { describe, expect, test } from "vitest";
+import { admitPendingFixtureSources } from "./source-review.js";
 
 const execFile = promisify(execFileCallback);
 const fixedTime = "2026-08-30T12:00:00.000Z";
@@ -135,6 +136,7 @@ async function completeSetup(root: string): Promise<void> {
     path.join(root, "sources", "foundation.md"),
     "# Foundation\n\nThis brain maintains evidence-backed research notes.\n",
   );
+  await admitPendingFixtureSources(root);
   const setup = await beginSetup(
     root,
     { purpose: "Evidence-backed research" },

@@ -56,6 +56,30 @@ export type {
 export { doctorBrain } from "./doctor.js";
 export type { DoctorIssue, DoctorReport } from "./doctor.js";
 export { scanSources } from "./sources/scan.js";
+export {
+  sourceReviewCandidateV1Schema,
+  sourceReviewDecisionBatchV1Schema,
+  sourceReviewDecisionInputV1Schema,
+  sourceReviewReceiptV1Schema,
+  sourceReviewV1Schema,
+} from "./sources/review-types.js";
+export type {
+  SourceReviewCandidateV1,
+  SourceReviewDecisionBatchV1,
+  SourceReviewDecisionInputV1,
+  SourceReviewIdentityV1,
+  SourceReviewReceiptV1,
+  SourceReviewV1,
+} from "./sources/review-types.js";
+export {
+  inspectSourceReviewStatus,
+  recordSourceReviewDecisions,
+  reviewSourceCandidates,
+} from "./source-review.js";
+export type {
+  SourceReviewDecisionResultV1,
+  SourceReviewStatusV1,
+} from "./source-review.js";
 export { supersedeSource } from "./sources/supersede.js";
 export {
   docxOutputPolicyV1Schema,
@@ -212,6 +236,7 @@ export {
   supersedeRegisteredSource,
 } from "./source-transaction.js";
 export type {
+  ScanAndRegisterSourcesOptions,
   SourceSupersessionResult,
   SourceWebDiscoveryEnrichmentResult,
 } from "./source-transaction.js";

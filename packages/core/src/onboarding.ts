@@ -16,6 +16,7 @@ import {
   unchangedRepositoryEntry,
   walkSourceFiles,
 } from "./sources/path-safety.js";
+import { inspectUnregisteredSourceIdentities } from "./sources/scan.js";
 import { type SourceRecordV1, sourceRecordV1Schema } from "./sources/types.js";
 import { type BrainStateV1, readBrainState } from "./state.js";
 import { loadWikiPages } from "./wiki/graph.js";
@@ -43,6 +44,7 @@ export type BrainCharterV1 = z.infer<typeof brainCharterV1Schema>;
 export const onboardingPhaseV1Schema = z.enum([
   "needs-initialization",
   "awaiting-sources",
+  "sources-review-required",
   "sources-unregistered",
   "sources-blocked",
   "awaiting-charter",
@@ -56,6 +58,7 @@ export type OnboardingPhaseV1 = z.infer<typeof onboardingPhaseV1Schema>;
 export const onboardingNextActionV1Schema = z.enum([
   "initialize",
   "add-sources",
+  "review-sources",
   "scan-sources",
   "resolve-source-errors",
   "set-charter",
@@ -91,6 +94,9 @@ export const onboardingStatusV1Schema = z.object({
     unsupported: z.number().int().nonnegative(),
     extractionRequired: z.number().int().nonnegative(),
     failed: z.number().int().nonnegative(),
+    pendingReview: z.number().int().nonnegative(),
+    admitted: z.number().int().nonnegative(),
+    excluded: z.number().int().nonnegative(),
     samplePaths: z.array(z.string()).max(20),
   }),
   setup: z.object({
@@ -503,6 +509,8 @@ function phaseAndAction(input: {
   setupStatus: "not-started" | "in-progress" | "completed";
   discoveredPaths: string[];
   registeredPaths: Set<string>;
+  excludedPaths: Set<string>;
+  pendingReviewPaths: string[];
   ready: number;
   charterConfigured: boolean;
   setupCompletionValid: boolean;
@@ -510,11 +518,23 @@ function phaseAndAction(input: {
   if (input.template) {
     return { phase: "needs-initialization", nextAction: "initialize" };
   }
-  if (input.discoveredPaths.length === 0 && input.registeredPaths.size === 0) {
+  if (input.pendingReviewPaths.length > 0) {
+    return {
+      phase: "sources-review-required",
+      nextAction: "review-sources",
+    };
+  }
+  const eligibleDiscoveredPaths = input.discoveredPaths.filter(
+    (sourcePath) => !input.excludedPaths.has(sourcePath),
+  );
+  if (
+    eligibleDiscoveredPaths.length === 0 &&
+    input.registeredPaths.size === 0
+  ) {
     return { phase: "awaiting-sources", nextAction: "add-sources" };
   }
   if (
-    input.discoveredPaths.some(
+    eligibleDiscoveredPaths.some(
       (sourcePath) => !input.registeredPaths.has(sourcePath),
     )
   ) {
@@ -581,6 +601,28 @@ export async function inspectOnboarding(
       )
       .map((duplicate) => duplicate.path),
   ]);
+  const reviewIdentities = (
+    await inspectUnregisteredSourceIdentities(root)
+  ).filter((identity) => !registeredPaths.has(identity.path));
+  const reviewEntries = reviewIdentities.map((identity) => ({
+    identity,
+    receipt: state.sourceReviews.find(
+      (candidate) =>
+        candidate.path === identity.path &&
+        candidate.sha256 === identity.sha256,
+    ),
+  }));
+  const pendingReviewPaths = reviewEntries
+    .filter(({ receipt }) => !receipt)
+    .map(({ identity }) => identity.path);
+  const admittedPaths = reviewEntries
+    .filter(({ receipt }) => receipt?.decision === "include")
+    .map(({ identity }) => identity.path);
+  const excludedPaths = new Set(
+    reviewEntries
+      .filter(({ receipt }) => receipt?.decision === "exclude")
+      .map(({ identity }) => identity.path),
+  );
   const setupIntegrity = await inspectSetupCompletionIntegrity(
     root,
     state,
@@ -591,6 +633,8 @@ export async function inspectOnboarding(
     setupStatus: state.setup.status,
     discoveredPaths,
     registeredPaths,
+    excludedPaths,
+    pendingReviewPaths,
     ready: extractionCount("ready"),
     charterConfigured: charter.configured,
     setupCompletionValid: setupIntegrity.valid,
@@ -616,6 +660,9 @@ export async function inspectOnboarding(
       unsupported: extractionCount("unsupported"),
       extractionRequired: extractionCount("extraction-required"),
       failed: extractionCount("failed"),
+      pendingReview: pendingReviewPaths.length,
+      admitted: admittedPaths.length,
+      excluded: excludedPaths.size,
       samplePaths: discoveredPaths.slice(0, 20),
     },
     setup: { status: state.setup.status },

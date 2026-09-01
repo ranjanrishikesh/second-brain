@@ -15,6 +15,7 @@
       "enum": [
         "apply",
         "query",
+        "source-review",
         "source-scan",
         "source-supersede",
         "bootstrap",

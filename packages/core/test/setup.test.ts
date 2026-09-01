@@ -12,6 +12,7 @@ import {
   type WikiPageV1,
 } from "../src/index.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
+import { admitPendingTestSources } from "./helpers/source-review.js";
 
 const services = { embeddings: deterministicEmbeddings({}) };
 
@@ -22,6 +23,7 @@ async function brainWithInitialSource(): Promise<string> {
     path.join(root, "sources", "orbit.md"),
     "# Orbit\n\nBodies orbit masses.\n",
   );
+  await admitPendingTestSources(root);
   return root;
 }
 
@@ -89,6 +91,7 @@ describe("one-time brain setup", () => {
       path.join(unsupportedRoot, "sources", "image.png"),
       "pixels",
     );
+    await admitPendingTestSources(unsupportedRoot);
     await expect(
       beginSetup(unsupportedRoot, { purpose: "Unsupported corpus" }, services),
     ).rejects.toThrow(/image\.png.*unsupported/i);
@@ -106,6 +109,7 @@ describe("one-time brain setup", () => {
       path.join(extractionRoot, "sources", "scan.pdf"),
       await document.save(),
     );
+    await admitPendingTestSources(extractionRoot);
     await expect(
       beginSetup(extractionRoot, { purpose: "Scanned corpus" }, services),
     ).rejects.toThrow(/scan\.pdf.*extraction-required/i);
@@ -119,6 +123,7 @@ describe("one-time brain setup", () => {
       "# Ready\n\nUsable evidence.\n",
     );
     await writeFile(path.join(root, "sources", "image.png"), "pixels");
+    await admitPendingTestSources(root);
 
     const setup = await beginSetup(
       root,
@@ -348,6 +353,7 @@ describe("one-time brain setup", () => {
       path.join(root, "sources", "later.md"),
       "# Later\n\nA source arrives while setup is running.\n",
     );
+    await admitPendingTestSources(root);
 
     await beginQuery(root, "What source arrived during setup?");
 
@@ -382,6 +388,7 @@ describe("one-time brain setup", () => {
       path.join(root, "sources", "later.md"),
       "# Later\n\nA source arrives while setup is running.\n",
     );
+    await admitPendingTestSources(root);
 
     const batch = await nextSetupBatch(root, setup.id);
 
@@ -416,6 +423,7 @@ describe("one-time brain setup", () => {
       path.join(root, "sources", "later.md"),
       "# Later\n\nA source arrives before setup finishes.\n",
     );
+    await admitPendingTestSources(root);
 
     await expect(
       finishSetup(root, setup.id, { summary: "Initial map" }),
@@ -469,6 +477,7 @@ describe("one-time brain setup", () => {
       path.join(root, "sources", "later.md"),
       "# Later\n\nA source arrives before setup finishes.\n",
     );
+    await admitPendingTestSources(root);
     const contexts = (await nextSetupBatch(root, setup.id)).sources;
     const pages = contexts.map((context, index): WikiPageV1 => {
       const chunk = context.extracted?.chunks[0];
@@ -586,6 +595,7 @@ describe("one-time brain setup", () => {
       path.join(root, "sources", "later.md"),
       "# Later\n\nA later source arrives after setup.\n",
     );
+    await admitPendingTestSources(root);
 
     const session = await beginQuery(root, "What arrived later?");
 

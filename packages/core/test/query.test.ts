@@ -39,6 +39,7 @@ import {
   writeQuerySession,
 } from "../src/index.js";
 import { deterministicEmbeddings } from "./helpers/embeddings.js";
+import { admitPendingTestSources } from "./helpers/source-review.js";
 
 const execFile = promisify(execFileCallback);
 const runtimeServices = { embeddings: deterministicEmbeddings({}) };
@@ -372,6 +373,7 @@ describe("query lifecycle", () => {
       path.join(root, "sources", "two.md"),
       "# Two\n\nSecond source.\n",
     );
+    await admitPendingTestSources(root);
 
     const session = await beginQuery(root, "What is in this brain?");
     const batch = await nextBootstrapBatch(root, session.id);
@@ -386,12 +388,13 @@ describe("query lifecycle", () => {
     );
   });
 
-  test("registers and commits newly dropped immutable sources at query start", async () => {
+  test("registers and commits newly admitted immutable sources at query start", async () => {
     const root = await queryBrain();
     await writeFile(
       path.join(root, "sources", "new-evidence.md"),
       "# New Evidence\n\nA new finding.\n",
     );
+    await admitPendingTestSources(root);
 
     const session = await beginQuery(root, "What is the new finding?");
 
@@ -932,6 +935,7 @@ describe("query lifecycle", () => {
       path.join(root, "sources", "pending.md"),
       "# Pending\n\nPending knowledge.\n",
     );
+    await admitPendingTestSources(root);
     const session = await beginQuery(root, "What is pending?");
     await expandQuery(root, session.id, {
       tier: "sources",

@@ -25,7 +25,7 @@ never contact GitHub.
   Windows drive/UNC paths, backslashes, control characters, line separators,
   empty segments, and `.` or `..` path segments are rejected. The default is
   `sources`.
-- `sources.maxFileBytes`: maximum local source-file or downloaded-artifact input size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; its logical-block ceiling is derived from that semantic byte budget rather than the general text-family chunk default. Physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. An oversized local file found by source scanning is registered with a visible failure. An oversized downloaded web artifact is rejected before capture prepares files or registers a source.
+- `sources.maxFileBytes`: maximum local source-file or downloaded-artifact input size read in-process; default `104857600` bytes. For DOCX, the same limit also caps declared and streamed cumulative uncompressed content plus semantic/rendered extraction output; its logical-block ceiling is derived from that semantic byte budget rather than the general text-family chunk default. Physical entries, paths, sizes, checksums, and repeated note/comment expansion are validated before extraction. After agent-owned scope review, an admitted oversized local file is registered with a visible failure. An oversized downloaded web artifact is rejected before capture prepares files or registers a source.
 - `sources.textExtraction.maxExtractedBytes`: maximum cumulative UTF-8 retained across the title, primary text, chunk locators, and chunk text for Markdown, text, HTML, JSON/JSONL, CSV, and TSV extraction; default `8388608` bytes.
 - `sources.textExtraction.maxChunks`: maximum retained chunks or structured entries for those text-family extractors; default `10000`.
 - `sources.pdf.maxPages`: maximum PDF page count; default `2000`.
@@ -45,7 +45,7 @@ PDF input bytes, page count, retained text, and the core string buffer are bound
 - `bootstrap.mode`: `catalog-map` in v1.
 - `bootstrap.batchSize`: maximum source contexts returned by `brain bootstrap next`.
 
-Bootstrap creates a shallow source catalog and relationship map. The host agent starts or resumes it automatically from the first domain question, using the purpose and boundaries in `BRAIN.md`; it is not a file watcher or background job. It is checkpointed by durable source pages and must catalog every ready initial source before setup can finish. After setup, newly dropped files are scanned on query start and cataloged in query-triggered delta batches when they are needed. Later questions deepen the graph only where useful.
+Bootstrap creates a shallow source catalog and relationship map. The host agent starts or resumes it automatically from the first domain question, using the purpose and boundaries in `BRAIN.md`; it is not a file watcher or background job. It is checkpointed by durable source pages and must catalog every ready initial source before setup can finish. After setup, newly dropped files receive agent-owned scope review before admitted files are scanned on query start and cataloged in query-triggered delta batches. Later questions deepen the graph only where useful.
 
 ## Learning and web evidence
 

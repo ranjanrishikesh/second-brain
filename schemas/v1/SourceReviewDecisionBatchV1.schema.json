@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "decisions": {
+      "minItems": 1,
+      "maxItems": 1000,
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "decision": {
+                "type": "string",
+                "const": "include"
+              },
+              "basis": {
+                "type": "string",
+                "const": "agent-in-scope"
+              }
+            },
+            "required": ["path", "sha256", "reason", "decision", "basis"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "decision": {
+                "type": "string",
+                "const": "include"
+              },
+              "basis": {
+                "type": "string",
+                "const": "owner-exception"
+              }
+            },
+            "required": ["path", "sha256", "reason", "decision", "basis"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "decision": {
+                "type": "string",
+                "const": "exclude"
+              },
+              "basis": {
+                "type": "string",
+                "const": "owner-declined"
+              }
+            },
+            "required": ["path", "sha256", "reason", "decision", "basis"],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "required": ["version", "decisions"],
+  "additionalProperties": false,
+  "$id": "https://portable-second-brain.dev/schemas/v1/SourceReviewDecisionBatchV1.schema.json",
+  "title": "SourceReviewDecisionBatchV1"
+}

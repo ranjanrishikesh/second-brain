@@ -39,6 +39,10 @@ import {
   type SourceScanResult,
   sourceRecordV1Schema,
 } from "./types.js";
+import type {
+  SourceReviewIdentityV1,
+  SourceReviewReceiptV1,
+} from "./review-types.js";
 import {
   parseWebArtifactSidecar,
   parseWebCaptureMetadata,
@@ -67,6 +71,15 @@ export interface SourceScanTestOptions {
     relativePath: string,
     cumulativeBytesRead: number,
   ) => Promise<void> | void;
+}
+
+export interface SourceScanReviewPolicy {
+  requireOrdinaryReview: true;
+  receipts: readonly SourceReviewReceiptV1[];
+  acknowledgedDuplicates?: ReadonlyMap<
+    string,
+    { sourceId: string; sha256?: string; bytes?: number }
+  >;
 }
 
 function sha256(content: Uint8Array): string {
@@ -310,6 +323,7 @@ export async function scanSources(
   root: string,
   writeManifest?: SourceManifestWriter,
   testOptions: SourceScanTestOptions = {},
+  reviewPolicy?: SourceScanReviewPolicy,
 ): Promise<SourceScanResult> {
   const config = await loadBrainConfig(root);
   const manifest = await readManifest(root);
@@ -557,6 +571,32 @@ export async function scanSources(
         }
         continue;
       }
+      if (!isManagedWebEvidence && reviewPolicy?.requireOrdinaryReview) {
+        const previousDuplicate =
+          reviewPolicy.acknowledgedDuplicates?.get(relativePath);
+        const exactPreviousDuplicate =
+          previousDuplicate?.sha256 === digest &&
+          previousDuplicate.bytes === sourceBytes;
+        const receipt = reviewPolicy.receipts.find(
+          (candidate) =>
+            candidate.path === relativePath && candidate.sha256 === digest,
+        );
+        const identity = {
+          path: relativePath,
+          sha256: digest,
+          bytes: sourceBytes,
+        };
+        if (!receipt && !exactPreviousDuplicate) {
+          if (!result.pendingReview) result.pendingReview = [];
+          result.pendingReview.push(identity);
+          continue;
+        }
+        if (receipt?.decision === "exclude") {
+          if (!result.excluded) result.excluded = [];
+          result.excluded.push(identity);
+          continue;
+        }
+      }
       const duplicate = registeredByHash.get(digest);
       if (duplicate) {
         result.duplicates.push({
@@ -713,4 +753,44 @@ export async function scanSources(
       manifestContent,
     );
   return result;
+}
+
+/**
+ * Reads stable identities for ordinary, unregistered candidates without
+ * extracting them or changing canonical state.
+ */
+export async function inspectUnregisteredSourceIdentities(
+  root: string,
+  testOptions: SourceScanTestOptions = {},
+): Promise<SourceReviewIdentityV1[]> {
+  const config = await loadBrainConfig(root);
+  const manifest = await readManifest(root);
+  const registeredPaths = new Set(
+    manifest.sources.map((source) => source.path),
+  );
+  const identities: SourceReviewIdentityV1[] = [];
+  for (const candidate of await walkSourceFiles(
+    root,
+    effectiveSourceRoots(config.sources.roots),
+  )) {
+    if (
+      registeredPaths.has(candidate.relativePath) ||
+      candidate.relativePath.startsWith("sources/web/")
+    ) {
+      continue;
+    }
+    const inspected = await readOrdinarySource(
+      root,
+      candidate.relativePath,
+      candidate.entry,
+      config.sources.maxFileBytes,
+      testOptions,
+    );
+    identities.push({
+      path: candidate.relativePath,
+      sha256: inspected.digest,
+      bytes: inspected.bytes,
+    });
+  }
+  return identities.sort((left, right) => left.path.localeCompare(right.path));
 }

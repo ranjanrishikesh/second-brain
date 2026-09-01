@@ -4,6 +4,7 @@ The public v1 contracts are exported as Zod schemas and checked-in JSON Schema 2
 
 - `BrainConfigV1`
 - `SourceRecordV1`
+- `SourceReviewDecisionBatchV1` and `SourceReviewV1`
 - `WikiPageV1`
 - `RelationV1`
 - `ChangeSetV1`
@@ -20,6 +21,8 @@ Regenerate them with `pnpm schemas:generate`; CI rejects drift.
 ## Source identity
 
 A source ID is derived from SHA-256 content. Once registered, the bytes at that path may not change or disappear. A replacement is a new source record linked through `supersedes`, leaving both versions inspectable.
+
+Before an ordinary local source is registered, the host agent reviews its exact-byte preview against the primary scope in `BRAIN.md`. The CLI records an `agent-in-scope`, `owner-exception`, or `owner-declined` receipt for the path and SHA-256 but makes no semantic judgment. An excluded receipt leaves the owner's file untouched and outside the manifest. Changed bytes require a new decision; an owner exception applies only to the exact approved item and never changes the charter.
 
 Extracted chunks retain deterministic locators such as `page=4`, `chapter=2`, `heading=method`, `lines=10-18`, `$.results[0]`, or `row=7`. Text PDFs use page locators; DOCX documents retain semantic heading/section locators and require a separate extraction step when no usable text exists.
 Each ready source record also tracks the SHA-256 hash of its canonical extracted payload. DOCX records additionally retain versioned semantic, converted, and extracted byte measurements so a later configuration change can be enforced without trusting disposable cache metadata. Disposable cache contents must match the tracked canonical hash and current extraction policy or they are rebuilt from the immutable source before search, reading, bootstrap, or citation validation can use them.
@@ -60,7 +63,7 @@ The web-capture core API and `brain web capture` command do not search the web o
 
 Web text evidence is a complete or partial Markdown snapshot with versioned provenance frontmatter and an exact captured-body hash. A downloadable supported artifact retains its original bytes and has a hidden tracked `.<artifact>.web.json` sidecar. The sidecar records the artifact path/hash/size, original and final public URL, ordered redirect chain, retrieval time, query identity, completeness, detected format, media type, and optional supersession. The artifact and sidecar are one immutable portable pair: missing, moved, malformed, or changed companions fail integrity checks.
 
-An oversized local file discovered during source scanning is still registered with a visible failed-extraction diagnostic, so it cannot disappear silently. An oversized downloaded web artifact is rejected by the capture boundary before an artifact, sidecar, or source record is prepared. The host may report that gap or, with owner approval, retry only after an intentional policy change.
+An admitted oversized local file discovered during source scanning is registered with a visible failed-extraction diagnostic, so it cannot disappear silently. An oversized downloaded web artifact is rejected by the capture boundary before an artifact, sidecar, or source record is prepared. The host may report that gap or, with owner approval, retry only after an intentional policy change.
 
 Source provenance also carries sorted structured web discoveries. Identical compatible bytes found through another approved URL reuse the source and add a discovery without changing the sealed first-capture sidecar; changed bytes create a new superseding source. Runtime download paths, credentials, cookies, and authorization data are never canonical provenance or managed commit content. Capture links the registered source to the active runtime query and refreshes bootstrap state, but durable reuse comes from the canonical source pair, manifest, cited wiki mutation, and managed operation.
 

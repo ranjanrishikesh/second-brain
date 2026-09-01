@@ -335,7 +335,7 @@ describe("doctorBrain", () => {
     );
   });
 
-  test("distinguishes unregistered and registered-but-unusable sources", async () => {
+  test("distinguishes review-required and registered-but-unusable sources", async () => {
     const unregisteredRoot = await mkdtemp(
       path.join(tmpdir(), "brain-doctor-unregistered-"),
     );
@@ -349,7 +349,7 @@ describe("doctorBrain", () => {
     );
     expect((await doctorBrain(unregisteredRoot)).issues).toContainEqual(
       expect.objectContaining({
-        code: "SOURCES_UNREGISTERED",
+        code: "SOURCES_REVIEW_REQUIRED",
         severity: "warning",
       }),
     );

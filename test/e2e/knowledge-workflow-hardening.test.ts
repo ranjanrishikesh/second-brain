@@ -31,6 +31,7 @@ import {
   type SetupSourceContextV1,
   type WikiPageV1,
 } from "@second-brain/core";
+import { admitPendingFixtureSources } from "./source-review.js";
 
 const execFile = promisify(execFileCallback);
 const fixtureSources = path.join(
@@ -185,6 +186,7 @@ async function applyReconciledPages(
 async function completeFixtureSetup(
   root: string,
 ): Promise<SetupSourceContextV1[]> {
+  await admitPendingFixtureSources(root);
   const setup = await beginSetup(
     root,
     { purpose: "Orbital terminology and source-backed claims" },

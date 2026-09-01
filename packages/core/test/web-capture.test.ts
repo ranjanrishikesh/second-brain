@@ -36,6 +36,7 @@ import {
   writeQuerySession,
 } from "../src/index.js";
 import { runCanonicalWrite } from "../src/transaction.js";
+import { admitPendingTestSources } from "./helpers/source-review.js";
 
 const execFile = promisify(execFileCallback);
 const encoder = new TextEncoder();
@@ -267,7 +268,7 @@ describe("durable web evidence capture", () => {
     expect((await readBrainState(root)).sourceDuplicates).toEqual([]);
   });
 
-  test("resolves a local source added while capture waits for the canonical writer", async () => {
+  test("blocks a local source added while capture waits until the agent reviews it", async () => {
     const { root, queryId } = await approvedBrain("Waiting local evidence?");
     let writerEntered!: () => void;
     const writerHeld = new Promise<void>((resolve) => {
@@ -298,32 +299,32 @@ describe("durable web evidence capture", () => {
     const waiterSawWriter = new Promise<void>((resolve) => {
       waiterObserved = resolve;
     });
-    const pendingCapture = captureWebEvidence(
-      root,
-      queryId,
-      {
-        representation: "artifact",
-        originalUrl: "https://example.test/waiting-local.txt",
-        title: "Waiting local",
-        fileName: "waiting-local.txt",
-        responseComplete: true,
-        content: bytes,
-        retrievedAt: "2026-08-30T00:15:00.000Z",
+    const input = {
+      representation: "artifact" as const,
+      originalUrl: "https://example.test/waiting-local.txt",
+      title: "Waiting local",
+      fileName: "waiting-local.txt",
+      responseComplete: true as const,
+      content: bytes,
+      retrievedAt: "2026-08-30T00:15:00.000Z",
+    };
+    const pendingCapture = captureWebEvidence(root, queryId, input, {
+      beforeWriterWait: async () => {
+        await writeFile(path.join(root, localPath), bytes);
       },
-      {
-        beforeWriterWait: async () => {
-          await writeFile(path.join(root, localPath), bytes);
-        },
-        transactionTestOptions: {
-          afterWriterOwnerRead: () => waiterObserved(),
-        },
+      transactionTestOptions: {
+        afterWriterOwnerRead: () => waiterObserved(),
       },
-    );
+    });
     await waiterSawWriter;
     releaseWriter();
     await blocker;
 
-    const result = await pendingCapture;
+    await expect(pendingCapture).rejects.toThrow(
+      /source review is required.*z-waiting-local\.txt/i,
+    );
+    await admitPendingTestSources(root);
+    const result = await captureWebEvidence(root, queryId, input);
 
     expect(result.source).toMatchObject({
       path: localPath,
@@ -1529,6 +1530,7 @@ describe("durable web evidence capture", () => {
     const bytes = encoder.encode("Locally discovered before capture.\n");
     const localPath = "sources/z-local.txt";
     await writeFile(path.join(root, localPath), bytes);
+    await admitPendingTestSources(root);
     const input = {
       representation: "artifact" as const,
       originalUrl: "https://example.test/unregistered-local.txt",
@@ -1574,6 +1576,7 @@ describe("durable web evidence capture", () => {
     const { root, queryId } = await approvedBrain();
     const bytes = encoder.encode("Same bytes, different source format.\n");
     await writeFile(path.join(root, "sources", "z-local.md"), bytes);
+    await admitPendingTestSources(root);
     const manifestPath = path.join(root, ".brain", "source-manifest.json");
     const beforeManifest = await readFile(manifestPath, "utf8");
     const beforeHead = await git(root, ["rev-parse", "HEAD"]);
